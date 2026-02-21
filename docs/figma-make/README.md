@@ -17,15 +17,14 @@ This directory contains **copy-paste blocks** for Figma Make sessions. Each file
 | `01-area-profesor.md` | Professor | 82 | Content creation: summaries, flashcards, quizzes, 3D models |
 | `02-area-alumno.md` | Student | 56 | Study: notes, quizzes, spaced repetition, statistics |
 | `03-area-admin.md` | Admin/Owner | 41 | Institutions, memberships, plans, subscriptions, AI logs |
-| `04-foco-resumenes.md` | Focus: Summaries | 38 | Summary viewer/editor with chunks, keywords, flashcards |
+| `04-foco-resumenes.md` | Focus: Summaries | 70 | Summary viewer/editor with ALL children: chunks, keywords, subtopics, flashcards, quizzes, videos, notes |
 | `05-foco-estudio.md` | Focus: Study | 30 | Study sessions, FSRS, BKT, daily activities, stats |
 
 > **Note:** Blocks 01-05 already include the context from block 00, so you don't need to paste both. Just paste the one you need.
 
-## Response format distinction
+## Important behaviors documented in Context block
 
-- **Factory CRUD routes** return paginated: `{ "data": { "items": [...], "total": N, "limit": N, "offset": N } }`
-- **Custom routes** return flat arrays: `{ "data": [...] }`
-- **Single-object routes** return: `{ "data": { ... } }` or `{ "data": null }`
-
-See each block file for the complete list of which routes use which format.
+- **Response formats**: Factory CRUD returns paginated `{items, total, limit, offset}`, custom routes return flat arrays
+- **`include_deleted=true`**: Soft-delete tables hide deleted records by default. Pass this param to see them (needed before restoring)
+- **Ordering**: Tables with `order_index` sort by that; others sort by `created_at`
+- **Pagination defaults**: `limit=100, offset=0` for factory CRUD

@@ -28,6 +28,12 @@ X-Access-Token: {JWT del usuario logueado via supabase.auth}
 - Objeto unico o null: `{ "data": { ... } }` o `{ "data": null }`
   Aplica a: GET /:id, reading-states, student-stats
 
+### Paginacion y filtros globales
+- Factory CRUD LIST: soporta `?limit=N&offset=N` (default: limit=100, offset=0)
+- Tablas con soft-delete aceptan `?include_deleted=true` para mostrar registros borrados
+  (sin esto, los borrados estan ocultos por defecto — necesario para descubrir items antes de restaurar)
+- Tablas con `order_index` se ordenan por order_index ASC; las demas por created_at ASC
+
 ### Login (client-side, no es ruta del server)
 ```typescript
 import { createClient } from '@supabase/supabase-js';
@@ -89,31 +95,31 @@ Keywords -> Subtopics, Keyword Connections, Notas del profesor, Notas del alumno
 
 ## RUTAS DEL API — FOCO: RESUMENES
 
-Este bloque cubre solo lo necesario para construir la experiencia de resumenes:
-profesor crea/edita, alumno lee/anota/estudia.
+Este bloque cubre TODO lo necesario para construir la experiencia de resumenes:
+profesor crea/edita contenido, alumno lee/anota/estudia.
 
-### Summary (el resumen principal)
+### Summary (el resumen principal) — ordena por order_index
 ```
 GET    /summaries?topic_id=xxx
 GET    /summaries/:id
 POST   /summaries   { topic_id, title, content_markdown?, status?, order_index? }
 PUT    /summaries/:id   { title?, content_markdown?, status?, order_index?, is_active? }
-DELETE /summaries/:id   → soft-delete
+DELETE /summaries/:id   → soft-delete (sets deleted_at + is_active=false)
 PUT    /summaries/:id/restore
 ```
 status puede ser: "draft", "published", etc. (string libre)
 
-### Chunks (bloques del resumen, ordenables)
+### Chunks (bloques del resumen) — ordena por order_index
 ```
 GET    /chunks?summary_id=xxx
 GET    /chunks/:id
 POST   /chunks   { summary_id, content, order_index?, metadata? }
 PUT    /chunks/:id   { content?, order_index?, metadata? }
-DELETE /chunks/:id
+DELETE /chunks/:id   → hard delete
 ```
 metadata es un JSON libre (puede tener tipo de bloque, etc.)
 
-### Keywords (conceptos clave del resumen)
+### Keywords (conceptos clave del resumen) — ordena por created_at
 ```
 GET    /keywords?summary_id=xxx
 GET    /keywords/:id
@@ -123,15 +129,35 @@ DELETE /keywords/:id   → soft-delete
 PUT    /keywords/:id/restore
 ```
 
-### Keyword Connections
+### Subtopics (hijos de keywords) — ordena por order_index, SACRED
+```
+GET    /subtopics?keyword_id=xxx
+GET    /subtopics/:id
+POST   /subtopics   { keyword_id, name, order_index? }
+PUT    /subtopics/:id   { name?, order_index?, is_active? }
+DELETE /subtopics/:id   → soft-delete
+PUT    /subtopics/:id/restore
+```
+
+### Keyword Connections (relaciones entre keywords)
 ```
 GET    /keyword-connections?keyword_id=xxx
 GET    /keyword-connections/:id
 POST   /keyword-connections   { keyword_a_id, keyword_b_id, relationship? }
-DELETE /keyword-connections/:id
+       → orden canonico (a < b) se aplica automaticamente
+DELETE /keyword-connections/:id   → hard delete
 ```
 
-### Flashcards (creadas por profesor, estudiadas por alumno)
+### Notas del Profesor sobre Keywords (upsert)
+```
+GET    /kw-prof-notes?keyword_id=xxx
+GET    /kw-prof-notes/:id
+POST   /kw-prof-notes   { keyword_id, note }
+       → upsert: una nota por profesor+keyword
+DELETE /kw-prof-notes/:id
+```
+
+### Flashcards (creadas por profesor, estudiadas por alumno) — ordena por created_at
 ```
 GET    /flashcards?summary_id=xxx&keyword_id=xxx(op)
 GET    /flashcards/:id
@@ -141,9 +167,9 @@ DELETE /flashcards/:id   → soft-delete
 PUT    /flashcards/:id/restore
 ```
 
-### Quiz Questions
+### Quiz Questions — ordena por created_at
 ```
-GET    /quiz-questions?summary_id=xxx&keyword_id=xxx(op)
+GET    /quiz-questions?summary_id=xxx&keyword_id=xxx(op)&question_type=xxx(op)&difficulty=xxx(op)
 GET    /quiz-questions/:id
 POST   /quiz-questions   { summary_id, keyword_id, question_type, question, correct_answer, options?, explanation?, difficulty?, source? }
 PUT    /quiz-questions/:id   { question_type?, question?, options?, correct_answer?, explanation?, difficulty?, source?, is_active? }
@@ -151,30 +177,55 @@ DELETE /quiz-questions/:id   → soft-delete
 PUT    /quiz-questions/:id/restore
 ```
 
-### Notas del alumno (privadas, soft-delete)
+### Videos (requiere summary_id) — ordena por order_index, SACRED
+```
+GET    /videos?summary_id=xxx
+GET    /videos/:id
+POST   /videos   { summary_id, title, url, platform?, duration_seconds?, order_index? }
+PUT    /videos/:id   { title?, url?, platform?, duration_seconds?, order_index?, is_active? }
+DELETE /videos/:id   → soft-delete
+PUT    /videos/:id/restore
+```
+
+### Notas del alumno en keywords (privadas, scopeToUser)
 ```
 GET    /kw-student-notes?keyword_id=xxx
 GET    /kw-student-notes/:id
 POST   /kw-student-notes   { keyword_id, note }
 PUT    /kw-student-notes/:id   { note? }
-DELETE /kw-student-notes/:id   → soft-delete
+DELETE /kw-student-notes/:id   → soft-delete (deleted_at only, sin is_active)
 PUT    /kw-student-notes/:id/restore
+```
 
+### Anotaciones de texto en resumenes (scopeToUser)
+```
 GET    /text-annotations?summary_id=xxx
 GET    /text-annotations/:id
 POST   /text-annotations   { summary_id, start_offset, end_offset, color?, note? }
 PUT    /text-annotations/:id   { color?, note? }
-DELETE /text-annotations/:id   → soft-delete
+DELETE /text-annotations/:id   → soft-delete (deleted_at only, sin is_active)
 PUT    /text-annotations/:id/restore
 ```
 
-### Reading State (progreso de lectura)
+### Notas en videos con timestamp (scopeToUser)
 ```
-GET    /reading-states?summary_id=xxx
+GET    /video-notes?video_id=xxx
+GET    /video-notes/:id
+POST   /video-notes   { video_id, timestamp_seconds?, note }
+PUT    /video-notes/:id   { timestamp_seconds?, note? }
+DELETE /video-notes/:id   → soft-delete (deleted_at only, sin is_active)
+PUT    /video-notes/:id/restore
+```
+
+### Reading State (upsert — una por alumno+summary)
+```
+GET    /reading-states?summary_id=xxx   → devuelve null si nunca leyo
 POST   /reading-states   { summary_id, scroll_position?, time_spent_seconds?, completed?, last_read_at? }
+       → upsert automatico por student_id+summary_id
 ```
 
 ### Reordenar
 ```
-PUT /reorder   { table: "chunks"|"summaries", items: [{ id, order_index }] }
+PUT /reorder   { table: "chunks"|"summaries"|"subtopics"|"videos", items: [{ id, order_index }] }
 ```
+Maximo 200 items por llamada.
