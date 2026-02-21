@@ -28,6 +28,12 @@ X-Access-Token: {JWT del usuario logueado via supabase.auth}
 - Objeto unico o null: `{ "data": { ... } }` o `{ "data": null }`
   Aplica a: GET /:id, reading-states, student-stats
 
+### Paginacion y filtros globales
+- Factory CRUD LIST: soporta `?limit=N&offset=N` (default: limit=100, offset=0)
+- Tablas con soft-delete aceptan `?include_deleted=true` para mostrar registros borrados
+  (sin esto, los borrados estan ocultos por defecto — necesario para descubrir items antes de restaurar)
+- Tablas con `order_index` se ordenan por order_index ASC; las demas por created_at ASC
+
 ### Login (client-side, no es ruta del server)
 ```typescript
 import { createClient } from '@supabase/supabase-js';
