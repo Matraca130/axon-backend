@@ -3,7 +3,8 @@
  *
  * Professor-created learning instruments (CRUD via factory):
  *   flashcards      — keyword + summary scoped, soft-delete
- *   quiz_questions   — keyword + summary scoped, soft-delete
+ *   quizzes         — summary scoped, soft-delete (container for quiz questions)
+ *   quiz_questions   — keyword + summary scoped, soft-delete, subtopic + quiz linked
  *   videos          — summary scoped, soft-delete, orderable
  *
  * Student-owned notes (CRUD via factory with scopeToUser):
@@ -27,28 +28,49 @@ const studentRoutes = new Hono();
 // 1. Flashcards — Keyword + Summary -> Flashcard (SACRED, soft-delete)
 //    LIST requires summary_id. Optional filter by keyword_id.
 //    CREATE requires both keyword_id and summary_id (via parentKey + requiredFields).
+//    subtopic_id is optional (NULLABLE) — used by BKT algorithm (EV-5).
 registerCrud(studentRoutes, {
   table: "flashcards",
   slug: "flashcards",
   parentKey: "summary_id",
-  optionalFilters: ["keyword_id"],
+  optionalFilters: ["keyword_id", "subtopic_id"],
   hasCreatedBy: true,
   hasUpdatedAt: true,
   hasOrderIndex: false,
   softDelete: true,
   hasIsActive: true,
   requiredFields: ["keyword_id", "front", "back"],
-  createFields: ["keyword_id", "front", "back", "source"],
-  updateFields: ["front", "back", "source", "is_active"],
+  createFields: ["keyword_id", "subtopic_id", "front", "back", "source"],
+  updateFields: ["front", "back", "subtopic_id", "source", "is_active"],
 });
 
-// 2. Quiz Questions — Keyword + Summary -> QuizQuestion (SACRED, soft-delete)
-//    LIST requires summary_id. Optional filter by keyword_id.
+// 2. Quizzes — Summary -> Quiz (SACRED, soft-delete)
+//    Container for quiz questions. LIST requires summary_id.
+//    CREATE requires title. source defaults to "manual".
+registerCrud(studentRoutes, {
+  table: "quizzes",
+  slug: "quizzes",
+  parentKey: "summary_id",
+  hasCreatedBy: true,
+  hasUpdatedAt: true,
+  hasOrderIndex: false,
+  softDelete: true,
+  hasIsActive: true,
+  requiredFields: ["title"],
+  createFields: ["title", "description", "source"],
+  updateFields: ["title", "description", "source", "is_active"],
+});
+
+// 3. Quiz Questions — Keyword + Summary -> QuizQuestion (SACRED, soft-delete)
+//    LIST requires summary_id. Optional filters: keyword_id, question_type,
+//    difficulty, subtopic_id (for BKT), quiz_id (to get questions of a quiz).
+//    subtopic_id links question to BKT algorithm (EV-5).
+//    quiz_id links question to its parent quiz container.
 registerCrud(studentRoutes, {
   table: "quiz_questions",
   slug: "quiz-questions",
   parentKey: "summary_id",
-  optionalFilters: ["keyword_id", "question_type", "difficulty"],
+  optionalFilters: ["keyword_id", "question_type", "difficulty", "subtopic_id", "quiz_id"],
   hasCreatedBy: true,
   hasUpdatedAt: true,
   hasOrderIndex: false,
@@ -64,6 +86,8 @@ registerCrud(studentRoutes, {
     "explanation",
     "difficulty",
     "source",
+    "subtopic_id",
+    "quiz_id",
   ],
   updateFields: [
     "question_type",
@@ -74,10 +98,12 @@ registerCrud(studentRoutes, {
     "difficulty",
     "source",
     "is_active",
+    "subtopic_id",
+    "quiz_id",
   ],
 });
 
-// 3. Videos — Summary -> Video (SACRED, soft-delete, orderable)
+// 4. Videos — Summary -> Video (SACRED, soft-delete, orderable)
 registerCrud(studentRoutes, {
   table: "videos",
   slug: "videos",
@@ -104,7 +130,7 @@ registerCrud(studentRoutes, {
 // scopeToUser = "student_id" → auto-set on create, auto-filtered on list/update/delete
 // ═════════════════════════════════════════════════════════════════════
 
-// 4. Keyword Student Notes — per-keyword personal notes
+// 5. Keyword Student Notes — per-keyword personal notes
 //    Has deleted_at but NO is_active column.
 registerCrud(studentRoutes, {
   table: "kw_student_notes",
@@ -121,7 +147,7 @@ registerCrud(studentRoutes, {
   updateFields: ["note"],
 });
 
-// 5. Text Annotations — highlights + notes on summaries
+// 6. Text Annotations — highlights + notes on summaries
 //    Has deleted_at but NO is_active column.
 registerCrud(studentRoutes, {
   table: "text_annotations",
@@ -138,7 +164,7 @@ registerCrud(studentRoutes, {
   updateFields: ["color", "note"],
 });
 
-// 6. Video Notes — timestamped notes on videos
+// 7. Video Notes — timestamped notes on videos
 //    Has deleted_at but NO is_active column.
 registerCrud(studentRoutes, {
   table: "video_notes",
