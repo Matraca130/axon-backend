@@ -19,6 +19,8 @@
  *   routes-plans    → /platform-plans, /institution-plans,
  *                     /plan-access-rules, /institution-subscriptions,
  *                     /ai-generations, /summary-diagnostics
+ *   routes-billing  → /billing/checkout-session, /billing/portal-session,
+ *                     /billing/subscription-status, /webhooks/stripe
  *   index (inline)  → /health
  */
 
@@ -35,6 +37,7 @@ import { studentRoutes } from "./routes-student.tsx";
 import { studyRoutes } from "./routes-study.tsx";
 import { modelRoutes } from "./routes-models.tsx";
 import { planRoutes } from "./routes-plans.tsx";
+import { billingRoutes } from "./routes-billing.tsx";
 
 const app = new Hono();
 
@@ -74,6 +77,7 @@ app.route("/", studentRoutes);
 app.route("/", studyRoutes);
 app.route("/", modelRoutes);
 app.route("/", planRoutes);
+app.route("/", billingRoutes);
 
 // ─── Start Server ─────────────────────────────────────────────────────
 

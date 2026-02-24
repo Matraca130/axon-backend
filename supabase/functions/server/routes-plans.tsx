@@ -60,10 +60,12 @@ registerCrud(planRoutes, {
 });
 
 // 2. Institution Plans — institution-specific pricing tiers
+//    New billing columns (EV-12): stripe IDs, trial, features, currency, sort_order
 registerCrud(planRoutes, {
   table: "institution_plans",
   slug: "institution-plans",
   parentKey: "institution_id",
+  optionalFilters: ["is_free", "is_active"],
   hasCreatedBy: false,
   hasUpdatedAt: true,
   hasOrderIndex: false,
@@ -74,6 +76,13 @@ registerCrud(planRoutes, {
     "price_cents",
     "billing_cycle",
     "is_default",
+    "is_free",
+    "trial_days",
+    "features",
+    "sort_order",
+    "currency",
+    "stripe_product_id",
+    "stripe_price_id",
   ],
   updateFields: [
     "name",
@@ -82,6 +91,13 @@ registerCrud(planRoutes, {
     "billing_cycle",
     "is_default",
     "is_active",
+    "is_free",
+    "trial_days",
+    "features",
+    "sort_order",
+    "currency",
+    "stripe_product_id",
+    "stripe_price_id",
   ],
 });
 
@@ -99,25 +115,39 @@ registerCrud(planRoutes, {
 });
 
 // 4. Institution Subscriptions — active subscription records
+//    New Stripe columns (EV-12): stripe IDs, user_id, trial dates, cancellation
 registerCrud(planRoutes, {
   table: "institution_subscriptions",
   slug: "institution-subscriptions",
   parentKey: "institution_id",
+  optionalFilters: ["status", "user_id"],
   hasCreatedBy: false,
   hasUpdatedAt: true,
   hasOrderIndex: false,
-  requiredFields: ["plan_id"],
+  requiredFields: ["plan_id", "user_id"],
   createFields: [
     "plan_id",
+    "user_id",
     "status",
     "current_period_start",
     "current_period_end",
+    "stripe_subscription_id",
+    "stripe_customer_id",
+    "trial_start",
+    "trial_end",
+    "cancel_at_period_end",
   ],
   updateFields: [
     "plan_id",
     "status",
     "current_period_start",
     "current_period_end",
+    "stripe_subscription_id",
+    "stripe_customer_id",
+    "trial_start",
+    "trial_end",
+    "cancel_at_period_end",
+    "canceled_at",
   ],
 });
 
