@@ -304,4 +304,140 @@ planRoutes.post(diagBase, async (c: Context) => {
   return ok(c, data, 201);
 });
 
+// ═════════════════════════════════════════════════════════════════════
+// EV-13: COMPUTED ROUTES — Content Access + Usage Today
+// ═════════════════════════════════════════════════════════════════════
+
+// ── GET /content-access?user_id=xxx&institution_id=yyy ────────────────
+// Resolves what content a user can see based on their subscription plan.
+// Returns: { access: "full"|"restricted"|"none", rules: [...], plan_name, features }
+planRoutes.get(`${PREFIX}/content-access`, async (c: Context) => {
+  const auth = await authenticate(c);
+  if (auth instanceof Response) return auth;
+  const { user, db } = auth;
+
+  const userId = c.req.query("user_id");
+  const institutionId = c.req.query("institution_id");
+
+  if (!isUuid(userId)) return err(c, "user_id must be a valid UUID", 400);
+  if (!isUuid(institutionId)) return err(c, "institution_id must be a valid UUID", 400);
+
+  // Only the user themselves or owner/admin of the institution can query
+  // (RLS on institution_subscriptions enforces this at DB level)
+
+  // 1. Get active subscription
+  const { data: sub, error: subErr } = await db
+    .from("institution_subscriptions")
+    .select("id, plan_id, status, current_period_end")
+    .eq("user_id", userId)
+    .eq("institution_id", institutionId)
+    .in("status", ["active", "trialing"])
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (subErr) return err(c, `Subscription lookup failed: ${subErr.message}`, 500);
+
+  // 2. No subscription → access: none
+  if (!sub) {
+    return ok(c, { access: "none", rules: [], plan_name: null, features: null });
+  }
+
+  // 3. Check expiry (lazy expiry)
+  if (sub.current_period_end && new Date(sub.current_period_end) < new Date()) {
+    // Mark as expired
+    await db
+      .from("institution_subscriptions")
+      .update({ status: "expired" })
+      .eq("id", sub.id);
+    return ok(c, { access: "none", rules: [], plan_name: null, features: null });
+  }
+
+  // 4. Get plan features
+  const { data: plan, error: planErr } = await db
+    .from("institution_plans")
+    .select("name, features")
+    .eq("id", sub.plan_id)
+    .single();
+
+  if (planErr || !plan) return err(c, "Plan not found", 404);
+
+  const features = (plan.features as Record<string, unknown>) ?? {};
+  const contentGating = features.content_gating as string | undefined;
+
+  // 5. Full access plan
+  if (!contentGating || contentGating === "full") {
+    return ok(c, { access: "full", rules: [], plan_name: plan.name, features });
+  }
+
+  // 6. Restricted plan — fetch access rules
+  const { data: rules, error: rulesErr } = await db
+    .from("plan_access_rules")
+    .select("scope_type, scope_id")
+    .eq("plan_id", sub.plan_id);
+
+  if (rulesErr) return err(c, `Rules lookup failed: ${rulesErr.message}`, 500);
+
+  return ok(c, {
+    access: "restricted",
+    rules: rules ?? [],
+    plan_name: plan.name,
+    features,
+  });
+});
+
+// ── GET /usage-today?user_id=xxx&institution_id=yyy ───────────────────
+// Returns daily usage counts for limit enforcement.
+// Response: { date, quizzes_taken, flashcard_reviews, ai_generations }
+planRoutes.get(`${PREFIX}/usage-today`, async (c: Context) => {
+  const auth = await authenticate(c);
+  if (auth instanceof Response) return auth;
+  const { db } = auth;
+
+  const userId = c.req.query("user_id");
+  const institutionId = c.req.query("institution_id");
+
+  if (!isUuid(userId)) return err(c, "user_id must be a valid UUID", 400);
+  if (!isUuid(institutionId)) return err(c, "institution_id must be a valid UUID", 400);
+
+  // today in UTC as YYYY-MM-DD
+  const today = new Date().toISOString().split("T")[0];
+
+  // Run 3 counts in parallel
+  const [quizRes, flashRes, aiRes] = await Promise.all([
+    // quiz_attempts: student_id + DATE(created_at) = today
+    db
+      .from("quiz_attempts")
+      .select("id", { count: "exact", head: true })
+      .eq("student_id", userId)
+      .gte("created_at", `${today}T00:00:00Z`)
+      .lt("created_at", `${today}T23:59:59Z`),
+
+    // reviews: student_id + instrument_type = flashcard + DATE(created_at) = today
+    // Note: reviews has no student_id directly — use study_sessions join via session_id
+    // Simpler: use daily_activities which already aggregates this
+    db
+      .from("daily_activities")
+      .select("reviews_count")
+      .eq("student_id", userId)
+      .eq("activity_date", today)
+      .maybeSingle(),
+
+    // ai_generations: requested_by + DATE(created_at) = today
+    db
+      .from("ai_generations")
+      .select("id", { count: "exact", head: true })
+      .eq("requested_by", userId)
+      .gte("created_at", `${today}T00:00:00Z`)
+      .lt("created_at", `${today}T23:59:59Z`),
+  ]);
+
+  return ok(c, {
+    date: today,
+    quizzes_taken: quizRes.count ?? 0,
+    flashcard_reviews: flashRes.data?.reviews_count ?? 0,
+    ai_generations: aiRes.count ?? 0,
+  });
+});
+
 export { planRoutes };
