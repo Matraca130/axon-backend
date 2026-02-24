@@ -483,4 +483,3 @@ muxRoutes.delete(`${PREFIX}/mux/asset/:video_id`, async (c: Context) => {
   return ok(c, { deleted: videoId });
 });
 
-export { muxRoutes };
