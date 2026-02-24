@@ -327,7 +327,7 @@ memberRoutes.post(memBase, async (c: Context) => {
     return err(c, "user_id and institution_id must be strings", 400);
   }
 
-  const validRoles = ["student", "professor", "owner"];
+  const validRoles = ["student", "professor", "admin", "owner"];
   if (typeof role !== "string" || !validRoles.includes(role)) {
     return err(c, `role must be one of: ${validRoles.join(", ")}`, 400);
   }
@@ -377,7 +377,7 @@ memberRoutes.put(`${memBase}/:id`, async (c: Context) => {
 
   // Validate role if provided
   if (typeof patch.role === "string") {
-    const validRoles = ["student", "professor", "owner"];
+    const validRoles = ["student", "professor", "admin", "owner"];
     if (!validRoles.includes(patch.role as string)) {
       return err(c, `role must be one of: ${validRoles.join(", ")}`, 400);
     }

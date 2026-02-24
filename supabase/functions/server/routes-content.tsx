@@ -72,7 +72,7 @@ function filterActiveTree(courses: Record<string, unknown>[]): Record<string, un
 
 // ─── Register Content CRUD ──────────────────────────────────────────
 
-// 1. Courses — Institution -> Course
+// 1. Courses — Institution -> Course (soft-delete: sets deleted_at + is_active=false)
 registerCrud(content, {
   table: "courses",
   slug: "courses",
@@ -80,12 +80,14 @@ registerCrud(content, {
   hasCreatedBy: true,
   hasUpdatedAt: true,
   hasOrderIndex: true,
+  softDelete: true,
+  hasIsActive: true,
   requiredFields: ["name"],
   createFields: ["name", "description", "order_index"],
   updateFields: ["name", "description", "order_index", "is_active"],
 });
 
-// 2. Semesters — Course -> Semester
+// 2. Semesters — Course -> Semester (soft-delete: sets deleted_at + is_active=false)
 registerCrud(content, {
   table: "semesters",
   slug: "semesters",
@@ -93,12 +95,14 @@ registerCrud(content, {
   hasCreatedBy: true,
   hasUpdatedAt: true,
   hasOrderIndex: true,
+  softDelete: true,
+  hasIsActive: true,
   requiredFields: ["name"],
   createFields: ["name", "order_index"],
   updateFields: ["name", "order_index", "is_active"],
 });
 
-// 3. Sections — Semester -> Section
+// 3. Sections — Semester -> Section (soft-delete: sets deleted_at + is_active=false)
 registerCrud(content, {
   table: "sections",
   slug: "sections",
@@ -106,12 +110,14 @@ registerCrud(content, {
   hasCreatedBy: true,
   hasUpdatedAt: true,
   hasOrderIndex: true,
+  softDelete: true,
+  hasIsActive: true,
   requiredFields: ["name"],
   createFields: ["name", "order_index"],
   updateFields: ["name", "order_index", "is_active"],
 });
 
-// 4. Topics — Section -> Topic
+// 4. Topics — Section -> Topic (soft-delete: sets deleted_at + is_active=false)
 registerCrud(content, {
   table: "topics",
   slug: "topics",
@@ -119,6 +125,8 @@ registerCrud(content, {
   hasCreatedBy: true,
   hasUpdatedAt: true,
   hasOrderIndex: true,
+  softDelete: true,
+  hasIsActive: true,
   requiredFields: ["name"],
   createFields: ["name", "order_index"],
   updateFields: ["name", "order_index", "is_active"],
