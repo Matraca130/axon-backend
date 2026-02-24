@@ -9,7 +9,7 @@
  *   routes-members  → /institutions, /memberships, /admin-scopes
  *   routes-content  → /courses .. /subtopics, /keyword-connections,
  *                     /kw-prof-notes, /reorder, /content-tree
- *   routes-student  → /flashcards, /quiz-questions, /videos,
+ *   routes-student  → /flashcards, /quizzes, /quiz-questions, /videos,
  *                     /kw-student-notes, /text-annotations, /video-notes
  *   routes-study    → /study-sessions, /study-plans, /study-plan-tasks,
  *                     /reviews, /quiz-attempts, /reading-states,
