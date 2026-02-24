@@ -58,31 +58,45 @@ Há uma divergência crítica entre o backend real e o de prototipagem:
 - **Backend Real (`axon-backend`):** As rotas existentes (`/ai-generations`, `/summary-diagnostics`) são apenas para **auditoria e log**. Elas registram que uma geração de IA ocorreu, mas não realizam a geração em si.
 - **Backend de Prototipagem (`sseki-frontend`):** O frontend contém seu próprio mini-backend (`/supabase/functions/server/gemini.tsx`) que implementa as rotas de geração (`/ai/chat`, `/ai/flashcards`, etc.), provavelmente chamando um serviço como o Gemini diretamente.
 
-## 5. Gaps Críticos e Inconsistências (Resumo)
+## 5. Gaps Críticos e Inconsistências (Status: CORRIGIDOS)
 
-As investigações revelaram 3 gaps principais que impedem a implementação de certos EVs.
+**Data da Correção:** 23 de Fevereiro de 2026
+**Commit da Correção:** `b5fc7f5`
 
-### 🔴 GAP 1: `subtopic_id` e `quiz_id` Ignorados pela API
+Os 3 gaps identificados foram corrigidos. A seguir, o resumo do que foi feito:
 
-- **Problema:** As colunas `subtopic_id` e `quiz_id` existem nas tabelas `flashcards` e `quiz_questions`, mas não estão incluídas nos `createFields` da fábrica de CRUD no arquivo `routes-student.tsx`.
-- **Impacto:**
-    - **EV-5 (BKT por Subtopic):** Impossível de implementar. O sistema BKT depende de saber qual `subtopic_id` uma `quiz_question` representa para atualizar o `bkt_state` correto. Sem isso, o algoritmo não funciona.
-    - **Agrupamento de Quizzes:** Impossível vincular uma `quiz_question` a um `quiz` pai.
-- **Correção:** Adicionar `"subtopic_id"` e `"quiz_id"` aos arrays `createFields` e `updateFields` correspondentes em `routes-student.tsx`.
+### ✅ GAP 1 CORRIGIDO: `subtopic_id` e `quiz_id` Ignorados pela API
 
-### 🔴 GAP 2: Tabela `quizzes` Inacessível via API
+- **Correção Aplicada:** `subtopic_id` e `quiz_id` foram adicionados aos `createFields`, `updateFields` e `optionalFilters` de `flashcards` e `quiz_questions` no arquivo `routes-student.tsx`.
+- **Impacto:** O EV-5 (BKT) e o agrupamento de quizzes agora são possíveis via API.
 
-- **Problema:** A tabela `quizzes` existe no banco de dados, mas não há nenhuma rota CRUD (`/quizzes`) exposta no backend.
-- **Impacto:** O fluxo de "criar um quiz → adicionar perguntas a ele" (parte do EV-3) é impossível. As perguntas de quiz existem de forma isolada, sem um contêiner que as agrupe.
-- **Correção:** Adicionar um novo `registerCrud` para a tabela `quizzes` em `routes-student.tsx` ou `routes-content.tsx`.
+### ✅ GAP 2 CORRIGIDO: Tabela `quizzes` Inacessível via API
 
-### 🔴 GAP 3: Rotas de Geração de IA Descentralizadas
+- **Correção Aplicada:** Uma nova rota CRUD para `/quizzes` foi registrada em `routes-student.tsx` usando a `crud-factory`.
+- **Impacto:** O fluxo completo de criar um quiz e adicionar perguntas a ele (EV-3) está desbloqueado.
+
+### 🔴 GAP 3 PENDENTE: Rotas de Geração de IA Descentralizadas
 
 - **Problema:** A lógica de geração de conteúdo por IA (chat, flashcards, etc.) não reside no backend principal, mas sim em um backend de prototipagem dentro do próprio repositório do frontend.
 - **Impacto:** O EV-6 (IA) não pode ser implementado de forma escalável e segura. A arquitetura atual cria uma dependência indesejada e dificulta a gestão de chaves de API e o monitoramento.
 - **Correção:** Migrar a lógica de `gemini.tsx` (do `sseki-frontend`) para um novo módulo de rotas (ex: `routes-ai.tsx`) dentro do backend principal (`axon-backend`).
 
-## 6. Conclusão Geral
+## 6. Dívida Técnica e Pontos de Atenção
+
+### 6.1. URL da Edge Function
+
+- **URL Correta:** `https://xdnciktarvxyhkrokbng.supabase.co/functions/v1/server`
+- **Contexto:** O prefixo `/make-server-6569f786` é específico do ambiente de desenvolvimento do Figma Make e **não deve** ser usado para o backend principal. O nome da Edge Function é `server` e o `PREFIX` no código é vazio, resultando na URL correta acima.
+
+### 6.2. Row-Level Security (RLS)
+
+- **Estado Atual:** As tabelas `flashcards`, `quiz_questions` e `quizzes` têm RLS **desabilitado** (`relrowsecurity = false`).
+- **Afirmação Incorreta Corrigida:** A análise anterior sugeriu que `flashcards` e `quiz_questions` funcionavam por terem policies de RLS. A verificação direta no banco de dados provou que isso estava incorreto; elas funcionam porque RLS está desativado para elas.
+- **Dívida Técnica:** Com RLS desabilitado, a segurança depende exclusivamente da lógica do backend. Embora o `getUserClient` atual funcione, isso significa que um usuário mal-intencionado com a `anon_key` poderia, teoricamente, acessar ou modificar dados de outros usuários se encontrasse uma falha na lógica do backend. Para um ambiente de produção, o ideal é **habilitar RLS** em todas as tabelas e criar `policies` explícitas que restrinjam o acesso (ex: `USING (created_by = auth.uid())`).
+
+---
+
+## 7. Conclusão Geral
 
 O backend do Axon é bem estruturado, maduro e consistente, com um uso inteligente da fábrica de CRUD para acelerar o desenvolvimento. A maioria das funcionalidades está implementada e alinhada com as necessidades do frontend.
 
