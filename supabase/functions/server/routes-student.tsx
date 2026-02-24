@@ -44,6 +44,7 @@ registerCrud(studentRoutes, {
 
 // 2. Quiz Questions — Keyword + Summary -> QuizQuestion (SACRED, soft-delete)
 //    LIST requires summary_id. Optional filter by keyword_id.
+//    quiz_id is OPTIONAL on create (loose questions allowed; quiz_id in createFields not requiredFields).
 registerCrud(studentRoutes, {
   table: "quiz_questions",
   slug: "quiz-questions",
@@ -54,7 +55,7 @@ registerCrud(studentRoutes, {
   hasOrderIndex: false,
   softDelete: true,
   hasIsActive: true,
-  requiredFields: ["quiz_id", "keyword_id", "question_type", "question", "correct_answer"],
+  requiredFields: ["keyword_id", "question_type", "question", "correct_answer"],
   createFields: [
     "keyword_id",
     "subtopic_id",
