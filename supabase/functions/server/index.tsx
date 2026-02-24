@@ -21,6 +21,8 @@
  *                     /ai-generations, /summary-diagnostics
  *   routes-billing  → /billing/checkout-session, /billing/portal-session,
  *                     /billing/subscription-status, /webhooks/stripe
+ *   routes-mux      → /mux/create-upload, /webhooks/mux, /mux/playback-token,
+ *                     /mux/track-view, /mux/video-stats, /mux/asset/:id
  *   index (inline)  → /health
  */
 
@@ -38,6 +40,7 @@ import { studyRoutes } from "./routes-study.tsx";
 import { modelRoutes } from "./routes-models.tsx";
 import { planRoutes } from "./routes-plans.tsx";
 import { billingRoutes } from "./routes-billing.tsx";
+import { muxRoutes } from "./routes-mux.ts";
 
 const app = new Hono();
 
@@ -78,6 +81,7 @@ app.route("/", studyRoutes);
 app.route("/", modelRoutes);
 app.route("/", planRoutes);
 app.route("/", billingRoutes);
+app.route("/", muxRoutes);
 
 // ─── Start Server ─────────────────────────────────────────────────────
 
