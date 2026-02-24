@@ -23,6 +23,7 @@
  *                     /billing/subscription-status, /webhooks/stripe
  *   routes-mux      → /mux/create-upload, /webhooks/mux, /mux/playback-token,
  *                     /mux/track-view, /mux/video-stats, /mux/asset/:id
+ *   routes-search   → /search, /trash, /restore/:table/:id
  *   index (inline)  → /health
  */
 
@@ -41,6 +42,7 @@ import { modelRoutes } from "./routes-models.tsx";
 import { planRoutes } from "./routes-plans.tsx";
 import { billingRoutes } from "./routes-billing.tsx";
 import { muxRoutes } from "./routes-mux.ts";
+import { searchRoutes } from "./routes-search.ts";
 
 const app = new Hono();
 
@@ -82,6 +84,7 @@ app.route("/", modelRoutes);
 app.route("/", planRoutes);
 app.route("/", billingRoutes);
 app.route("/", muxRoutes);
+app.route("/", searchRoutes);
 
 // ─── Start Server ─────────────────────────────────────────────────────
 
