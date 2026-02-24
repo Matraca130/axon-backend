@@ -54,7 +54,7 @@ registerCrud(studentRoutes, {
   hasOrderIndex: false,
   softDelete: true,
   hasIsActive: true,
-  requiredFields: ["keyword_id", "question_type", "question", "correct_answer"],
+  requiredFields: ["quiz_id", "keyword_id", "question_type", "question", "correct_answer"],
   createFields: [
     "keyword_id",
     "subtopic_id",
@@ -82,17 +82,20 @@ registerCrud(studentRoutes, {
 });
 
 // 2b. Quizzes — Summary -> Quiz (CRUD, soft-delete)
+//    LIST requires summary_id. Optional filter by source, is_active.
+//    created_by auto-set via hasCreatedBy. source is REQUIRED.
 registerCrud(studentRoutes, {
   table: "quizzes",
   slug: "quizzes",
   parentKey: "summary_id",
+  optionalFilters: ["source", "is_active"],
   hasCreatedBy: true,
   hasUpdatedAt: true,
   hasOrderIndex: false,
   softDelete: true,
   hasIsActive: true,
-  requiredFields: ["title"],
-  createFields: ["title", "description"],
+  requiredFields: ["title", "source"],
+  createFields: ["title", "description", "source"],
   updateFields: ["title", "description", "is_active"],
 });
 
