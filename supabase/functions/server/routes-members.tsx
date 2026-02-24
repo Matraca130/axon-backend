@@ -37,13 +37,13 @@ import type { Context } from "npm:hono";
 
 const memberRoutes = new Hono();
 
-// ═════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
 // INSTITUTIONS
-// ═════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
 
 const instBase = `${PREFIX}/institutions`;
 
-// ── POST /institutions ────────────────────────────────────────────
+// ── POST /institutions ────────────────────────────────────────────────
 // Creates institution + owner membership atomically.
 // Uses admin client to bypass RLS chicken-and-egg: you can't have a
 // membership before the institution exists.
@@ -125,7 +125,7 @@ memberRoutes.post(instBase, async (c: Context) => {
   return ok(c, institution, 201);
 });
 
-// ── GET /institutions ─────────────────────────────────────────────
+// ── GET /institutions ─────────────────────────────────────────────────
 // List institutions where the current user has an active membership.
 // Uses PostgREST embedding: memberships -> institutions.
 
@@ -167,7 +167,7 @@ memberRoutes.get(instBase, async (c: Context) => {
   return ok(c, institutions);
 });
 
-// ── GET /institutions/:id ─────────────────────────────────────────
+// ── GET /institutions/:id ─────────────────────────────────────────────
 memberRoutes.get(`${instBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -186,7 +186,7 @@ memberRoutes.get(`${instBase}/:id`, async (c: Context) => {
   return ok(c, data);
 });
 
-// ── PUT /institutions/:id ─────────────────────────────────────────
+// ── PUT /institutions/:id ─────────────────────────────────────────────
 // Allowed fields: name, slug, logo_url, settings, is_active
 // RLS should restrict to owner/admin.
 
@@ -232,7 +232,7 @@ memberRoutes.put(`${instBase}/:id`, async (c: Context) => {
   return ok(c, data);
 });
 
-// ── DELETE /institutions/:id ──────────────────────────────────────
+// ── DELETE /institutions/:id ──────────────────────────────────────────
 // Soft-deactivate: sets is_active = false.
 
 memberRoutes.delete(`${instBase}/:id`, async (c: Context) => {
@@ -260,13 +260,13 @@ memberRoutes.delete(`${instBase}/:id`, async (c: Context) => {
   return ok(c, data);
 });
 
-// ═════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
 // MEMBERSHIPS
-// ═════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
 
 const memBase = `${PREFIX}/memberships`;
 
-// ── GET /memberships?institution_id=xxx ────────────────────────────
+// ── GET /memberships?institution_id=xxx ────────────────────────────────
 memberRoutes.get(memBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -289,7 +289,7 @@ memberRoutes.get(memBase, async (c: Context) => {
   return ok(c, data);
 });
 
-// ── GET /memberships/:id ──────────────────────────────────────────
+// ── GET /memberships/:id ──────────────────────────────────────────────
 memberRoutes.get(`${memBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -308,7 +308,7 @@ memberRoutes.get(`${memBase}/:id`, async (c: Context) => {
   return ok(c, data);
 });
 
-// ── POST /memberships ─────────────────────────────────────────────
+// ── POST /memberships ─────────────────────────────────────────────────
 // Add a member to an institution. Requires user_id and institution_id.
 // Uses admin client because the new user might not have RLS access yet.
 
@@ -356,7 +356,7 @@ memberRoutes.post(memBase, async (c: Context) => {
   return ok(c, data, 201);
 });
 
-// ── PUT /memberships/:id ──────────────────────────────────────────
+// ── PUT /memberships/:id ──────────────────────────────────────────────
 // Update role, institution_plan_id, or is_active.
 
 memberRoutes.put(`${memBase}/:id`, async (c: Context) => {
@@ -402,7 +402,7 @@ memberRoutes.put(`${memBase}/:id`, async (c: Context) => {
   return ok(c, data);
 });
 
-// ── DELETE /memberships/:id ───────────────────────────────────────
+// ── DELETE /memberships/:id ───────────────────────────────────────────
 // Soft-deactivate: sets is_active = false.
 
 memberRoutes.delete(`${memBase}/:id`, async (c: Context) => {
@@ -430,13 +430,13 @@ memberRoutes.delete(`${memBase}/:id`, async (c: Context) => {
   return ok(c, data);
 });
 
-// ═════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
 // ADMIN SCOPES
-// ═════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
 
 const scopeBase = `${PREFIX}/admin-scopes`;
 
-// ── GET /admin-scopes?membership_id=xxx ───────────────────────────
+// ── GET /admin-scopes?membership_id=xxx ───────────────────────────────
 memberRoutes.get(scopeBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -459,7 +459,7 @@ memberRoutes.get(scopeBase, async (c: Context) => {
   return ok(c, data);
 });
 
-// ── POST /admin-scopes ────────────────────────────────────────────
+// ── POST /admin-scopes ────────────────────────────────────────────────
 memberRoutes.post(scopeBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -493,7 +493,7 @@ memberRoutes.post(scopeBase, async (c: Context) => {
   return ok(c, data, 201);
 });
 
-// ── DELETE /admin-scopes/:id ──────────────────────────────────────
+// ── DELETE /admin-scopes/:id ──────────────────────────────────────────
 // Hard delete — scopes are configuration, not sacred data.
 memberRoutes.delete(`${scopeBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);

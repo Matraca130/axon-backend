@@ -70,9 +70,9 @@ function filterActiveTree(courses: Record<string, unknown>[]): Record<string, un
     }));
 }
 
-// ─── Register Content CRUD ──────────────────────────────────────────
+// ─── Register Content CRUD ────────────────────────────────────────────
 
-// 1. Courses — Institution -> Course (soft-delete: sets deleted_at + is_active=false)
+// 1. Courses — Institution -> Course
 registerCrud(content, {
   table: "courses",
   slug: "courses",
@@ -87,7 +87,7 @@ registerCrud(content, {
   updateFields: ["name", "description", "order_index", "is_active"],
 });
 
-// 2. Semesters — Course -> Semester (soft-delete: sets deleted_at + is_active=false)
+// 2. Semesters — Course -> Semester
 registerCrud(content, {
   table: "semesters",
   slug: "semesters",
@@ -102,7 +102,7 @@ registerCrud(content, {
   updateFields: ["name", "order_index", "is_active"],
 });
 
-// 3. Sections — Semester -> Section (soft-delete: sets deleted_at + is_active=false)
+// 3. Sections — Semester -> Section
 registerCrud(content, {
   table: "sections",
   slug: "sections",
@@ -117,7 +117,7 @@ registerCrud(content, {
   updateFields: ["name", "order_index", "is_active"],
 });
 
-// 4. Topics — Section -> Topic (soft-delete: sets deleted_at + is_active=false)
+// 4. Topics — Section -> Topic
 registerCrud(content, {
   table: "topics",
   slug: "topics",
