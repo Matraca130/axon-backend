@@ -157,7 +157,7 @@ muxRoutes.post(`${PREFIX}/mux/create-upload`, async (c: Context) => {
       cors_origin: "*",
       new_asset_settings: {
         playback_policy: ["signed"],
-        mp4_support: "standard",
+        mp4_support: 'capped-1080p',
       },
     }),
   });
