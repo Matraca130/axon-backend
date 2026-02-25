@@ -90,9 +90,8 @@ async function verifyMuxWebhook(
 async function buildPlaybackJwt(playbackId: string): Promise<string> {
   // Decode base64 PEM private key stored in env
   const pemBody = atob(MUX_SIGNING_KEY_SECRET);
-  const pemKey = `-----BEGIN RSA PRIVATE KEY-----\n${pemBody}\n-----END RSA PRIVATE KEY-----`;
 
-  const binaryDer = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
+  const binaryDer = Uint8Array.from(atob(MUX_SIGNING_KEY_SECRET), (c) => c.charCodeAt(0));
   const cryptoKey = await crypto.subtle.importKey(
     "pkcs8",
     binaryDer,
@@ -135,7 +134,7 @@ async function buildPlaybackJwt(playbackId: string): Promise<string> {
 
 // ─── Route 1: POST /mux/create-upload ─────────────────────────────────
 // Creates a Mux direct upload URL + inserts a pending videos row.
-// Body: { summary_id, title, platform?: "mux", created_by? }
+// Body: { summary_id, title }
 // Returns: { video_id, upload_url }
 
 muxRoutes.post(`${PREFIX}/mux/create-upload`, async (c: Context) => {
@@ -175,13 +174,16 @@ muxRoutes.post(`${PREFIX}/mux/create-upload`, async (c: Context) => {
   const uploadUrl   = muxData.data.url;
 
   // 2. Insert pending videos row
+  // NOTE: platform uses "other" because the CHECK constraint on videos.platform
+  // only allows 'youtube','vimeo','other'. The is_mux=true flag distinguishes
+  // Mux assets from other "other" platform videos.
   const { data: video, error: dbErr } = await db
     .from("videos")
     .insert({
       summary_id,
       title,
       url: "",                    // will be set after asset.ready
-      platform: "mux",
+      platform: "other",          // CHECK constraint: youtube|vimeo|other
       order_index: 0,
       is_active: false,           // activate after ready
       created_by: user.id,
@@ -220,7 +222,7 @@ muxRoutes.post(`${PREFIX}/webhooks/mux`, async (c: Context) => {
       playback_ids?: Array<{ id: string; policy: string }>;
       duration?: number;
       aspect_ratio?: string;
-      max_stored_resolution?: string;
+      resolution_tier?: string;
       status?: string;
     };
   };
@@ -239,7 +241,8 @@ muxRoutes.post(`${PREFIX}/webhooks/mux`, async (c: Context) => {
     const playbackId = event.data.playback_ids?.[0]?.id ?? null;
     const duration   = event.data.duration ? Math.round(event.data.duration) : null;
     const aspectRatio = event.data.aspect_ratio ?? null;
-    const maxRes     = event.data.max_stored_resolution ?? null;
+    // Use resolution_tier (e.g. "1080p") instead of deprecated max_stored_resolution
+    const resTier    = event.data.resolution_tier ?? null;
     const thumbnail  = playbackId
       ? `https://image.mux.com/${playbackId}/thumbnail.jpg`
       : null;
@@ -265,7 +268,7 @@ muxRoutes.post(`${PREFIX}/webhooks/mux`, async (c: Context) => {
           duration_seconds: duration,
           thumbnail_url:   thumbnail,
           aspect_ratio:    aspectRatio,
-          max_resolution:  maxRes,
+          resolution_tier: resTier,
           updated_at:      new Date().toISOString(),
         })
         .eq("id", video.id);
@@ -378,16 +381,24 @@ muxRoutes.post(`${PREFIX}/mux/track-view`, async (c: Context) => {
   // BKT/FSRS signal: record reading event when video completed for first time
   // This mirrors the reading_states pattern used in SummarySession
   if (isFirstCompletion) {
-    await db.from("reading_states").upsert(
-      {
-        student_id: user.id,
-        // video completion signals as a reading event on the summary
-        // The video's summary_id is looked up to associate with the right content
-        completed: true,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "student_id,summary_id" },
-    ).maybeSingle(); // best-effort — don't fail track-view if this fails
+    // Look up the video's summary_id for the reading_states signal
+    const { data: videoRow } = await db
+      .from("videos")
+      .select("summary_id")
+      .eq("id", video_id)
+      .single();
+
+    if (videoRow?.summary_id) {
+      await db.from("reading_states").upsert(
+        {
+          student_id: user.id,
+          summary_id: videoRow.summary_id,
+          completed: true,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "student_id,summary_id" },
+      ).maybeSingle(); // best-effort — don't fail track-view if this fails
+    }
   }
 
   return ok(c, { ...view, first_completion: isFirstCompletion });
@@ -482,4 +493,3 @@ muxRoutes.delete(`${PREFIX}/mux/asset/:video_id`, async (c: Context) => {
 
   return ok(c, { deleted: videoId });
 });
-
