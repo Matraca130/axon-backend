@@ -37,7 +37,7 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !SUPABASE_SERVICE_ROLE_KEY) {
  * Empty for production (Supabase Edge Functions handle routing).
  * Set to "/make-server-6569f786" for Figma Make development environment.
  */
-export const PREFIX = "";
+export const PREFIX = "/server";
 
 // ─── Client Factories ────────────────────────────────────────────────
 
