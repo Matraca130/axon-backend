@@ -1,14 +1,14 @@
 // ============================================================
 // routes-search.ts — Busca global, Lixeira e Restauração
 //
-// GET  /search?q=texto&type=all|summaries|videos|keywords
-// GET  /trash?type=summaries|keywords|flashcards|quiz-questions|videos
-// POST /restore/:table/:id
+// GET  ${PREFIX}/search?q=texto&type=all|summaries|videos|keywords
+// GET  ${PREFIX}/trash?type=summaries|keywords|flashcards|quiz-questions|videos
+// POST ${PREFIX}/restore/:table/:id
 // ============================================================
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
-import { authenticate, ok, err } from "./db.ts";
+import { authenticate, ok, err, PREFIX } from "./db.ts";
 
 export const searchRoutes = new Hono();
 
@@ -60,8 +60,8 @@ async function buildParentPath(
   return "";
 }
 
-// ── GET /search ──────────────────────────────────────────────
-searchRoutes.get("/search", async (c: Context) => {
+// ── GET ${PREFIX}/search ─────────────────────────────────────
+searchRoutes.get(`${PREFIX}/search`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
   const { db } = auth;
@@ -163,8 +163,8 @@ searchRoutes.get("/search", async (c: Context) => {
   }
 });
 
-// ── GET /trash ───────────────────────────────────────────────
-searchRoutes.get("/trash", async (c: Context) => {
+// ── GET ${PREFIX}/trash ──────────────────────────────────────
+searchRoutes.get(`${PREFIX}/trash`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
   const { db } = auth;
@@ -215,8 +215,8 @@ searchRoutes.get("/trash", async (c: Context) => {
   }
 });
 
-// ── POST /restore/:table/:id ─────────────────────────────────
-searchRoutes.post("/restore/:table/:id", async (c: Context) => {
+// ── POST ${PREFIX}/restore/:table/:id ────────────────────────
+searchRoutes.post(`${PREFIX}/restore/:table/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
   const { user, db } = auth;
