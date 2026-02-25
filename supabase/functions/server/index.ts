@@ -4,29 +4,30 @@
  * Mounts all route modules on a single Hono app with CORS + logging.
  * Each route file creates its own Hono instance; they are composed here.
  *
- * Route modules (11):
- *   routes-auth     → /signup, /me
- *   routes-members  → /institutions, /memberships, /admin-scopes
- *   routes-content  → /courses .. /subtopics, /keyword-connections,
- *                     /kw-prof-notes, /reorder, /content-tree
- *   routes-student  → /flashcards, /quizzes, /quiz-questions, /videos,
- *                     /kw-student-notes, /text-annotations, /video-notes
- *   routes-study    → /study-sessions, /study-plans, /study-plan-tasks,
- *                     /reviews, /quiz-attempts, /reading-states,
- *                     /daily-activities, /student-stats,
- *                     /fsrs-states, /bkt-states
- *   routes-models   → /models-3d, /model-3d-pins, /model-3d-notes
- *   routes-plans    → /platform-plans, /institution-plans,
- *                     /plan-access-rules, /institution-subscriptions,
- *                     /ai-generations, /summary-diagnostics,
- *                     /content-access, /usage-today
- *   routes-billing  → /billing/checkout-session, /billing/portal-session,
- *                     /billing/subscription-status, /webhooks/stripe
- *   routes-mux      → /mux/create-upload, /webhooks/mux, /mux/playback-token,
- *                     /mux/track-view, /mux/video-stats, /mux/asset/:id
- *   routes-search   → /search, /trash, /restore/:table/:id
- *   routes-storage  → /storage/upload, /storage/signed-url, /storage/delete
- *   index (inline)  → /health
+ * Route modules (12):
+ *   routes-auth        → /signup, /me
+ *   routes-members     → /institutions, /memberships, /admin-scopes
+ *   routes-content     → /courses .. /subtopics, /keyword-connections,
+ *                        /kw-prof-notes, /reorder, /content-tree
+ *   routes-student     → /flashcards, /quizzes, /quiz-questions, /videos,
+ *                        /kw-student-notes, /text-annotations, /video-notes
+ *   routes-study       → /study-sessions, /study-plans, /study-plan-tasks,
+ *                        /reviews, /quiz-attempts, /reading-states,
+ *                        /daily-activities, /student-stats,
+ *                        /fsrs-states, /bkt-states
+ *   routes-study-queue → /study-queue (algorithmic priority queue v4.2)
+ *   routes-models      → /models-3d, /model-3d-pins, /model-3d-notes
+ *   routes-plans       → /platform-plans, /institution-plans,
+ *                        /plan-access-rules, /institution-subscriptions,
+ *                        /ai-generations, /summary-diagnostics,
+ *                        /content-access, /usage-today
+ *   routes-billing     → /billing/checkout-session, /billing/portal-session,
+ *                        /billing/subscription-status, /webhooks/stripe
+ *   routes-mux         → /mux/create-upload, /webhooks/mux, /mux/playback-token,
+ *                        /mux/track-view, /mux/video-stats, /mux/asset/:id
+ *   routes-search      → /search, /trash, /restore/:table/:id
+ *   routes-storage     → /storage/upload, /storage/signed-url, /storage/delete
+ *   index (inline)     → /health
  */
 
 import { Hono } from "npm:hono";
@@ -40,6 +41,7 @@ import { memberRoutes } from "./routes-members.tsx";
 import { content } from "./routes-content.tsx";
 import { studentRoutes } from "./routes-student.tsx";
 import { studyRoutes } from "./routes-study.tsx";
+import { studyQueueRoutes } from "./routes-study-queue.tsx";
 import { modelRoutes } from "./routes-models.tsx";
 import { planRoutes } from "./routes-plans.tsx";
 import { billingRoutes } from "./routes-billing.tsx";
@@ -83,6 +85,7 @@ app.route("/", memberRoutes);
 app.route("/", content);
 app.route("/", studentRoutes);
 app.route("/", studyRoutes);
+app.route("/", studyQueueRoutes);
 app.route("/", modelRoutes);
 app.route("/", planRoutes);
 app.route("/", billingRoutes);
