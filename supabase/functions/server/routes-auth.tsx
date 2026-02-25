@@ -3,13 +3,18 @@
  *
  * Routes:
  *   POST /signup  — Register new user (admin client, no auth required)
- *   GET  /me      — Current user's profile
+ *   GET  /me      — Current user's profile (auto-creates if missing)
  *   PUT  /me      — Update profile (full_name, avatar_url)
  *
  * Signup flow:
  *   1. Creates auth.users row via admin client (email_confirm: true)
  *   2. Creates profiles row with same id
  *   3. On profiles failure, rolls back auth.users row
+ *
+ * GET /me auto-profile-creation:
+ *   If the user exists in auth.users but has no profiles row (error PGRST116),
+ *   the handler auto-creates the profile from auth user metadata.
+ *   This prevents a sign-in loop for users created outside the /signup flow.
  *
  * Login/logout are handled client-side by supabase-js (not proxied through server).
  */
@@ -94,6 +99,8 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
 
 // ─── GET /me ────────────────────────────────────────────────────────
 // Returns the authenticated user's profile from the `profiles` table.
+// If the profile row is missing (PGRST116), auto-creates it from
+// auth user metadata to prevent sign-in loops.
 
 authRoutes.get(`${PREFIX}/me`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -107,6 +114,31 @@ authRoutes.get(`${PREFIX}/me`, async (c: Context) => {
     .single();
 
   if (error) {
+    // Profile row missing — auto-create from auth user metadata
+    if (error.code === "PGRST116") {
+      console.log(`[Axon] Auto-creating missing profile for user ${user.id}`);
+      const admin = getAdminClient();
+      const meta = user.user_metadata || {};
+      const { data: created, error: insertErr } = await admin
+        .from("profiles")
+        .insert({
+          id: user.id,
+          email: user.email,
+          full_name: meta.full_name || meta.name || "",
+        })
+        .select("*")
+        .single();
+
+      if (insertErr) {
+        return err(
+          c,
+          `Profile auto-creation failed for user ${user.id}: ${insertErr.message}`,
+          500,
+        );
+      }
+      return ok(c, created);
+    }
+
     return err(
       c,
       `Profile fetch failed for user ${user.id}: ${error.message}`,

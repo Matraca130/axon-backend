@@ -4,7 +4,7 @@
  * Mounts all route modules on a single Hono app with CORS + logging.
  * Each route file creates its own Hono instance; they are composed here.
  *
- * Route modules (7):
+ * Route modules (10):
  *   routes-auth     → /signup, /me
  *   routes-members  → /institutions, /memberships, /admin-scopes
  *   routes-content  → /courses .. /subtopics, /keyword-connections,
@@ -18,7 +18,8 @@
  *   routes-models   → /models-3d, /model-3d-pins, /model-3d-notes
  *   routes-plans    → /platform-plans, /institution-plans,
  *                     /plan-access-rules, /institution-subscriptions,
- *                     /ai-generations, /summary-diagnostics
+ *                     /ai-generations, /summary-diagnostics,
+ *                     /content-access, /usage-today
  *   routes-billing  → /billing/checkout-session, /billing/portal-session,
  *                     /billing/subscription-status, /webhooks/stripe
  *   routes-mux      → /mux/create-upload, /webhooks/mux, /mux/playback-token,
@@ -85,6 +86,22 @@ app.route("/", planRoutes);
 app.route("/", billingRoutes);
 app.route("/", muxRoutes);
 app.route("/", searchRoutes);
+
+// ─── Catch-all 404 ────────────────────────────────────────────────────
+// Must be AFTER all route modules so it only matches unhandled paths.
+
+app.all("*", (c) => {
+  console.log(`[404] ${c.req.method} ${c.req.path}`);
+  return c.json(
+    {
+      error: "Route not found",
+      path: c.req.path,
+      method: c.req.method,
+      hint: "Check that the route path and HTTP method are correct.",
+    },
+    404,
+  );
+});
 
 // ─── Start Server ─────────────────────────────────────────────────────
 
