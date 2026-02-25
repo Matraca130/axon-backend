@@ -4,7 +4,7 @@
  * Mounts all route modules on a single Hono app with CORS + logging.
  * Each route file creates its own Hono instance; they are composed here.
  *
- * Route modules (10):
+ * Route modules (11):
  *   routes-auth     → /signup, /me
  *   routes-members  → /institutions, /memberships, /admin-scopes
  *   routes-content  → /courses .. /subtopics, /keyword-connections,
@@ -25,6 +25,7 @@
  *   routes-mux      → /mux/create-upload, /webhooks/mux, /mux/playback-token,
  *                     /mux/track-view, /mux/video-stats, /mux/asset/:id
  *   routes-search   → /search, /trash, /restore/:table/:id
+ *   routes-storage  → /storage/upload, /storage/signed-url, /storage/delete
  *   index (inline)  → /health
  */
 
@@ -44,6 +45,7 @@ import { planRoutes } from "./routes-plans.tsx";
 import { billingRoutes } from "./routes-billing.tsx";
 import { muxRoutes } from "./routes-mux.ts";
 import { searchRoutes } from "./routes-search.ts";
+import { storageRoutes } from "./routes-storage.tsx";
 
 const app = new Hono();
 
@@ -86,6 +88,7 @@ app.route("/", planRoutes);
 app.route("/", billingRoutes);
 app.route("/", muxRoutes);
 app.route("/", searchRoutes);
+app.route("/", storageRoutes);
 
 // ─── Catch-all 404 ────────────────────────────────────────────────────
 // Must be AFTER all route modules so it only matches unhandled paths.

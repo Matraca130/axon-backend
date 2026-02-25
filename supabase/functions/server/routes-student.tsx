@@ -27,6 +27,7 @@ const studentRoutes = new Hono();
 // 1. Flashcards — Keyword + Summary -> Flashcard (SACRED, soft-delete)
 //    LIST requires summary_id. Optional filter by keyword_id.
 //    CREATE requires both keyword_id and summary_id (via parentKey + requiredFields).
+//    front_image_url / back_image_url: optional Supabase Storage paths for images.
 registerCrud(studentRoutes, {
   table: "flashcards",
   slug: "flashcards",
@@ -38,8 +39,8 @@ registerCrud(studentRoutes, {
   softDelete: true,
   hasIsActive: true,
   requiredFields: ["keyword_id", "front", "back"],
-  createFields: ["keyword_id", "subtopic_id", "front", "back", "source"],
-  updateFields: ["front", "back", "source", "subtopic_id", "is_active"],
+  createFields: ["keyword_id", "subtopic_id", "front", "back", "source", "front_image_url", "back_image_url"],
+  updateFields: ["front", "back", "source", "subtopic_id", "is_active", "front_image_url", "back_image_url"],
 });
 
 // 2. Quiz Questions — Keyword + Summary -> QuizQuestion (SACRED, soft-delete)
