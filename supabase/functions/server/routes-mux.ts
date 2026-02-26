@@ -86,11 +86,15 @@ async function verifyMuxWebhook(
   }
 }
 
-/** Build a signed Mux playback JWT (RS256) */
-async function buildPlaybackJwt(playbackId: string): Promise<string> {
-  // Decode base64 PEM private key stored in env
-  const pemBody = atob(MUX_SIGNING_KEY_SECRET);
-
+/**
+ * Build a signed Mux playback JWT (RS256).
+ * @param playbackId  — The Mux playback ID
+ * @param aud         — Token audience: "v" (video), "t" (thumbnail), "s" (storyboard)
+ */
+async function buildPlaybackJwt(
+  playbackId: string,
+  aud: "v" | "t" | "s" = "v",
+): Promise<string> {
   const binaryDer = Uint8Array.from(atob(MUX_SIGNING_KEY_SECRET), (c) => c.charCodeAt(0));
   const cryptoKey = await crypto.subtle.importKey(
     "pkcs8",
@@ -103,7 +107,7 @@ async function buildPlaybackJwt(playbackId: string): Promise<string> {
   const header = { alg: "RS256", typ: "JWT", kid: MUX_SIGNING_KEY_ID };
   const payload = {
     sub: playbackId,
-    aud: "v",
+    aud,
     exp: Math.floor(Date.now() / 1000) + 3600, // 1 hour
     kid: MUX_SIGNING_KEY_ID,
   };
@@ -287,7 +291,7 @@ muxRoutes.post(`${PREFIX}/webhooks/mux`, async (c: Context) => {
 });
 
 // ─── Route 3: GET /mux/playback-token?video_id=xxx ────────────────────
-// Returns a signed JWT for Mux signed playback.
+// Returns signed JWTs for Mux signed playback (video + thumbnail + storyboard).
 // Requires: video must be ready + is_mux=true.
 
 muxRoutes.get(`${PREFIX}/mux/playback-token`, async (c: Context) => {
@@ -311,8 +315,19 @@ muxRoutes.get(`${PREFIX}/mux/playback-token`, async (c: Context) => {
   if (!video.mux_playback_id)   return err(c, "Video has no playback ID", 500);
 
   try {
-    const token = await buildPlaybackJwt(video.mux_playback_id);
-    return ok(c, { token, playback_id: video.mux_playback_id });
+    // Generate all three tokens needed for signed playback
+    const [token, thumbnailToken, storyboardToken] = await Promise.all([
+      buildPlaybackJwt(video.mux_playback_id, "v"),
+      buildPlaybackJwt(video.mux_playback_id, "t"),
+      buildPlaybackJwt(video.mux_playback_id, "s"),
+    ]);
+
+    return ok(c, {
+      token,
+      thumbnail_token: thumbnailToken,
+      storyboard_token: storyboardToken,
+      playback_id: video.mux_playback_id,
+    });
   } catch (e) {
     return err(c, `Failed to build playback token: ${(e as Error).message}`, 500);
   }
