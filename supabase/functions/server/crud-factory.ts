@@ -11,11 +11,18 @@
  *   scopeToUser     — column auto-set to user.id on CREATE, auto-filtered on LIST/UPDATE/DELETE
  *   hasCreatedBy    — sets created_by = user.id on CREATE (not filtered on LIST)
  *   hasIsActive     — when softDelete, also toggles is_active (default true; false for student notes)
+ *
+ * N-9 FIX: Pagination limit capped at 500, offset validated >= 0.
  */
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "./db.ts";
 import type { Context } from "npm:hono";
+
+// ─── Constants ────────────────────────────────────────────────────────
+
+const MAX_PAGINATION_LIMIT = 500;
+const DEFAULT_PAGINATION_LIMIT = 100;
 
 // ─── Types ────────────────────────────────────────────────────────────
 
@@ -56,6 +63,21 @@ export interface CrudConfig {
   createFields: string[];
   /** Fields the client CAN send on UPDATE. */
   updateFields: string[];
+}
+
+// ─── Pagination Helper ────────────────────────────────────────────────
+
+/** Parse and validate pagination params with hard caps. */
+function parsePagination(c: Context): { limit: number; offset: number } {
+  let limit = parseInt(c.req.query("limit") ?? String(DEFAULT_PAGINATION_LIMIT), 10);
+  let offset = parseInt(c.req.query("offset") ?? "0", 10);
+
+  // N-9 FIX: Validate and cap pagination params
+  if (isNaN(limit) || limit < 1) limit = DEFAULT_PAGINATION_LIMIT;
+  if (limit > MAX_PAGINATION_LIMIT) limit = MAX_PAGINATION_LIMIT;
+  if (isNaN(offset) || offset < 0) offset = 0;
+
+  return { limit, offset };
 }
 
 // ─── Factory ──────────────────────────────────────────────────────────
@@ -108,9 +130,8 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     const orderCol = cfg.hasOrderIndex ? "order_index" : "created_at";
     query = query.order(orderCol, { ascending: true });
 
-    // Pagination
-    const limit = parseInt(c.req.query("limit") ?? "100", 10);
-    const offset = parseInt(c.req.query("offset") ?? "0", 10);
+    // Pagination (N-9 FIX: validated + capped)
+    const { limit, offset } = parsePagination(c);
     query = query.range(offset, offset + limit - 1);
 
     const { data, count, error } = await query;

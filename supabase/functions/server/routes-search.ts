@@ -1,9 +1,15 @@
 // ============================================================
-// routes-search.ts — Busca global, Lixeira e Restauração
+// routes-search.ts — Global Search, Trash & Restore
 //
 // GET  ${PREFIX}/search?q=texto&type=all|summaries|videos|keywords
 // GET  ${PREFIX}/trash?type=summaries|keywords|flashcards|quiz-questions|videos
 // POST ${PREFIX}/restore/:table/:id
+//
+// N-1 FIX: Search queries + path resolution run in parallel.
+//          buildParentPath N+1 replaced with batch path resolution
+//          using PostgREST embedded selects (single query for all paths).
+// N-2 FIX: Trash queries run in parallel via Promise.all.
+// N-8 FIX: escapeLike() sanitizes SQL wildcards in user input.
 // ============================================================
 
 import { Hono } from "npm:hono";
@@ -24,40 +30,117 @@ const RESTORE_WHITELIST: Record<string, string> = {
 // ── Roles que podem restaurar ────────────────────────────────
 const RESTORE_ROLES = ["owner", "admin", "professor"];
 
-// ── Helper: construir parent_path via JOINs ──────────────────
-async function buildParentPath(
+// ── N-8 FIX: Escape SQL LIKE wildcards ───────────────────────
+/** Escapes %, _, and \ so they are treated as literal characters in LIKE/ILIKE patterns. */
+function escapeLike(s: string): string {
+  return s.replace(/[%_\\]/g, "\\$&");
+}
+
+// ── Types for path resolution ────────────────────────────────
+interface TopicPath {
+  id: string;
+  name: string;
+  sections: {
+    name: string;
+    semesters: {
+      name: string;
+      courses: {
+        name: string;
+      };
+    };
+  } | null;
+}
+
+interface SummaryPath {
+  id: string;
+  title: string;
+  topics: {
+    name: string;
+  } | null;
+}
+
+// ── Batch path resolution (replaces N+1 buildParentPath) ─────
+/**
+ * Resolves parent paths for all topic_ids and summary_ids in batch.
+ * Uses PostgREST embedded selects: single query per entity type.
+ *
+ * Returns:
+ *   topicPathMap  — Map<topic_id, "Course > Semester > Topic">
+ *   summaryPathMap — Map<summary_id, "Topic > Summary Title">
+ */
+async function batchResolvePaths(
   db: any,
-  type: "summary" | "keyword" | "video",
-  item: Record<string, any>
-): Promise<string> {
-  try {
-    if (type === "summary" || type === "keyword") {
-      // summary.topic_id → topic.section_id → section.semester_id → semester.course_id → course.name
-      const topicId = item.topic_id;
-      if (!topicId) return "";
-      const { data: topic } = await db.from("topics").select("name, section_id").eq("id", topicId).single();
-      if (!topic) return "";
-      const { data: section } = await db.from("sections").select("name, semester_id").eq("id", topic.section_id).single();
-      if (!section) return "";
-      const { data: semester } = await db.from("semesters").select("name, course_id").eq("id", section.semester_id).single();
-      if (!semester) return "";
-      const { data: course } = await db.from("courses").select("name").eq("id", semester.course_id).single();
-      if (!course) return "";
-      return `${course.name} > ${semester.name} > ${topic.name}`;
-    }
-    if (type === "video") {
-      // video.summary_id → summary.topic_id → ... → course.name
-      const summaryId = item.summary_id;
-      if (!summaryId) return "";
-      const { data: summary } = await db.from("summaries").select("title, topic_id").eq("id", summaryId).single();
-      if (!summary) return summary?.title || "";
-      const { data: topic } = await db.from("topics").select("name").eq("id", summary.topic_id).single();
-      return topic ? `${topic.name} > ${summary.title}` : summary.title;
-    }
-  } catch {
-    // Non-fatal: return empty path if JOINs fail
+  topicIds: string[],
+  summaryIds: string[],
+): Promise<{
+  topicPathMap: Map<string, string>;
+  summaryPathMap: Map<string, string>;
+}> {
+  const topicPathMap = new Map<string, string>();
+  const summaryPathMap = new Map<string, string>();
+
+  const promises: Promise<void>[] = [];
+
+  // ── Resolve topic paths: topic → section → semester → course ──
+  if (topicIds.length > 0) {
+    const uniqueTopicIds = [...new Set(topicIds)];
+    promises.push(
+      (async () => {
+        const { data: topics } = await db
+          .from("topics")
+          .select(
+            "id, name, sections(name, semesters(name, courses(name)))",
+          )
+          .in("id", uniqueTopicIds);
+
+        for (const t of (topics as TopicPath[]) ?? []) {
+          const sec = t.sections;
+          if (!sec) {
+            topicPathMap.set(t.id, t.name);
+            continue;
+          }
+          const sem = sec.semesters;
+          if (!sem) {
+            topicPathMap.set(t.id, t.name);
+            continue;
+          }
+          const course = sem.courses;
+          if (!course) {
+            topicPathMap.set(t.id, `${sem.name} > ${t.name}`);
+            continue;
+          }
+          topicPathMap.set(
+            t.id,
+            `${course.name} > ${sem.name} > ${t.name}`,
+          );
+        }
+      })(),
+    );
   }
-  return "";
+
+  // ── Resolve summary paths for videos: summary → topic ──
+  if (summaryIds.length > 0) {
+    const uniqueSummaryIds = [...new Set(summaryIds)];
+    promises.push(
+      (async () => {
+        const { data: summaries } = await db
+          .from("summaries")
+          .select("id, title, topics(name)")
+          .in("id", uniqueSummaryIds);
+
+        for (const s of (summaries as SummaryPath[]) ?? []) {
+          const topicName = s.topics?.name;
+          summaryPathMap.set(
+            s.id,
+            topicName ? `${topicName} > ${s.title}` : s.title,
+          );
+        }
+      })(),
+    );
+  }
+
+  await Promise.all(promises);
+  return { topicPathMap, summaryPathMap };
 }
 
 // ── GET ${PREFIX}/search ─────────────────────────────────────
@@ -73,89 +156,134 @@ searchRoutes.get(`${PREFIX}/search`, async (c: Context) => {
     return err(c, "Query 'q' must be at least 2 characters", 400);
   }
 
-  const pattern = `%${q}%`;
-  const results: any[] = [];
+  // N-8 FIX: Escape SQL wildcards before constructing LIKE pattern
+  const pattern = `%${escapeLike(q)}%`;
 
   try {
-    // ── Summaries ─────────────────────────────────────────
-    if (type === "all" || type === "summaries") {
-      const { data: summaries } = await db
-        .from("summaries")
-        .select("id, title, content_markdown, topic_id")
-        .is("deleted_at", null)
-        .or(`title.ilike.${pattern},content_markdown.ilike.${pattern}`)
-        .limit(type === "all" ? 7 : 20);
+    // ── N-1 FIX: Fire all search queries in parallel ─────────
+    const [summariesResult, keywordsResult, videosResult] = await Promise.all([
+      type === "all" || type === "summaries"
+        ? db
+            .from("summaries")
+            .select("id, title, content_markdown, topic_id")
+            .is("deleted_at", null)
+            .or(`title.ilike.${pattern},content_markdown.ilike.${pattern}`)
+            .limit(type === "all" ? 7 : 20)
+        : Promise.resolve({ data: [] }),
 
-      for (const s of summaries || []) {
-        const inTitle = s.title?.toLowerCase().includes(q.toLowerCase());
-        const snippet = inTitle
-          ? s.title
-          : (s.content_markdown || "").substring(0, 120).replace(/\n/g, " ") + "...";
-        const parent_path = await buildParentPath(db, "summary", s);
-        results.push({
-          type: "summary",
-          id: s.id,
-          title: s.title,
-          snippet,
-          parent_path,
-          _score: inTitle ? 2 : 1,
-        });
-      }
+      type === "all" || type === "keywords"
+        ? db
+            .from("keywords")
+            .select("id, name, definition, summary_id")
+            .is("deleted_at", null)
+            .or(`name.ilike.${pattern},definition.ilike.${pattern}`)
+            .limit(type === "all" ? 7 : 20)
+        : Promise.resolve({ data: [] }),
+
+      type === "all" || type === "videos"
+        ? db
+            .from("videos")
+            .select("id, title, summary_id")
+            .is("deleted_at", null)
+            .ilike("title", pattern)
+            .limit(type === "all" ? 6 : 20)
+        : Promise.resolve({ data: [] }),
+    ]);
+
+    const summaries = summariesResult.data ?? [];
+    const keywords = keywordsResult.data ?? [];
+    const videos = videosResult.data ?? [];
+
+    // ── N-1 FIX: Batch path resolution (replaces N+1) ────────
+    // Collect unique IDs for path resolution
+    const topicIds: string[] = [];
+    const summaryIdsForPaths: string[] = [];
+
+    for (const s of summaries) {
+      if (s.topic_id) topicIds.push(s.topic_id);
+    }
+    // Keywords have summary_id, not topic_id. We need summary → topic path.
+    for (const k of keywords) {
+      if (k.summary_id) summaryIdsForPaths.push(k.summary_id);
+    }
+    for (const v of videos) {
+      if (v.summary_id) summaryIdsForPaths.push(v.summary_id);
     }
 
-    // ── Keywords ──────────────────────────────────────────
-    if (type === "all" || type === "keywords") {
-      const { data: keywords } = await db
-        .from("keywords")
-        .select("id, name, definition, topic_id")
-        .is("deleted_at", null)
-        .or(`name.ilike.${pattern},definition.ilike.${pattern}`)
-        .limit(type === "all" ? 7 : 20);
+    const { topicPathMap, summaryPathMap } = await batchResolvePaths(
+      db,
+      topicIds,
+      summaryIdsForPaths,
+    );
 
-      for (const k of keywords || []) {
-        const inName = k.name?.toLowerCase().includes(q.toLowerCase());
-        const snippet = inName
-          ? k.definition?.substring(0, 120) || k.name
-          : (k.definition || "").substring(0, 120) + "...";
-        const parent_path = await buildParentPath(db, "keyword", k);
-        results.push({
-          type: "keyword",
-          id: k.id,
-          title: k.name,
-          snippet,
-          parent_path,
-          _score: inName ? 2 : 1,
-        });
-      }
+    // ── Build results ────────────────────────────────────────
+    const results: {
+      type: string;
+      id: string;
+      title: string;
+      snippet: string;
+      parent_path: string;
+      _score: number;
+    }[] = [];
+
+    const qLower = q.toLowerCase();
+
+    // Summaries
+    for (const s of summaries) {
+      const inTitle = s.title?.toLowerCase().includes(qLower);
+      const snippet = inTitle
+        ? s.title
+        : (s.content_markdown || "").substring(0, 120).replace(/\n/g, " ") +
+          "...";
+      results.push({
+        type: "summary",
+        id: s.id,
+        title: s.title,
+        snippet,
+        parent_path: s.topic_id ? (topicPathMap.get(s.topic_id) ?? "") : "",
+        _score: inTitle ? 2 : 1,
+      });
     }
 
-    // ── Videos ────────────────────────────────────────────
-    if (type === "all" || type === "videos") {
-      const { data: videos } = await db
-        .from("videos")
-        .select("id, title, summary_id")
-        .is("deleted_at", null)
-        .ilike("title", pattern)
-        .limit(type === "all" ? 6 : 20);
-
-      for (const v of videos || []) {
-        const parent_path = await buildParentPath(db, "video", v);
-        results.push({
-          type: "video",
-          id: v.id,
-          title: v.title,
-          snippet: v.title,
-          parent_path,
-          _score: 2,
-        });
-      }
+    // Keywords (use summaryPathMap since keywords belong to summaries)
+    for (const k of keywords) {
+      const inName = k.name?.toLowerCase().includes(qLower);
+      const snippet = inName
+        ? k.definition?.substring(0, 120) || k.name
+        : (k.definition || "").substring(0, 120) + "...";
+      results.push({
+        type: "keyword",
+        id: k.id,
+        title: k.name,
+        snippet,
+        parent_path: k.summary_id
+          ? (summaryPathMap.get(k.summary_id) ?? "")
+          : "",
+        _score: inName ? 2 : 1,
+      });
     }
 
-    // ── Ordenar por relevância (title match > content match) ──
+    // Videos
+    for (const v of videos) {
+      results.push({
+        type: "video",
+        id: v.id,
+        title: v.title,
+        snippet: v.title,
+        parent_path: v.summary_id
+          ? (summaryPathMap.get(v.summary_id) ?? "")
+          : "",
+        _score: 2,
+      });
+    }
+
+    // Sort by relevance (title match > content match)
     results.sort((a, b) => b._score - a._score);
 
-    // Remover campo interno _score e limitar a 20
-    const final = results.slice(0, 20).map(({ _score, ...r }) => r);
+    // Remove internal _score and limit to 20
+    const final = results
+      .slice(0, 20)
+      .map(({ _score, ...r }) => r);
 
     return ok(c, { results: final });
   } catch (e: any) {
@@ -179,22 +307,34 @@ searchRoutes.get(`${PREFIX}/trash`, async (c: Context) => {
     videos: { table: "videos", titleField: "title" },
   };
 
-  const items: any[] = [];
-
-  const targets = type && TABLE_MAP[type]
-    ? [{ key: type, ...TABLE_MAP[type] }]
-    : Object.entries(TABLE_MAP).map(([key, v]) => ({ key, ...v }));
+  const targets =
+    type && TABLE_MAP[type]
+      ? [{ key: type, ...TABLE_MAP[type] }]
+      : Object.entries(TABLE_MAP).map(([key, v]) => ({ key, ...v }));
 
   try {
-    for (const target of targets) {
-      const { data } = await db
-        .from(target.table)
-        .select(`id, ${target.titleField}, deleted_at`)
-        .not("deleted_at", "is", null)
-        .order("deleted_at", { ascending: false })
-        .limit(50);
+    // ── N-2 FIX: Fire all trash queries in parallel ──────────
+    const queryResults = await Promise.all(
+      targets.map((target) =>
+        db
+          .from(target.table)
+          .select(`id, ${target.titleField}, deleted_at`)
+          .not("deleted_at", "is", null)
+          .order("deleted_at", { ascending: false })
+          .limit(50),
+      ),
+    );
 
-      for (const item of data || []) {
+    const items: {
+      id: string;
+      type: string;
+      title: string;
+      deleted_at: string;
+    }[] = [];
+
+    for (let i = 0; i < targets.length; i++) {
+      const target = targets[i];
+      for (const item of queryResults[i].data || []) {
         items.push({
           id: item.id,
           type: target.key,
@@ -204,9 +344,10 @@ searchRoutes.get(`${PREFIX}/trash`, async (c: Context) => {
       }
     }
 
-    // Ordenar por deleted_at DESC (mais recente primeiro)
-    items.sort((a, b) =>
-      new Date(b.deleted_at).getTime() - new Date(a.deleted_at).getTime()
+    // Sort by deleted_at DESC (most recent first)
+    items.sort(
+      (a, b) =>
+        new Date(b.deleted_at).getTime() - new Date(a.deleted_at).getTime(),
     );
 
     return ok(c, { items: items.slice(0, 50) });
@@ -224,13 +365,17 @@ searchRoutes.post(`${PREFIX}/restore/:table/:id`, async (c: Context) => {
   const tableParam = c.req.param("table");
   const id = c.req.param("id");
 
-  // Validar whitelist
+  // Validate whitelist
   const realTable = RESTORE_WHITELIST[tableParam];
   if (!realTable) {
-    return err(c, `Table '${tableParam}' not allowed. Allowed: ${Object.keys(RESTORE_WHITELIST).join(", ")}`, 400);
+    return err(
+      c,
+      `Table '${tableParam}' not allowed. Allowed: ${Object.keys(RESTORE_WHITELIST).join(", ")}`,
+      400,
+    );
   }
 
-  // Validar permissões: verificar role do usuário
+  // Validate permissions: check user role
   const { data: membership } = await db
     .from("memberships")
     .select("role")
@@ -246,7 +391,7 @@ searchRoutes.post(`${PREFIX}/restore/:table/:id`, async (c: Context) => {
       .from(realTable)
       .update({ deleted_at: null })
       .eq("id", id)
-      .not("deleted_at", "is", null) // só restaura se estiver deletado
+      .not("deleted_at", "is", null)
       .select()
       .single();
 

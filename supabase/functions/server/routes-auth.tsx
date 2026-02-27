@@ -15,6 +15,8 @@
  *   If the user exists in auth.users but has no profiles row (error PGRST116),
  *   the handler auto-creates the profile from auth user metadata.
  *   This prevents a sign-in loop for users created outside the /signup flow.
+ *   N-6 FIX: Now fetches metadata via admin.auth.admin.getUserById()
+ *   instead of the (always-undefined) user.user_metadata.
  *
  * Login/logout are handled client-side by supabase-js (not proxied through server).
  */
@@ -118,7 +120,13 @@ authRoutes.get(`${PREFIX}/me`, async (c: Context) => {
     if (error.code === "PGRST116") {
       console.log(`[Axon] Auto-creating missing profile for user ${user.id}`);
       const admin = getAdminClient();
-      const meta = user.user_metadata || {};
+
+      // N-6 FIX: authenticate() only returns {id, email} — it does NOT
+      // include user_metadata. Fetch the full user record from Supabase Auth
+      // to get the actual metadata (full_name, etc.).
+      const { data: authData } = await admin.auth.admin.getUserById(user.id);
+      const meta = authData?.user?.user_metadata || {};
+
       const { data: created, error: insertErr } = await admin
         .from("profiles")
         .insert({
