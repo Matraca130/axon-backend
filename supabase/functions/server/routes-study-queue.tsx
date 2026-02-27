@@ -24,16 +24,17 @@
  * Response:
  *   { data: { queue: StudyQueueItem[], meta: { ... } } }
  *
- * Algorithm params (v4.2):
- *   BKT:  P_LEARN=0.18, P_FORGET=0.25, RECOVERY_FACTOR=3.0
- *   FSRS: stability-based scheduling with difficulty [0,10]
- *   NeedScore: exponential overdue weighting, grace period = 1 day
+ * M-1 Performance fix:
+ *   Steps 1-3 (BKT, FSRS, flashcards) now run in parallel via Promise.all.
+ *   Step 4 (course→summaries filter) uses get_course_summary_ids() DB function
+ *   (single 4-table JOIN) with graceful fallback to sequential queries.
  */
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "./db.ts";
 import { isUuid } from "./validate.ts";
+import type { SupabaseClient } from "npm:@supabase/supabase-js";
 
 export const studyQueueRoutes = new Hono();
 
@@ -44,41 +45,32 @@ const NEED_CONFIG = {
   masteryWeight: 0.30,
   fragilityWeight: 0.20,
   noveltyWeight: 0.10,
-  graceDays: 1, // Days after due before overdue reaches 1.0
+  graceDays: 1,
 };
 
 // ─── NeedScore Calculation ────────────────────────────────────────────
 
 interface NeedScoreInput {
-  // From FSRS
   dueAt: string | null;
   fsrsLapses: number;
   fsrsReps: number;
-  fsrsState: string; // "new" | "learning" | "review" | "relearning"
+  fsrsState: string;
   fsrsStability: number;
-  // From BKT
-  pKnow: number; // subtopic mastery [0, 1]
+  pKnow: number;
 }
 
 function calculateNeedScore(input: NeedScoreInput, now: Date): number {
-  const {
-    dueAt,
-    fsrsLapses,
-    fsrsReps,
-    fsrsState,
-    pKnow,
-  } = input;
+  const { dueAt, fsrsLapses, fsrsReps, fsrsState, pKnow } = input;
 
   // Factor 1: Overdue (exponential, capped at 1.0)
   let overdue = 0;
   if (!dueAt) {
-    overdue = 1.0; // Never scheduled = immediately due
+    overdue = 1.0;
   } else {
     const dueDate = new Date(dueAt);
     const daysOverdue =
       (now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24);
     if (daysOverdue > 0) {
-      // Exponential: reaches ~0.63 at graceDays, ~0.86 at 2x graceDays
       overdue = 1 - Math.exp(-daysOverdue / NEED_CONFIG.graceDays);
     }
   }
@@ -120,10 +112,74 @@ function calculateRetention(
 // ─── Mastery Color (with hysteresis thresholds) ───────────────────────
 
 function getMasteryColor(pKnow: number): "green" | "yellow" | "red" | "gray" {
-  if (pKnow < 0) return "gray"; // no data
+  if (pKnow < 0) return "gray";
   if (pKnow >= 0.80) return "green";
   if (pKnow >= 0.50) return "yellow";
   return "red";
+}
+
+// ─── Course → Summary IDs resolution ──────────────────────────────────
+
+/**
+ * Resolve course_id to a Set of summary IDs.
+ * Primary: RPC call to get_course_summary_ids() — single 4-table JOIN.
+ * Fallback: 4 sequential queries if the DB function doesn't exist yet.
+ */
+async function resolveSummaryIdsForCourse(
+  db: SupabaseClient,
+  courseId: string,
+): Promise<Set<string> | null> {
+  // ── Primary: single RPC call ──
+  const { data: rpcData, error: rpcError } = await db.rpc(
+    "get_course_summary_ids",
+    { p_course_id: courseId },
+  );
+
+  if (!rpcError && rpcData) {
+    if (rpcData.length === 0) return null; // no content → empty queue
+    return new Set(rpcData.map((r: { id: string }) => r.id));
+  }
+
+  // ── Fallback: sequential tree walk ──
+  console.warn(
+    `[study-queue] get_course_summary_ids RPC failed, using fallback: ${rpcError?.message}`,
+  );
+
+  const { data: semesters } = await db
+    .from("semesters")
+    .select("id")
+    .eq("course_id", courseId)
+    .is("deleted_at", null);
+
+  if (!semesters || semesters.length === 0) return null;
+  const semesterIds = semesters.map((s: { id: string }) => s.id);
+
+  const { data: sections } = await db
+    .from("sections")
+    .select("id")
+    .in("semester_id", semesterIds)
+    .is("deleted_at", null);
+
+  if (!sections || sections.length === 0) return null;
+  const sectionIds = sections.map((s: { id: string }) => s.id);
+
+  const { data: topics } = await db
+    .from("topics")
+    .select("id")
+    .in("section_id", sectionIds)
+    .is("deleted_at", null);
+
+  if (!topics || topics.length === 0) return null;
+  const topicIds = topics.map((t: { id: string }) => t.id);
+
+  const { data: summaries } = await db
+    .from("summaries")
+    .select("id")
+    .in("topic_id", topicIds)
+    .is("deleted_at", null);
+
+  if (!summaries || summaries.length === 0) return null;
+  return new Set(summaries.map((s: { id: string }) => s.id));
 }
 
 // ─── Route: GET /study-queue ──────────────────────────────────────────
@@ -147,123 +203,105 @@ studyQueueRoutes.get(`${PREFIX}/study-queue`, async (c: Context) => {
   const now = new Date();
 
   try {
-    // ── Step 1: Fetch all BKT states for this student ──────────────
-    const { data: bktStates, error: bktErr } = await db
-      .from("bkt_states")
-      .select("subtopic_id, p_know, total_attempts, correct_attempts, delta")
-      .eq("student_id", user.id);
+    // ── M-1 FIX: Parallel fetch of all independent data ───────────
+    // Steps 1-3 are completely independent. Step 4 (course filter)
+    // is also independent of 1-3. Run them all in parallel.
 
-    if (bktErr) {
-      return err(c, `Fetch bkt_states failed: ${bktErr.message}`, 500);
-    }
-
-    // Index by subtopic_id for O(1) lookup
-    const bktMap = new Map<string, { p_know: number; total_attempts: number }>();
-    for (const bkt of bktStates ?? []) {
-      bktMap.set(bkt.subtopic_id, {
-        p_know: bkt.p_know ?? 0,
-        total_attempts: bkt.total_attempts ?? 0,
-      });
-    }
-
-    // ── Step 2: Fetch FSRS states for this student ─────────────────
+    // Build FSRS query
     let fsrsQuery = db
       .from("fsrs_states")
       .select(
         "flashcard_id, stability, difficulty, due_at, last_review_at, reps, lapses, state",
       )
       .eq("student_id", user.id);
-
-    // If not including future, only get due or overdue cards
     if (!includeFuture) {
       fsrsQuery = fsrsQuery.lte("due_at", now.toISOString());
     }
-
-    // Order by due_at ascending (most overdue first)
     fsrsQuery = fsrsQuery.order("due_at", { ascending: true });
 
-    const { data: fsrsStates, error: fsrsErr } = await fsrsQuery;
-
-    if (fsrsErr) {
-      return err(c, `Fetch fsrs_states failed: ${fsrsErr.message}`, 500);
-    }
-
-    // ── Step 3: Fetch flashcard details ────────────────────────────
-    // Get all active, non-deleted flashcards
+    // Build flashcards query
     const flashcardsQuery = db
       .from("flashcards")
-      .select("id, summary_id, keyword_id, subtopic_id, front, back, front_image_url, back_image_url")
+      .select(
+        "id, summary_id, keyword_id, subtopic_id, front, back, front_image_url, back_image_url",
+      )
       .is("deleted_at", null)
       .eq("is_active", true);
 
-    const { data: allFlashcards, error: fcErr } = await flashcardsQuery;
+    // Build BKT query
+    const bktQuery = db
+      .from("bkt_states")
+      .select("subtopic_id, p_know, total_attempts, correct_attempts, delta")
+      .eq("student_id", user.id);
 
-    if (fcErr) {
-      return err(c, `Fetch flashcards failed: ${fcErr.message}`, 500);
+    // ── Fire all queries in parallel ──────────────────────────────
+    const [bktResult, fsrsResult, flashcardsResult, allowedSummaryIds] =
+      await Promise.all([
+        bktQuery,
+        fsrsQuery,
+        flashcardsQuery,
+        courseId
+          ? resolveSummaryIdsForCourse(db, courseId)
+          : Promise.resolve(undefined), // undefined = no filter
+      ]);
+
+    // ── Check for errors ──────────────────────────────────────────
+    if (bktResult.error) {
+      return err(
+        c,
+        `Fetch bkt_states failed: ${bktResult.error.message}`,
+        500,
+      );
+    }
+    if (fsrsResult.error) {
+      return err(
+        c,
+        `Fetch fsrs_states failed: ${fsrsResult.error.message}`,
+        500,
+      );
+    }
+    if (flashcardsResult.error) {
+      return err(
+        c,
+        `Fetch flashcards failed: ${flashcardsResult.error.message}`,
+        500,
+      );
     }
 
-    // ── Step 4: If course_id filter, resolve which summaries belong ─
-    let allowedSummaryIds: Set<string> | null = null;
-
-    if (courseId) {
-      // Course -> Semesters -> Sections -> Topics -> Summaries
-      const { data: semesters } = await db
-        .from("semesters")
-        .select("id")
-        .eq("course_id", courseId)
-        .is("deleted_at", null);
-
-      if (semesters && semesters.length > 0) {
-        const semesterIds = semesters.map((s: { id: string }) => s.id);
-
-        const { data: sections } = await db
-          .from("sections")
-          .select("id")
-          .in("semester_id", semesterIds)
-          .is("deleted_at", null);
-
-        if (sections && sections.length > 0) {
-          const sectionIds = sections.map((s: { id: string }) => s.id);
-
-          const { data: topics } = await db
-            .from("topics")
-            .select("id")
-            .in("section_id", sectionIds)
-            .is("deleted_at", null);
-
-          if (topics && topics.length > 0) {
-            const topicIds = topics.map((t: { id: string }) => t.id);
-
-            const { data: summaries } = await db
-              .from("summaries")
-              .select("id")
-              .in("topic_id", topicIds)
-              .is("deleted_at", null);
-
-            allowedSummaryIds = new Set(
-              (summaries ?? []).map((s: { id: string }) => s.id),
-            );
-          }
-        }
-      }
-
-      // If course has no content, return empty queue
-      if (!allowedSummaryIds || allowedSummaryIds.size === 0) {
-        return ok(c, {
-          queue: [],
-          meta: {
-            total_due: 0,
-            total_new: 0,
-            total_review: 0,
-            generated_at: now.toISOString(),
-          },
-        });
-      }
+    // Course filter returned null = no content in course
+    if (courseId && allowedSummaryIds === null) {
+      return ok(c, {
+        queue: [],
+        meta: {
+          total_due: 0,
+          total_new: 0,
+          total_in_queue: 0,
+          returned: 0,
+          limit,
+          include_future: includeFuture,
+          course_id: courseId,
+          generated_at: now.toISOString(),
+          algorithm: "v4.2",
+          weights: NEED_CONFIG,
+        },
+      });
     }
 
-    // ── Step 5: Build the priority queue ───────────────────────────
+    // ── Build lookup maps ─────────────────────────────────────────
 
-    // Index FSRS states by flashcard_id
+    // BKT: index by subtopic_id
+    const bktMap = new Map<
+      string,
+      { p_know: number; total_attempts: number }
+    >();
+    for (const bkt of bktResult.data ?? []) {
+      bktMap.set(bkt.subtopic_id, {
+        p_know: bkt.p_know ?? 0,
+        total_attempts: bkt.total_attempts ?? 0,
+      });
+    }
+
+    // FSRS: index by flashcard_id
     const fsrsMap = new Map<
       string,
       {
@@ -276,7 +314,7 @@ studyQueueRoutes.get(`${PREFIX}/study-queue`, async (c: Context) => {
         state: string;
       }
     >();
-    for (const fs of fsrsStates ?? []) {
+    for (const fs of fsrsResult.data ?? []) {
       fsrsMap.set(fs.flashcard_id, {
         stability: fs.stability ?? 1,
         difficulty: fs.difficulty ?? 5,
@@ -287,6 +325,8 @@ studyQueueRoutes.get(`${PREFIX}/study-queue`, async (c: Context) => {
         state: fs.state ?? "new",
       });
     }
+
+    // ── Build the priority queue ──────────────────────────────────
 
     interface QueueItem {
       flashcard_id: string;
@@ -312,9 +352,12 @@ studyQueueRoutes.get(`${PREFIX}/study-queue`, async (c: Context) => {
     let totalNew = 0;
     let totalReview = 0;
 
-    for (const card of allFlashcards ?? []) {
+    for (const card of flashcardsResult.data ?? []) {
       // Apply course filter
-      if (allowedSummaryIds && !allowedSummaryIds.has(card.summary_id)) {
+      if (
+        allowedSummaryIds instanceof Set &&
+        !allowedSummaryIds.has(card.summary_id)
+      ) {
         continue;
       }
 
@@ -329,7 +372,7 @@ studyQueueRoutes.get(`${PREFIX}/study-queue`, async (c: Context) => {
       // For cards with FSRS state: check if due
       if (fsrs && !includeFuture) {
         const dueDate = new Date(fsrs.due_at);
-        if (dueDate > now) continue; // Not yet due, skip
+        if (dueDate > now) continue;
       }
 
       // Calculate NeedScore
@@ -374,18 +417,15 @@ studyQueueRoutes.get(`${PREFIX}/study-queue`, async (c: Context) => {
       });
     }
 
-    // ── Step 6: Sort by NeedScore descending ──────────────────────
+    // ── Sort by NeedScore descending ──────────────────────────────
     queue.sort((a, b) => {
-      // Primary: NeedScore (higher = more urgent)
       if (b.need_score !== a.need_score) return b.need_score - a.need_score;
-      // Secondary: retention (lower = more forgotten)
       if (a.retention !== b.retention) return a.retention - b.retention;
-      // Tertiary: new cards after due cards
       if (a.is_new !== b.is_new) return a.is_new ? 1 : -1;
       return 0;
     });
 
-    // ── Step 7: Apply limit and return ────────────────────────────
+    // ── Apply limit and return ────────────────────────────────────
     const limited = queue.slice(0, limit);
 
     return ok(c, {
