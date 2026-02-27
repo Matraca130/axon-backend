@@ -10,6 +10,9 @@
  * Custom tables (LIST + POST only — immutable logs):
  *   ai_generations            — AI generation audit log
  *   summary_diagnostics       — AI diagnostic results
+ *
+ * P-2 FIX: ai-generations pagination capped at 500.
+ * P-8 FIX: usage-today uses proper tomorrow boundary.
  */
 
 import { Hono } from "npm:hono";
@@ -20,16 +23,15 @@ import type { Context } from "npm:hono";
 
 const planRoutes = new Hono();
 
+const MAX_PAGINATION_LIMIT = 500;
+
 // ═════════════════════════════════════════════════════════════════════
 // FACTORY TABLES
 // ═════════════════════════════════════════════════════════════════════
 
-// 1. Platform Plans — global catalog (no parentKey, no soft-delete)
-//    Anyone can list (see pricing). Create/update restricted by RLS to platform admins.
 registerCrud(planRoutes, {
   table: "platform_plans",
   slug: "platform-plans",
-  // No parentKey — global catalog
   hasCreatedBy: false,
   hasUpdatedAt: true,
   hasOrderIndex: false,
@@ -59,8 +61,6 @@ registerCrud(planRoutes, {
   ],
 });
 
-// 2. Institution Plans — institution-specific pricing tiers
-//    New billing columns (EV-12): stripe IDs, trial, features, currency, sort_order
 registerCrud(planRoutes, {
   table: "institution_plans",
   slug: "institution-plans",
@@ -101,7 +101,6 @@ registerCrud(planRoutes, {
   ],
 });
 
-// 3. Plan Access Rules — content scoping per plan (configuration, hard delete)
 registerCrud(planRoutes, {
   table: "plan_access_rules",
   slug: "plan-access-rules",
@@ -114,8 +113,6 @@ registerCrud(planRoutes, {
   updateFields: ["scope_type", "scope_id"],
 });
 
-// 4. Institution Subscriptions — active subscription records
-//    New Stripe columns (EV-12): stripe IDs, user_id, trial dates, cancellation
 registerCrud(planRoutes, {
   table: "institution_subscriptions",
   slug: "institution-subscriptions",
@@ -155,9 +152,6 @@ registerCrud(planRoutes, {
 // AI GENERATION LOGS (LIST + POST — immutable audit records)
 // ═════════════════════════════════════════════════════════════════════
 
-// ── 5. AI Generations ─────────────────────────────────────────────
-// Log of all AI-generated content. requested_by auto-set from auth.
-
 const aiGenBase = `${PREFIX}/ai-generations`;
 
 planRoutes.get(aiGenBase, async (c: Context) => {
@@ -176,13 +170,15 @@ planRoutes.get(aiGenBase, async (c: Context) => {
     .eq("institution_id", institutionId)
     .order("created_at", { ascending: false });
 
-  // Optional filters
   const genType = c.req.query("generation_type");
   if (genType) query = query.eq("generation_type", genType);
 
-  // Pagination
-  const limit = parseInt(c.req.query("limit") ?? "50", 10);
-  const offset = parseInt(c.req.query("offset") ?? "0", 10);
+  // P-2 FIX: Pagination with cap
+  let limit = parseInt(c.req.query("limit") ?? "50", 10);
+  if (isNaN(limit) || limit < 1) limit = 50;
+  if (limit > MAX_PAGINATION_LIMIT) limit = MAX_PAGINATION_LIMIT;
+  let offset = parseInt(c.req.query("offset") ?? "0", 10);
+  if (isNaN(offset) || offset < 0) offset = 0;
   query = query.range(offset, offset + limit - 1);
 
   const { data, error } = await query;
@@ -210,7 +206,6 @@ planRoutes.post(aiGenBase, async (c: Context) => {
     generation_type: body.generation_type,
   };
 
-  // Optional fields with proper validation
   const { fields, error: valErr } = validateFields(body, [
     { key: "source_summary_id", check: isUuid, msg: "must be a valid UUID" },
     { key: "source_keyword_id", check: isUuid, msg: "must be a valid UUID" },
@@ -232,7 +227,6 @@ planRoutes.post(aiGenBase, async (c: Context) => {
 });
 
 // ── 6. Summary Diagnostics ────────────────────────────────────────
-// AI-generated diagnostics for summaries. requested_by auto-set from auth.
 
 const diagBase = `${PREFIX}/summary-diagnostics`;
 
@@ -252,7 +246,6 @@ planRoutes.get(diagBase, async (c: Context) => {
     .eq("summary_id", summaryId)
     .order("created_at", { ascending: false });
 
-  // Optional filter by type
   const diagType = c.req.query("diagnostic_type");
   if (diagType) query = query.eq("diagnostic_type", diagType);
 
@@ -281,7 +274,6 @@ planRoutes.post(diagBase, async (c: Context) => {
     content: body.content,
   };
 
-  // Optional fields with proper validation
   const { fields, error: valErr } = validateFields(body, [
     { key: "ai_generation_id", check: isUuid, msg: "must be a valid UUID" },
     { key: "parent_diagnostic_id", check: isUuid, msg: "must be a valid UUID" },
@@ -308,9 +300,6 @@ planRoutes.post(diagBase, async (c: Context) => {
 // EV-13: COMPUTED ROUTES — Content Access + Usage Today
 // ═════════════════════════════════════════════════════════════════════
 
-// ── GET /content-access?user_id=xxx&institution_id=yyy ────────────────
-// Resolves what content a user can see based on their subscription plan.
-// Returns: { access: "full"|"restricted"|"none", rules: [...], plan_name, features }
 planRoutes.get(`${PREFIX}/content-access`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -322,10 +311,6 @@ planRoutes.get(`${PREFIX}/content-access`, async (c: Context) => {
   if (!isUuid(userId)) return err(c, "user_id must be a valid UUID", 400);
   if (!isUuid(institutionId)) return err(c, "institution_id must be a valid UUID", 400);
 
-  // Only the user themselves or owner/admin of the institution can query
-  // (RLS on institution_subscriptions enforces this at DB level)
-
-  // 1. Get active subscription
   const { data: sub, error: subErr } = await db
     .from("institution_subscriptions")
     .select("id, plan_id, status, current_period_end")
@@ -338,14 +323,11 @@ planRoutes.get(`${PREFIX}/content-access`, async (c: Context) => {
 
   if (subErr) return err(c, `Subscription lookup failed: ${subErr.message}`, 500);
 
-  // 2. No subscription → access: none
   if (!sub) {
     return ok(c, { access: "none", rules: [], plan_name: null, features: null });
   }
 
-  // 3. Check expiry (lazy expiry)
   if (sub.current_period_end && new Date(sub.current_period_end) < new Date()) {
-    // Mark as expired
     await db
       .from("institution_subscriptions")
       .update({ status: "expired" })
@@ -353,7 +335,6 @@ planRoutes.get(`${PREFIX}/content-access`, async (c: Context) => {
     return ok(c, { access: "none", rules: [], plan_name: null, features: null });
   }
 
-  // 4. Get plan features
   const { data: plan, error: planErr } = await db
     .from("institution_plans")
     .select("name, features")
@@ -365,12 +346,10 @@ planRoutes.get(`${PREFIX}/content-access`, async (c: Context) => {
   const features = (plan.features as Record<string, unknown>) ?? {};
   const contentGating = features.content_gating as string | undefined;
 
-  // 5. Full access plan
   if (!contentGating || contentGating === "full") {
     return ok(c, { access: "full", rules: [], plan_name: plan.name, features });
   }
 
-  // 6. Restricted plan — fetch access rules
   const { data: rules, error: rulesErr } = await db
     .from("plan_access_rules")
     .select("scope_type, scope_id")
@@ -386,9 +365,7 @@ planRoutes.get(`${PREFIX}/content-access`, async (c: Context) => {
   });
 });
 
-// ── GET /usage-today?user_id=xxx&institution_id=yyy ───────────────────
-// Returns daily usage counts for limit enforcement.
-// Response: { date, quizzes_taken, flashcard_reviews, ai_generations }
+// ── GET /usage-today ──────────────────────────────────────────────
 planRoutes.get(`${PREFIX}/usage-today`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -400,22 +377,20 @@ planRoutes.get(`${PREFIX}/usage-today`, async (c: Context) => {
   if (!isUuid(userId)) return err(c, "user_id must be a valid UUID", 400);
   if (!isUuid(institutionId)) return err(c, "institution_id must be a valid UUID", 400);
 
-  // today in UTC as YYYY-MM-DD
-  const today = new Date().toISOString().split("T")[0];
+  // P-8 FIX: Compute proper date boundaries
+  const todayDate = new Date();
+  const today = todayDate.toISOString().split("T")[0];
+  todayDate.setUTCDate(todayDate.getUTCDate() + 1);
+  const tomorrow = todayDate.toISOString().split("T")[0];
 
-  // Run 3 counts in parallel
   const [quizRes, flashRes, aiRes] = await Promise.all([
-    // quiz_attempts: student_id + DATE(created_at) = today
     db
       .from("quiz_attempts")
       .select("id", { count: "exact", head: true })
       .eq("student_id", userId)
       .gte("created_at", `${today}T00:00:00Z`)
-      .lt("created_at", `${today}T23:59:59Z`),
+      .lt("created_at", `${tomorrow}T00:00:00Z`),
 
-    // reviews: student_id + instrument_type = flashcard + DATE(created_at) = today
-    // Note: reviews has no student_id directly — use study_sessions join via session_id
-    // Simpler: use daily_activities which already aggregates this
     db
       .from("daily_activities")
       .select("reviews_count")
@@ -423,13 +398,12 @@ planRoutes.get(`${PREFIX}/usage-today`, async (c: Context) => {
       .eq("activity_date", today)
       .maybeSingle(),
 
-    // ai_generations: requested_by + DATE(created_at) = today
     db
       .from("ai_generations")
       .select("id", { count: "exact", head: true })
       .eq("requested_by", userId)
       .gte("created_at", `${today}T00:00:00Z`)
-      .lt("created_at", `${today}T23:59:59Z`),
+      .lt("created_at", `${tomorrow}T00:00:00Z`),
   ]);
 
   return ok(c, {
