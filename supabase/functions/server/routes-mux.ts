@@ -245,7 +245,8 @@ muxRoutes.post(`${PREFIX}/webhooks/mux`, async (c: Context) => {
     const playbackId = event.data.playback_ids?.[0]?.id ?? null;
     const duration   = event.data.duration ? Math.round(event.data.duration) : null;
     const aspectRatio = event.data.aspect_ratio ?? null;
-    // Use resolution_tier (e.g. "1080p") instead of deprecated max_stored_resolution
+    // Mux API returns "resolution_tier" (e.g. "1080p").
+    // DB column is "max_resolution" (BUG-001/HF-D fix).
     const resTier    = event.data.resolution_tier ?? null;
     const thumbnail  = playbackId
       ? `https://image.mux.com/${playbackId}/thumbnail.jpg`
@@ -272,7 +273,7 @@ muxRoutes.post(`${PREFIX}/webhooks/mux`, async (c: Context) => {
           duration_seconds: duration,
           thumbnail_url:   thumbnail,
           aspect_ratio:    aspectRatio,
-          resolution_tier: resTier,
+          max_resolution:  resTier,        // ← BUG-001 FIX: was "resolution_tier"
           updated_at:      new Date().toISOString(),
         })
         .eq("id", video.id);
