@@ -23,6 +23,7 @@ const content = new Hono();
 /**
  * Run async tasks in batches to avoid overwhelming the connection pool.
  * Returns all settled results in order.
+ * Kept as fallback for reorder and for future batch operations.
  */
 async function parallelBatch<T>(
   tasks: (() => Promise<T>)[],
@@ -400,20 +401,11 @@ content.delete(`${profNotesBase}/:id`, async (c: Context) => {
 
 // ─── Bulk Reorder ─────────────────────────────────────────────────────
 // PUT /reorder  body: { table: "courses", items: [{ id, order_index }] }
+//
+// M-3 FIX: Uses bulk_reorder() DB function (single query) with graceful
+// fallback to N individual UPDATE queries if the function doesn't exist.
 
 const MAX_REORDER_ITEMS = 200;
-
-// Tables that have updated_at (for reorder patch)
-const tablesWithUpdatedAt = new Set([
-  "courses",
-  "semesters",
-  "sections",
-  "topics",
-  "summaries",
-  "videos",
-  "models_3d",
-  "model_3d_pins",
-]);
 
 const allowedReorderTables = [
   "courses",
@@ -428,6 +420,18 @@ const allowedReorderTables = [
   "model_3d_pins",
   "study_plan_tasks",
 ];
+
+// Tables that have updated_at (only needed for fallback path)
+const tablesWithUpdatedAt = new Set([
+  "courses",
+  "semesters",
+  "sections",
+  "topics",
+  "summaries",
+  "videos",
+  "models_3d",
+  "model_3d_pins",
+]);
 
 content.put(`${PREFIX}/reorder`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -460,7 +464,7 @@ content.put(`${PREFIX}/reorder`, async (c: Context) => {
     );
   }
 
-  // Validate every item's shape and types upfront (catches "5" as string)
+  // Validate every item's shape and types upfront
   const invalid = items.filter((i: unknown) => {
     if (!i || typeof i !== "object") return true;
     const item = i as Record<string, unknown>;
@@ -478,18 +482,29 @@ content.put(`${PREFIX}/reorder`, async (c: Context) => {
     );
   }
 
-  // At this point, items are validated
   const typedItems = items as Array<{ id: string; order_index: number }>;
+
+  // ── Primary path: single DB function call (M-3) ──
+  const { data: rpcData, error: rpcError } = await db.rpc("bulk_reorder", {
+    p_table: table,
+    p_items: typedItems,
+  });
+
+  if (!rpcError) {
+    // DB function succeeded — return its result
+    const reordered = rpcData?.reordered ?? typedItems.length;
+    return ok(c, { reordered, method: "rpc" });
+  }
+
+  // ── Fallback: N individual queries (if DB function not yet deployed) ──
+  // This keeps the endpoint working even before the migration runs.
+  console.warn(
+    `[reorder] bulk_reorder RPC failed, falling back to N queries: ${rpcError.message}`,
+  );
 
   const hasUpdatedAt = tablesWithUpdatedAt.has(table);
   const now = new Date().toISOString();
 
-  // Build parallel update tasks (NOT upsert — upsert fails with NOT NULL on missing columns)
-  // Phase 3 backlog: replace with a single RPC call to a PostgreSQL function:
-  //   CREATE FUNCTION bulk_reorder(p_table text, p_items jsonb) RETURNS void AS $$
-  //     UPDATE target SET order_index = (i->>'order_index')::int, updated_at = now()
-  //     FROM jsonb_array_elements(p_items) i WHERE t.id = (i->>'id')::uuid;
-  //   $$ LANGUAGE sql SECURITY DEFINER;
   const tasks = typedItems.map((item) => () => {
     const patch: Record<string, unknown> = { order_index: item.order_index };
     if (hasUpdatedAt) patch.updated_at = now;
@@ -509,7 +524,7 @@ content.put(`${PREFIX}/reorder`, async (c: Context) => {
     );
   }
 
-  return ok(c, { reordered: typedItems.length });
+  return ok(c, { reordered: typedItems.length, method: "fallback" });
 });
 
 // ─── Content Tree (nested hierarchy in one call) ──────────────────────
