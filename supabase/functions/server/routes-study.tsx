@@ -82,6 +82,7 @@ async function atomicUpsert(
 
 // 1. Study Sessions — per-student activity log
 //    No parentKey (course_id is optional). scopeToUser auto-filters.
+//    M-5 FIX: removed phantom duration_seconds, ended_at → completed_at
 registerCrud(studyRoutes, {
   table: "study_sessions",
   slug: "study-sessions",
@@ -93,8 +94,7 @@ registerCrud(studyRoutes, {
   requiredFields: ["session_type"],
   createFields: ["course_id", "session_type"],
   updateFields: [
-    "ended_at",
-    "duration_seconds",
+    "completed_at",
     "total_reviews",
     "correct_reviews",
   ],
