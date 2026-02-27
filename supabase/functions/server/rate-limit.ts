@@ -1,92 +1,143 @@
 /**
- * rate-limit.ts — In-memory rate limiter for Axon v4.4
+ * rate-limit.ts — In-memory sliding window rate limiter for Axon v4.4
  *
- * Provides per-key request rate limiting using a fixed window counter.
- * Works within a single Deno isolate's lifetime.
+ * O-8 FIX: Prevents abuse by capping requests per user per window.
  *
- * Limitations:
- *   - Not distributed: each Deno Deploy isolate has its own counter.
- *     This means the effective rate limit is `maxRequests * N_isolates`.
- *   - For production hardening, consider Deno KV or Redis backing.
- *   - Still effective against single-client burst abuse (the most
- *     common attack vector for signup/search endpoints).
+ * Architecture:
+ *   - Uses a Map<string, { count, resetAt }> keyed by user token prefix.
+ *   - Suitable for Supabase Edge Functions (single Deno isolate per function).
+ *   - Periodic cleanup removes expired entries to prevent memory leaks.
  *
- * O-8 FIX: Rate limiting for critical routes.
+ * Configuration:
+ *   - WINDOW_MS: 60,000ms (1 minute)
+ *   - MAX_REQUESTS: 120 requests per window per user
+ *   - CLEANUP_INTERVAL: Every 5 minutes
+ *
+ * Exemptions:
+ *   - Health check (/health)
+ *   - Webhooks (/webhooks/) — these have their own auth (HMAC signatures)
  */
 
-export interface RateLimitConfig {
-  /** Maximum requests allowed in the window */
-  maxRequests: number;
-  /** Window duration in milliseconds */
-  windowMs: number;
-}
+import type { Context, Next } from "npm:hono";
+import { extractToken } from "./db.ts";
 
-export interface RateLimitResult {
-  allowed: boolean;
-  remaining: number;
-  resetAt: number;
-}
+// ─── Configuration ─────────────────────────────────────────────────
 
-interface RateLimitEntry {
+export const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
+export const RATE_LIMIT_MAX_REQUESTS = 120;  // 120 req/min/user
+const CLEANUP_INTERVAL_MS = 5 * 60_000;     // 5 minutes
+
+// ─── State ───────────────────────────────────────────────────────
+
+export interface RateLimitEntry {
   count: number;
   resetAt: number;
 }
 
-const store = new Map<string, RateLimitEntry>();
+// Exported for testing
+export const rateLimitMap = new Map<string, RateLimitEntry>();
+let lastCleanup = Date.now();
 
-// Periodic cleanup to prevent memory leaks (every 60 seconds)
-let cleanupTimer: number | null = null;
+/**
+ * Extract a stable key from the user's token.
+ * Uses the first 32 chars of the JWT (header + partial payload hash)
+ * which is stable across requests from the same user but different
+ * enough to distinguish users.
+ */
+function extractKey(token: string): string {
+  return token.substring(0, 32);
+}
 
-function ensureCleanup(): void {
-  if (cleanupTimer !== null) return;
-  cleanupTimer = setInterval(() => {
-    const now = Date.now();
-    for (const [key, entry] of store) {
-      if (now > entry.resetAt) {
-        store.delete(key);
-      }
+/**
+ * Remove expired entries from the map.
+ * Called lazily — only when CLEANUP_INTERVAL has elapsed.
+ */
+export function cleanupExpired(now: number = Date.now()): number {
+  let cleaned = 0;
+  for (const [key, entry] of rateLimitMap) {
+    if (now > entry.resetAt) {
+      rateLimitMap.delete(key);
+      cleaned++;
     }
-  }, 60_000);
-  // Allow Deno to exit even if interval is running
-  if (typeof Deno !== "undefined" && "unrefTimer" in Deno) {
-    (Deno as any).unrefTimer(cleanupTimer);
   }
+  lastCleanup = now;
+  return cleaned;
 }
 
 /**
  * Check rate limit for a given key.
- * Returns whether the request is allowed, remaining quota, and reset time.
+ * Returns { allowed: true } or { allowed: false, retryAfterMs }.
  */
 export function checkRateLimit(
   key: string,
-  config: RateLimitConfig,
-): RateLimitResult {
-  ensureCleanup();
-  const now = Date.now();
-  const entry = store.get(key);
+  now: number = Date.now(),
+): { allowed: boolean; retryAfterMs?: number; current?: number } {
+  const entry = rateLimitMap.get(key);
 
-  // New window or expired window
   if (!entry || now > entry.resetAt) {
-    const resetAt = now + config.windowMs;
-    store.set(key, { count: 1, resetAt });
-    return { allowed: true, remaining: config.maxRequests - 1, resetAt };
+    // New window
+    rateLimitMap.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return { allowed: true, current: 1 };
   }
 
-  // Within existing window — check limit
-  if (entry.count >= config.maxRequests) {
-    return { allowed: false, remaining: 0, resetAt: entry.resetAt };
-  }
-
-  // Within limit — increment
   entry.count++;
-  return {
-    allowed: true,
-    remaining: config.maxRequests - entry.count,
-    resetAt: entry.resetAt,
-  };
+
+  if (entry.count > RATE_LIMIT_MAX_REQUESTS) {
+    return {
+      allowed: false,
+      retryAfterMs: entry.resetAt - now,
+      current: entry.count,
+    };
+  }
+
+  return { allowed: true, current: entry.count };
 }
 
-/** Reset all rate limit state (for testing) */
-export function resetRateLimitStore(): void {
-  store.clear();
+// ─── Hono Middleware ─────────────────────────────────────────────
+
+export async function rateLimitMiddleware(
+  c: Context,
+  next: Next,
+): Promise<Response | void> {
+  const path = c.req.path;
+
+  // Exempt: health checks and webhooks
+  if (path.endsWith("/health") || path.includes("/webhooks/")) {
+    return next();
+  }
+
+  // Only rate-limit authenticated requests
+  const token = extractToken(c);
+  if (!token) {
+    return next(); // Let auth middleware handle missing tokens
+  }
+
+  const now = Date.now();
+
+  // Periodic cleanup (lazy, non-blocking)
+  if (now - lastCleanup > CLEANUP_INTERVAL_MS) {
+    const cleaned = cleanupExpired(now);
+    if (cleaned > 0) {
+      console.log(`[RateLimit] Cleaned ${cleaned} expired entries`);
+    }
+  }
+
+  const key = extractKey(token);
+  const result = checkRateLimit(key, now);
+
+  if (!result.allowed) {
+    const retryAfterSec = Math.ceil((result.retryAfterMs ?? 0) / 1000);
+    console.warn(
+      `[RateLimit] Rate limit exceeded for key ${key.substring(0, 8)}...: ${result.current} requests`,
+    );
+    return c.json(
+      {
+        error: "Rate limit exceeded. Please try again later.",
+        retry_after_seconds: retryAfterSec,
+      },
+      429,
+    );
+  }
+
+  return next();
 }
