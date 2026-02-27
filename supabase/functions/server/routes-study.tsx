@@ -25,8 +25,8 @@
  *     - student_stats:    UNIQUE(student_id)
  *     - fsrs_states:      UNIQUE(student_id, flashcard_id)
  *     - bkt_states:       UNIQUE(student_id, subtopic_id)
- *   Without these constraints, PostgREST returns:
- *     "there is no unique or exclusion constraint matching the ON CONFLICT specification"
+ *
+ * P-2 FIX: Pagination caps added to daily-activities, fsrs-states, bkt-states.
  */
 
 import { Hono } from "npm:hono";
@@ -51,16 +51,10 @@ import type { Context } from "npm:hono";
 
 const studyRoutes = new Hono();
 
+// ─── Constants ─────────────────────────────────────────────────────
+const MAX_PAGINATION_LIMIT = 500;
+
 // ─── Atomic Upsert Helper ──────────────────────────────────────────
-/**
- * Atomic INSERT ... ON CONFLICT DO UPDATE via Supabase .upsert().
- * Zero race conditions — the DB handles conflict detection in a single statement.
- *
- * @param onConflict — comma-separated column names matching a UNIQUE constraint
- *                     (e.g. "student_id,summary_id")
- * @param row        — full row including both conflict keys and data columns.
- *                     Only columns present in the row are updated on conflict.
- */
 async function atomicUpsert(
   db: SupabaseClient,
   table: string,
@@ -80,9 +74,6 @@ async function atomicUpsert(
 // FACTORY TABLES
 // ═════════════════════════════════════════════════════════════════════
 
-// 1. Study Sessions — per-student activity log
-//    No parentKey (course_id is optional). scopeToUser auto-filters.
-//    M-5 FIX: removed phantom duration_seconds, ended_at → completed_at
 registerCrud(studyRoutes, {
   table: "study_sessions",
   slug: "study-sessions",
@@ -100,7 +91,6 @@ registerCrud(studyRoutes, {
   ],
 });
 
-// 2. Study Plans — per-student, optionally tied to a course
 registerCrud(studyRoutes, {
   table: "study_plans",
   slug: "study-plans",
@@ -114,8 +104,6 @@ registerCrud(studyRoutes, {
   updateFields: ["name", "status"],
 });
 
-// 3. Study Plan Tasks — child of study_plan, orderable
-//    No scopeToUser (access controlled by parent study_plan + RLS).
 registerCrud(studyRoutes, {
   table: "study_plan_tasks",
   slug: "study-plan-tasks",
@@ -133,7 +121,6 @@ registerCrud(studyRoutes, {
 // ═════════════════════════════════════════════════════════════════════
 
 // ── 4. Reviews ────────────────────────────────────────────────────
-// Immutable grade records. LIST by session_id.
 
 studyRoutes.get(`${PREFIX}/reviews`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -188,7 +175,6 @@ studyRoutes.post(`${PREFIX}/reviews`, async (c: Context) => {
 });
 
 // ── 5. Quiz Attempts ──────────────────────────────────────────────
-// Immutable answer records. Scoped to student.
 
 studyRoutes.get(`${PREFIX}/quiz-attempts`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -206,7 +192,6 @@ studyRoutes.get(`${PREFIX}/quiz-attempts`, async (c: Context) => {
     );
   }
 
-  // Validate provided filters are UUIDs
   if (questionId && !isUuid(questionId))
     return err(c, "quiz_question_id must be a valid UUID", 400);
   if (sessionId && !isUuid(sessionId))
@@ -235,7 +220,6 @@ studyRoutes.post(`${PREFIX}/quiz-attempts`, async (c: Context) => {
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
 
-  // Required fields
   if (!isUuid(body.quiz_question_id))
     return err(c, "quiz_question_id must be a valid UUID", 400);
   if (!isNonEmpty(body.answer))
@@ -250,7 +234,6 @@ studyRoutes.post(`${PREFIX}/quiz-attempts`, async (c: Context) => {
     is_correct: body.is_correct,
   };
 
-  // Optional fields with validation
   if (body.session_id !== undefined) {
     if (!isUuid(body.session_id))
       return err(c, "session_id must be a valid UUID", 400);
@@ -278,8 +261,6 @@ studyRoutes.post(`${PREFIX}/quiz-attempts`, async (c: Context) => {
 // ═════════════════════════════════════════════════════════════════════
 
 // ── 6. Reading States ─────────────────────────────────────────────
-// One per student + summary. Tracks scroll position, time, completion.
-// UNIQUE(student_id, summary_id) required.
 
 studyRoutes.get(`${PREFIX}/reading-states`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -300,7 +281,7 @@ studyRoutes.get(`${PREFIX}/reading-states`, async (c: Context) => {
 
   if (error)
     return err(c, `Get reading_state failed: ${error.message}`, 500);
-  return ok(c, data); // null if never read
+  return ok(c, data);
 });
 
 studyRoutes.post(`${PREFIX}/reading-states`, async (c: Context) => {
@@ -335,8 +316,6 @@ studyRoutes.post(`${PREFIX}/reading-states`, async (c: Context) => {
 });
 
 // ── 7. Daily Activities ───────────────────────────────────────────
-// One per student + date. Frontend sends full totals (not increments).
-// UNIQUE(student_id, activity_date) required.
 
 studyRoutes.get(`${PREFIX}/daily-activities`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -349,7 +328,6 @@ studyRoutes.get(`${PREFIX}/daily-activities`, async (c: Context) => {
     .eq("student_id", user.id)
     .order("activity_date", { ascending: false });
 
-  // Optional date range — validate format if provided
   const from = c.req.query("from");
   const to = c.req.query("to");
   if (from) {
@@ -362,9 +340,12 @@ studyRoutes.get(`${PREFIX}/daily-activities`, async (c: Context) => {
     query = query.lte("activity_date", to);
   }
 
-  // Pagination
-  const limit = parseInt(c.req.query("limit") ?? "90", 10);
-  const offset = parseInt(c.req.query("offset") ?? "0", 10);
+  // P-2 FIX: Pagination with cap
+  let limit = parseInt(c.req.query("limit") ?? "90", 10);
+  if (isNaN(limit) || limit < 1) limit = 90;
+  if (limit > MAX_PAGINATION_LIMIT) limit = MAX_PAGINATION_LIMIT;
+  let offset = parseInt(c.req.query("offset") ?? "0", 10);
+  if (isNaN(offset) || offset < 0) offset = 0;
   query = query.range(offset, offset + limit - 1);
 
   const { data, error } = await query;
@@ -409,8 +390,6 @@ studyRoutes.post(`${PREFIX}/daily-activities`, async (c: Context) => {
 });
 
 // ── 8. Student Stats ──────────────────────────────────────────────
-// One per student. Lifetime aggregates.
-// UNIQUE(student_id) required.
 
 studyRoutes.get(`${PREFIX}/student-stats`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -425,7 +404,7 @@ studyRoutes.get(`${PREFIX}/student-stats`, async (c: Context) => {
 
   if (error)
     return err(c, `Get student_stats failed: ${error.message}`, 500);
-  return ok(c, data); // null if no stats yet
+  return ok(c, data);
 });
 
 studyRoutes.post(`${PREFIX}/student-stats`, async (c: Context) => {
@@ -460,8 +439,6 @@ studyRoutes.post(`${PREFIX}/student-stats`, async (c: Context) => {
 });
 
 // ── 9. FSRS States ────────────────────────────────────────────────
-// One per student + flashcard. FSRS spaced-repetition parameters.
-// UNIQUE(student_id, flashcard_id) required.
 
 const FSRS_STATES = ["new", "learning", "review", "relearning"] as const;
 
@@ -476,7 +453,6 @@ studyRoutes.get(`${PREFIX}/fsrs-states`, async (c: Context) => {
     .eq("student_id", user.id)
     .order("due_at", { ascending: true });
 
-  // Optional filters — validate format
   const flashcardId = c.req.query("flashcard_id");
   const state = c.req.query("state");
   const dueBefore = c.req.query("due_before");
@@ -501,9 +477,12 @@ studyRoutes.get(`${PREFIX}/fsrs-states`, async (c: Context) => {
     query = query.lte("due_at", dueBefore);
   }
 
-  // Pagination
-  const limit = parseInt(c.req.query("limit") ?? "100", 10);
-  const offset = parseInt(c.req.query("offset") ?? "0", 10);
+  // P-2 FIX: Pagination with cap
+  let limit = parseInt(c.req.query("limit") ?? "100", 10);
+  if (isNaN(limit) || limit < 1) limit = 100;
+  if (limit > MAX_PAGINATION_LIMIT) limit = MAX_PAGINATION_LIMIT;
+  let offset = parseInt(c.req.query("offset") ?? "0", 10);
+  if (isNaN(offset) || offset < 0) offset = 0;
   query = query.range(offset, offset + limit - 1);
 
   const { data, error } = await query;
@@ -571,8 +550,6 @@ studyRoutes.post(`${PREFIX}/fsrs-states`, async (c: Context) => {
 });
 
 // ── 10. BKT States ────────────────────────────────────────────────
-// One per student + subtopic. Bayesian Knowledge Tracing parameters.
-// UNIQUE(student_id, subtopic_id) required.
 
 studyRoutes.get(`${PREFIX}/bkt-states`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -592,9 +569,12 @@ studyRoutes.get(`${PREFIX}/bkt-states`, async (c: Context) => {
     query = query.eq("subtopic_id", subtopicId);
   }
 
-  // Pagination
-  const limit = parseInt(c.req.query("limit") ?? "100", 10);
-  const offset = parseInt(c.req.query("offset") ?? "0", 10);
+  // P-2 FIX: Pagination with cap
+  let limit = parseInt(c.req.query("limit") ?? "100", 10);
+  if (isNaN(limit) || limit < 1) limit = 100;
+  if (limit > MAX_PAGINATION_LIMIT) limit = MAX_PAGINATION_LIMIT;
+  let offset = parseInt(c.req.query("offset") ?? "0", 10);
+  if (isNaN(offset) || offset < 0) offset = 0;
   query = query.range(offset, offset + limit - 1);
 
   const { data, error } = await query;
