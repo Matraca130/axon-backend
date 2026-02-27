@@ -9,6 +9,8 @@
 // N-2 FIX: Trash queries run in parallel via Promise.all.
 // N-8 FIX: escapeLike() sanitizes SQL wildcards in user input.
 // O-1 FIX: or() filter values quoted to prevent comma/paren injection.
+// P-1 FIX: summaryPathMap resolves full Course>Semester>Topic>Summary.
+// P-3 FIX: Double quotes escaped in or() pattern interpolation.
 // ============================================================
 
 import { Hono } from "npm:hono";
@@ -34,6 +36,13 @@ function escapeLike(s: string): string {
   return s.replace(/[%_\\]/g, "\\$&");
 }
 
+// ── P-3 FIX: Escape double quotes for PostgREST or() quoting ─
+// PostgREST uses "..." to quote values in or() filters.
+// Literal double quotes inside must be doubled: " → ""
+function escapeOrQuote(s: string): string {
+  return s.replace(/"/g, '""');
+}
+
 // ── Types for path resolution ────────────────────────────────
 interface TopicPath {
   id: string;
@@ -49,11 +58,21 @@ interface TopicPath {
   } | null;
 }
 
+// P-1 FIX: Full hierarchy for summary paths
 interface SummaryPath {
   id: string;
   title: string;
   topics: {
     name: string;
+    sections: {
+      name: string;
+      semesters: {
+        name: string;
+        courses: {
+          name: string;
+        };
+      };
+    } | null;
   } | null;
 }
 
@@ -111,16 +130,41 @@ async function batchResolvePaths(
     const uniqueSummaryIds = [...new Set(summaryIds)];
     promises.push(
       (async () => {
+        // P-1 FIX: Full hierarchy select — was only "topics(name)"
         const { data: summaries } = await db
           .from("summaries")
-          .select("id, title, topics(name)")
+          .select(
+            "id, title, topics(name, sections(name, semesters(name, courses(name))))",
+          )
           .in("id", uniqueSummaryIds);
 
         for (const s of (summaries as SummaryPath[]) ?? []) {
-          const topicName = s.topics?.name;
+          const topic = s.topics;
+          if (!topic) {
+            summaryPathMap.set(s.id, s.title);
+            continue;
+          }
+          const sec = topic.sections;
+          if (!sec) {
+            summaryPathMap.set(s.id, `${topic.name} > ${s.title}`);
+            continue;
+          }
+          const sem = sec.semesters;
+          if (!sem) {
+            summaryPathMap.set(s.id, `${topic.name} > ${s.title}`);
+            continue;
+          }
+          const course = sem.courses;
+          if (!course) {
+            summaryPathMap.set(
+              s.id,
+              `${sem.name} > ${topic.name} > ${s.title}`,
+            );
+            continue;
+          }
           summaryPathMap.set(
             s.id,
-            topicName ? `${topicName} > ${s.title}` : s.title,
+            `${course.name} > ${sem.name} > ${topic.name} > ${s.title}`,
           );
         }
       })(),
@@ -145,17 +189,18 @@ searchRoutes.get(`${PREFIX}/search`, async (c: Context) => {
   }
 
   const pattern = `%${escapeLike(q)}%`;
+  // P-3 FIX: Escape double quotes for PostgREST or() quoting context
+  const orPattern = escapeOrQuote(pattern);
 
   try {
     // ── N-1 FIX: Fire all search queries in parallel ─────────
-    // O-1 FIX: Values quoted with "..." to prevent comma/paren injection
     const [summariesResult, keywordsResult, videosResult] = await Promise.all([
       type === "all" || type === "summaries"
         ? db
             .from("summaries")
             .select("id, title, content_markdown, topic_id")
             .is("deleted_at", null)
-            .or(`title.ilike."${pattern}",content_markdown.ilike."${pattern}"`)
+            .or(`title.ilike."${orPattern}",content_markdown.ilike."${orPattern}"`)
             .limit(type === "all" ? 7 : 20)
         : Promise.resolve({ data: [] }),
 
@@ -164,7 +209,7 @@ searchRoutes.get(`${PREFIX}/search`, async (c: Context) => {
             .from("keywords")
             .select("id, name, definition, summary_id")
             .is("deleted_at", null)
-            .or(`name.ilike."${pattern}",definition.ilike."${pattern}"`)
+            .or(`name.ilike."${orPattern}",definition.ilike."${orPattern}"`)
             .limit(type === "all" ? 7 : 20)
         : Promise.resolve({ data: [] }),
 
