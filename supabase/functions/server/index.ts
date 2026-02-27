@@ -1,41 +1,15 @@
 /**
  * index.ts — Hono server entrypoint for Axon v4.4
  *
- * Mounts all route modules on a single Hono app with CORS + logging.
- * Each route file creates its own Hono instance; they are composed here.
- *
- * Route modules (12):
- *   routes-auth        → /signup, /me
- *   routes-members     → /institutions, /memberships, /admin-scopes
- *   routes-content     → /courses .. /subtopics, /keyword-connections,
- *                        /kw-prof-notes, /reorder, /content-tree
- *   routes-student     → /flashcards, /quizzes, /quiz-questions, /videos,
- *                        /kw-student-notes, /text-annotations, /video-notes
- *   routes-study       → /study-sessions, /study-plans, /study-plan-tasks,
- *                        /reviews, /quiz-attempts, /reading-states,
- *                        /daily-activities, /student-stats,
- *                        /fsrs-states, /bkt-states
- *   routes-study-queue → /study-queue (algorithmic priority queue v4.2)
- *   routes-models      → /models-3d, /model-3d-pins, /model-3d-notes
- *   routes-plans       → /platform-plans, /institution-plans,
- *                        /plan-access-rules, /institution-subscriptions,
- *                        /ai-generations, /summary-diagnostics,
- *                        /content-access, /usage-today
- *   routes-billing     → /billing/checkout-session, /billing/portal-session,
- *                        /billing/subscription-status, /webhooks/stripe
- *   routes-mux         → /mux/create-upload, /webhooks/mux, /mux/playback-token,
- *                        /mux/track-view, /mux/video-stats, /mux/asset/:id
- *   routes-search      → /search, /trash, /restore/:table/:id
- *   routes-storage     → /storage/upload, /storage/signed-url, /storage/delete
- *   index (inline)     → /health
+ * O-8 FIX: Rate limiting middleware added (120 req/min/user).
  */
 
 import { Hono } from "npm:hono";
 import { cors } from "npm:hono/cors";
 import { logger } from "npm:hono/logger";
 import { PREFIX } from "./db.ts";
+import { rateLimitMiddleware } from "./rate-limit.ts";
 
-// Route modules
 import { authRoutes } from "./routes-auth.tsx";
 import { memberRoutes } from "./routes-members.tsx";
 import { content } from "./routes-content.tsx";
@@ -51,7 +25,7 @@ import { storageRoutes } from "./routes-storage.tsx";
 
 const app = new Hono();
 
-// ─── Middleware ────────────────────────────────────────────────────────
+// ─── Middleware ──────────────────────────────────────────────────────
 
 app.use("*", logger(console.log));
 
@@ -66,7 +40,10 @@ app.use(
   }),
 );
 
-// ─── Health Check ─────────────────────────────────────────────────────
+// O-8 FIX: Rate limiting (after CORS, before routes)
+app.use("*", rateLimitMiddleware);
+
+// ─── Health Check ───────────────────────────────────────────────────
 
 app.get(`${PREFIX}/health`, (c) => {
   return c.json({
@@ -77,8 +54,6 @@ app.get(`${PREFIX}/health`, (c) => {
 });
 
 // ─── Mount Route Modules ────────────────────────────────────────────
-// Each module registers its routes with the full PREFIX already included,
-// so we mount at "/" to pass through unchanged.
 
 app.route("/", authRoutes);
 app.route("/", memberRoutes);
@@ -93,8 +68,7 @@ app.route("/", muxRoutes);
 app.route("/", searchRoutes);
 app.route("/", storageRoutes);
 
-// ─── Catch-all 404 ────────────────────────────────────────────────────
-// Must be AFTER all route modules so it only matches unhandled paths.
+// ─── Catch-all 404 ──────────────────────────────────────────────────
 
 app.all("*", (c) => {
   console.log(`[404] ${c.req.method} ${c.req.path}`);
@@ -108,7 +82,5 @@ app.all("*", (c) => {
     404,
   );
 });
-
-// ─── Start Server ─────────────────────────────────────────────────────
 
 Deno.serve(app.fetch);
