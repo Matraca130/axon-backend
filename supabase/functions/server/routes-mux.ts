@@ -13,13 +13,16 @@
 //   MUX_TOKEN_ID, MUX_TOKEN_SECRET
 //   MUX_WEBHOOK_SECRET
 //   MUX_SIGNING_KEY_ID, MUX_SIGNING_KEY_SECRET
+//
+// N-7 FIX: track-view uses upsert_video_view() DB function for
+//          atomic view_count increment (no race condition).
 // ============================================================
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { PREFIX, authenticate, safeJson, ok, err, getAdminClient } from "./db.ts";
 
-// ─── Mux Config ───────────────────────────────────────────────────────
+// ─── Mux Config ─────────────────────────────────────────────────────
 const MUX_TOKEN_ID          = Deno.env.get("MUX_TOKEN_ID") ?? "";
 const MUX_TOKEN_SECRET      = Deno.env.get("MUX_TOKEN_SECRET") ?? "";
 const MUX_WEBHOOK_SECRET    = Deno.env.get("MUX_WEBHOOK_SECRET") ?? "";
@@ -31,7 +34,7 @@ const muxAuth  = `Basic ${btoa(`${MUX_TOKEN_ID}:${MUX_TOKEN_SECRET}`)}`;
 
 export const muxRoutes = new Hono();
 
-// ─── Helpers ──────────────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────────
 
 /** Call Mux REST API */
 async function muxFetch(
@@ -136,7 +139,7 @@ async function buildPlaybackJwt(
   return `${signingInput}.${sigB64}`;
 }
 
-// ─── Route 1: POST /mux/create-upload ─────────────────────────────────
+// ─── Route 1: POST /mux/create-upload ─────────────────────────────
 // Creates a Mux direct upload URL + inserts a pending videos row.
 // Body: { summary_id, title }
 // Returns: { video_id, upload_url }
@@ -178,18 +181,15 @@ muxRoutes.post(`${PREFIX}/mux/create-upload`, async (c: Context) => {
   const uploadUrl   = muxData.data.url;
 
   // 2. Insert pending videos row
-  // NOTE: platform uses "other" because the CHECK constraint on videos.platform
-  // only allows 'youtube','vimeo','other'. The is_mux=true flag distinguishes
-  // Mux assets from other "other" platform videos.
   const { data: video, error: dbErr } = await db
     .from("videos")
     .insert({
       summary_id,
       title,
-      url: "",                    // will be set after asset.ready
-      platform: "other",          // CHECK constraint: youtube|vimeo|other
+      url: "",
+      platform: "other",
       order_index: 0,
-      is_active: false,           // activate after ready
+      is_active: false,
       created_by: user.id,
       is_mux: true,
       status: "uploading",
@@ -203,11 +203,8 @@ muxRoutes.post(`${PREFIX}/mux/create-upload`, async (c: Context) => {
   return ok(c, { video_id: video.id, upload_url: uploadUrl }, 201);
 });
 
-// ─── Route 2: POST /webhooks/mux ──────────────────────────────────────
+// ─── Route 2: POST /webhooks/mux ──────────────────────────────────
 // Handles Mux webhook events. No auth — verified by HMAC signature.
-// Events handled:
-//   video.asset.ready   → UPDATE status/playback_id/duration/thumbnail
-//   video.asset.errored → UPDATE status='errored'
 
 muxRoutes.post(`${PREFIX}/webhooks/mux`, async (c: Context) => {
   const rawBody  = await c.req.text();
@@ -245,14 +242,11 @@ muxRoutes.post(`${PREFIX}/webhooks/mux`, async (c: Context) => {
     const playbackId = event.data.playback_ids?.[0]?.id ?? null;
     const duration   = event.data.duration ? Math.round(event.data.duration) : null;
     const aspectRatio = event.data.aspect_ratio ?? null;
-    // Mux API returns "resolution_tier" (e.g. "1080p").
-    // DB column is "max_resolution" (BUG-001/HF-D fix).
     const resTier    = event.data.resolution_tier ?? null;
     const thumbnail  = playbackId
       ? `https://image.mux.com/${playbackId}/thumbnail.jpg`
       : null;
 
-    // Find video by mux_upload_id
     const { data: video } = await admin
       .from("videos")
       .select("id")
@@ -273,7 +267,7 @@ muxRoutes.post(`${PREFIX}/webhooks/mux`, async (c: Context) => {
           duration_seconds: duration,
           thumbnail_url:   thumbnail,
           aspect_ratio:    aspectRatio,
-          max_resolution:  resTier,        // ← BUG-001 FIX: was "resolution_tier"
+          max_resolution:  resTier,
           updated_at:      new Date().toISOString(),
         })
         .eq("id", video.id);
@@ -291,9 +285,7 @@ muxRoutes.post(`${PREFIX}/webhooks/mux`, async (c: Context) => {
   return ok(c, { received: true });
 });
 
-// ─── Route 3: GET /mux/playback-token?video_id=xxx ────────────────────
-// Returns signed JWTs for Mux signed playback (video + thumbnail + storyboard).
-// Requires: video must be ready + is_mux=true.
+// ─── Route 3: GET /mux/playback-token?video_id=xxx ────────────────
 
 muxRoutes.get(`${PREFIX}/mux/playback-token`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -316,7 +308,6 @@ muxRoutes.get(`${PREFIX}/mux/playback-token`, async (c: Context) => {
   if (!video.mux_playback_id)   return err(c, "Video has no playback ID", 500);
 
   try {
-    // Generate all three tokens needed for signed playback
     const [token, thumbnailToken, storyboardToken] = await Promise.all([
       buildPlaybackJwt(video.mux_playback_id, "v"),
       buildPlaybackJwt(video.mux_playback_id, "t"),
@@ -334,10 +325,9 @@ muxRoutes.get(`${PREFIX}/mux/playback-token`, async (c: Context) => {
   }
 });
 
-// ─── Route 4: POST /mux/track-view ────────────────────────────────────
-// UPSERT video_views. Fires BKT/FSRS signal when completed=true first time.
-// Body: { video_id, institution_id, watch_time_seconds, total_watch_time_seconds,
-//         completion_percentage, completed, last_position_seconds }
+// ─── Route 4: POST /mux/track-view ─────────────────────────────────
+// N-7 FIX: Uses upsert_video_view() DB function for atomic view_count.
+// Fallback: old read+write pattern if migration not yet applied.
 
 muxRoutes.post(`${PREFIX}/mux/track-view`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -361,7 +351,38 @@ muxRoutes.post(`${PREFIX}/mux/track-view`, async (c: Context) => {
     return err(c, "video_id and institution_id are required strings", 400);
   }
 
-  // Check if this is the first completion (for BKT/FSRS signal)
+  // ── Primary: atomic DB function (N-7 FIX) ──────────────────
+  const { data: rpcData, error: rpcError } = await db.rpc(
+    "upsert_video_view",
+    {
+      p_video_id: video_id,
+      p_user_id: user.id,
+      p_institution_id: institution_id,
+      p_watch_time_seconds: watch_time_seconds,
+      p_total_watch_time_seconds: total_watch_time_seconds,
+      p_completion_percentage: completion_percentage,
+      p_completed: completed,
+      p_last_position_seconds: last_position_seconds,
+    },
+  );
+
+  if (!rpcError && rpcData) {
+    const view = rpcData.view;
+    const isFirstCompletion = rpcData.first_completion;
+
+    // BKT/FSRS signal on first completion
+    if (isFirstCompletion) {
+      await fireFirstCompletionSignal(db, user.id, video_id);
+    }
+
+    return ok(c, { ...view, first_completion: isFirstCompletion });
+  }
+
+  // ── Fallback: old read+write pattern (if migration not applied) ──
+  console.warn(
+    `[mux/track-view] upsert_video_view RPC failed, using fallback: ${rpcError?.message}`,
+  );
+
   const { data: existing } = await db
     .from("video_views")
     .select("id, completed, view_count")
@@ -394,34 +415,52 @@ muxRoutes.post(`${PREFIX}/mux/track-view`, async (c: Context) => {
 
   if (upsertErr) return err(c, `Track view failed: ${upsertErr.message}`, 500);
 
-  // BKT/FSRS signal: record reading event when video completed for first time
-  // This mirrors the reading_states pattern used in SummarySession
   if (isFirstCompletion) {
-    // Look up the video's summary_id for the reading_states signal
-    const { data: videoRow } = await db
-      .from("videos")
-      .select("summary_id")
-      .eq("id", video_id)
-      .single();
-
-    if (videoRow?.summary_id) {
-      await db.from("reading_states").upsert(
-        {
-          student_id: user.id,
-          summary_id: videoRow.summary_id,
-          completed: true,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "student_id,summary_id" },
-      ).maybeSingle(); // best-effort — don't fail track-view if this fails
-    }
+    await fireFirstCompletionSignal(db, user.id, video_id);
   }
 
   return ok(c, { ...view, first_completion: isFirstCompletion });
 });
 
-// ─── Route 5: GET /mux/video-stats?video_id=xxx ───────────────────────
-// Aggregated watch stats for professor dashboard.
+/**
+ * Fire BKT/FSRS reading signal when a video is completed for the first time.
+ * Best-effort: does not fail the track-view request if this fails.
+ */
+async function fireFirstCompletionSignal(
+  db: any,
+  userId: string,
+  videoId: string,
+): Promise<void> {
+  try {
+    const { data: videoRow } = await db
+      .from("videos")
+      .select("summary_id")
+      .eq("id", videoId)
+      .single();
+
+    if (videoRow?.summary_id) {
+      await db
+        .from("reading_states")
+        .upsert(
+          {
+            student_id: userId,
+            summary_id: videoRow.summary_id,
+            completed: true,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "student_id,summary_id" },
+        )
+        .maybeSingle();
+    }
+  } catch (e) {
+    // Best-effort — log but don't fail track-view
+    console.warn(
+      `[mux/track-view] First completion signal failed: ${(e as Error).message}`,
+    );
+  }
+}
+
+// ─── Route 5: GET /mux/video-stats?video_id=xxx ───────────────────
 
 muxRoutes.get(`${PREFIX}/mux/video-stats`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -441,14 +480,14 @@ muxRoutes.get(`${PREFIX}/mux/video-stats`, async (c: Context) => {
   if (dbErr) return err(c, `Fetch video stats failed: ${dbErr.message}`, 500);
 
   const totalViewers   = views?.length ?? 0;
-  const completedCount = views?.filter((v) => v.completed).length ?? 0;
+  const completedCount = views?.filter((v: any) => v.completed).length ?? 0;
   const avgCompletion  = totalViewers > 0
-    ? views!.reduce((s, v) => s + Number(v.completion_percentage), 0) / totalViewers
+    ? views!.reduce((s: number, v: any) => s + Number(v.completion_percentage), 0) / totalViewers
     : 0;
   const avgWatchTime   = totalViewers > 0
-    ? views!.reduce((s, v) => s + Number(v.watch_time_seconds), 0) / totalViewers
+    ? views!.reduce((s: number, v: any) => s + Number(v.watch_time_seconds), 0) / totalViewers
     : 0;
-  const totalViews     = views?.reduce((s, v) => s + (v.view_count ?? 1), 0) ?? 0;
+  const totalViews     = views?.reduce((s: number, v: any) => s + (v.view_count ?? 1), 0) ?? 0;
 
   return ok(c, {
     video_id:          videoId,
@@ -463,8 +502,7 @@ muxRoutes.get(`${PREFIX}/mux/video-stats`, async (c: Context) => {
   });
 });
 
-// ─── Route 6: DELETE /mux/asset/:video_id ─────────────────────────────
-// Deletes Mux asset + soft-deletes the videos row.
+// ─── Route 6: DELETE /mux/asset/:video_id ─────────────────────────
 
 muxRoutes.delete(`${PREFIX}/mux/asset/:video_id`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -473,7 +511,6 @@ muxRoutes.delete(`${PREFIX}/mux/asset/:video_id`, async (c: Context) => {
 
   const videoId = c.req.param("video_id");
 
-  // Fetch video to get mux_asset_id
   const { data: video, error: fetchErr } = await db
     .from("videos")
     .select("id, mux_asset_id, is_mux, deleted_at")
@@ -483,19 +520,16 @@ muxRoutes.delete(`${PREFIX}/mux/asset/:video_id`, async (c: Context) => {
   if (fetchErr || !video) return err(c, "Video not found", 404);
   if (video.deleted_at)  return err(c, "Video already deleted", 410);
 
-  // Delete from Mux if it's a Mux asset
   if (video.is_mux && video.mux_asset_id) {
     const muxRes = await muxFetch(`/video/v1/assets/${video.mux_asset_id}`, {
       method: "DELETE",
     });
-    // 404 from Mux = already gone, that's fine
     if (!muxRes.ok && muxRes.status !== 404) {
       const muxErr = await muxRes.text();
       return err(c, `Mux delete failed: ${muxErr}`, 502);
     }
   }
 
-  // Soft-delete in DB
   const { error: dbErr } = await db
     .from("videos")
     .update({
