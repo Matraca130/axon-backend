@@ -6,10 +6,9 @@
 // POST ${PREFIX}/restore/:table/:id
 //
 // N-1 FIX: Search queries + path resolution run in parallel.
-//          buildParentPath N+1 replaced with batch path resolution
-//          using PostgREST embedded selects (single query for all paths).
 // N-2 FIX: Trash queries run in parallel via Promise.all.
 // N-8 FIX: escapeLike() sanitizes SQL wildcards in user input.
+// O-1 FIX: or() filter values quoted to prevent comma/paren injection.
 // ============================================================
 
 import { Hono } from "npm:hono";
@@ -31,7 +30,6 @@ const RESTORE_WHITELIST: Record<string, string> = {
 const RESTORE_ROLES = ["owner", "admin", "professor"];
 
 // ── N-8 FIX: Escape SQL LIKE wildcards ───────────────────────
-/** Escapes %, _, and \ so they are treated as literal characters in LIKE/ILIKE patterns. */
 function escapeLike(s: string): string {
   return s.replace(/[%_\\]/g, "\\$&");
 }
@@ -60,14 +58,6 @@ interface SummaryPath {
 }
 
 // ── Batch path resolution (replaces N+1 buildParentPath) ─────
-/**
- * Resolves parent paths for all topic_ids and summary_ids in batch.
- * Uses PostgREST embedded selects: single query per entity type.
- *
- * Returns:
- *   topicPathMap  — Map<topic_id, "Course > Semester > Topic">
- *   summaryPathMap — Map<summary_id, "Topic > Summary Title">
- */
 async function batchResolvePaths(
   db: any,
   topicIds: string[],
@@ -81,7 +71,6 @@ async function batchResolvePaths(
 
   const promises: Promise<void>[] = [];
 
-  // ── Resolve topic paths: topic → section → semester → course ──
   if (topicIds.length > 0) {
     const uniqueTopicIds = [...new Set(topicIds)];
     promises.push(
@@ -118,7 +107,6 @@ async function batchResolvePaths(
     );
   }
 
-  // ── Resolve summary paths for videos: summary → topic ──
   if (summaryIds.length > 0) {
     const uniqueSummaryIds = [...new Set(summaryIds)];
     promises.push(
@@ -156,18 +144,18 @@ searchRoutes.get(`${PREFIX}/search`, async (c: Context) => {
     return err(c, "Query 'q' must be at least 2 characters", 400);
   }
 
-  // N-8 FIX: Escape SQL wildcards before constructing LIKE pattern
   const pattern = `%${escapeLike(q)}%`;
 
   try {
     // ── N-1 FIX: Fire all search queries in parallel ─────────
+    // O-1 FIX: Values quoted with "..." to prevent comma/paren injection
     const [summariesResult, keywordsResult, videosResult] = await Promise.all([
       type === "all" || type === "summaries"
         ? db
             .from("summaries")
             .select("id, title, content_markdown, topic_id")
             .is("deleted_at", null)
-            .or(`title.ilike.${pattern},content_markdown.ilike.${pattern}`)
+            .or(`title.ilike."${pattern}",content_markdown.ilike."${pattern}"`)
             .limit(type === "all" ? 7 : 20)
         : Promise.resolve({ data: [] }),
 
@@ -176,7 +164,7 @@ searchRoutes.get(`${PREFIX}/search`, async (c: Context) => {
             .from("keywords")
             .select("id, name, definition, summary_id")
             .is("deleted_at", null)
-            .or(`name.ilike.${pattern},definition.ilike.${pattern}`)
+            .or(`name.ilike."${pattern}",definition.ilike."${pattern}"`)
             .limit(type === "all" ? 7 : 20)
         : Promise.resolve({ data: [] }),
 
@@ -194,15 +182,13 @@ searchRoutes.get(`${PREFIX}/search`, async (c: Context) => {
     const keywords = keywordsResult.data ?? [];
     const videos = videosResult.data ?? [];
 
-    // ── N-1 FIX: Batch path resolution (replaces N+1) ────────
-    // Collect unique IDs for path resolution
+    // ── Batch path resolution ────────────────────────────────
     const topicIds: string[] = [];
     const summaryIdsForPaths: string[] = [];
 
     for (const s of summaries) {
       if (s.topic_id) topicIds.push(s.topic_id);
     }
-    // Keywords have summary_id, not topic_id. We need summary → topic path.
     for (const k of keywords) {
       if (k.summary_id) summaryIdsForPaths.push(k.summary_id);
     }
@@ -228,7 +214,6 @@ searchRoutes.get(`${PREFIX}/search`, async (c: Context) => {
 
     const qLower = q.toLowerCase();
 
-    // Summaries
     for (const s of summaries) {
       const inTitle = s.title?.toLowerCase().includes(qLower);
       const snippet = inTitle
@@ -245,7 +230,6 @@ searchRoutes.get(`${PREFIX}/search`, async (c: Context) => {
       });
     }
 
-    // Keywords (use summaryPathMap since keywords belong to summaries)
     for (const k of keywords) {
       const inName = k.name?.toLowerCase().includes(qLower);
       const snippet = inName
@@ -263,7 +247,6 @@ searchRoutes.get(`${PREFIX}/search`, async (c: Context) => {
       });
     }
 
-    // Videos
     for (const v of videos) {
       results.push({
         type: "video",
@@ -277,10 +260,8 @@ searchRoutes.get(`${PREFIX}/search`, async (c: Context) => {
       });
     }
 
-    // Sort by relevance (title match > content match)
     results.sort((a, b) => b._score - a._score);
 
-    // Remove internal _score and limit to 20
     const final = results
       .slice(0, 20)
       .map(({ _score, ...r }) => r);
@@ -313,7 +294,6 @@ searchRoutes.get(`${PREFIX}/trash`, async (c: Context) => {
       : Object.entries(TABLE_MAP).map(([key, v]) => ({ key, ...v }));
 
   try {
-    // ── N-2 FIX: Fire all trash queries in parallel ──────────
     const queryResults = await Promise.all(
       targets.map((target) =>
         db
@@ -344,7 +324,6 @@ searchRoutes.get(`${PREFIX}/trash`, async (c: Context) => {
       }
     }
 
-    // Sort by deleted_at DESC (most recent first)
     items.sort(
       (a, b) =>
         new Date(b.deleted_at).getTime() - new Date(a.deleted_at).getTime(),
@@ -365,7 +344,6 @@ searchRoutes.post(`${PREFIX}/restore/:table/:id`, async (c: Context) => {
   const tableParam = c.req.param("table");
   const id = c.req.param("id");
 
-  // Validate whitelist
   const realTable = RESTORE_WHITELIST[tableParam];
   if (!realTable) {
     return err(
@@ -375,7 +353,6 @@ searchRoutes.post(`${PREFIX}/restore/:table/:id`, async (c: Context) => {
     );
   }
 
-  // Validate permissions: check user role
   const { data: membership } = await db
     .from("memberships")
     .select("role")

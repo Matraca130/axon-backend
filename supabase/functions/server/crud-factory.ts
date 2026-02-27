@@ -8,11 +8,12 @@
  * Config flags:
  *   parentKey       — FK column required on LIST + CREATE (e.g. "institution_id")
  *   optionalFilters — extra query params accepted on LIST (e.g. ["keyword_id"])
- *   scopeToUser     — column auto-set to user.id on CREATE, auto-filtered on LIST/UPDATE/DELETE
+ *   scopeToUser     — column auto-set to user.id on CREATE, auto-filtered on LIST/GET/UPDATE/DELETE
  *   hasCreatedBy    — sets created_by = user.id on CREATE (not filtered on LIST)
  *   hasIsActive     — when softDelete, also toggles is_active (default true; false for student notes)
  *
  * N-9 FIX: Pagination limit capped at 500, offset validated >= 0.
+ * O-5 FIX: GET /:id now applies scopeToUser filter (was missing before).
  */
 
 import { Hono } from "npm:hono";
@@ -27,52 +28,27 @@ const DEFAULT_PAGINATION_LIMIT = 100;
 // ─── Types ────────────────────────────────────────────────────────────
 
 export interface CrudConfig {
-  /** Postgres table name */
   table: string;
-  /** URL segment (e.g. "courses") */
   slug: string;
-  /** FK column that scopes this entity to its parent. Required on LIST & CREATE. */
   parentKey?: string;
-  /** Additional query params accepted on LIST (e.g. ["keyword_id"]). */
   optionalFilters?: string[];
-  /**
-   * Column scoped to the authenticated user. Auto-set on CREATE,
-   * auto-filtered on LIST / UPDATE / DELETE. Use for student-owned data.
-   */
   scopeToUser?: string;
-  /** Table has a `created_by` column. Auto-set from auth user on CREATE. */
   hasCreatedBy?: boolean;
-  /** Table has an `updated_at` column. Auto-set on UPDATE. */
   hasUpdatedAt?: boolean;
-  /** Order LIST by `order_index` (true) or `created_at` (false). */
   hasOrderIndex?: boolean;
-  /**
-   * Use soft-delete (set deleted_at) instead of hard DELETE.
-   * If hasIsActive is true (default), also sets is_active = false.
-   */
   softDelete?: boolean;
-  /**
-   * Whether the table has an `is_active` column (only relevant when softDelete = true).
-   * Defaults to true. Set to false for tables like kw_student_notes that have
-   * deleted_at but no is_active.
-   */
   hasIsActive?: boolean;
-  /** Fields REQUIRED on CREATE. Returns 400 if any are missing. */
   requiredFields?: string[];
-  /** Fields the client CAN send on CREATE. parentKey and created_by are auto-added. */
   createFields: string[];
-  /** Fields the client CAN send on UPDATE. */
   updateFields: string[];
 }
 
 // ─── Pagination Helper ────────────────────────────────────────────────
 
-/** Parse and validate pagination params with hard caps. */
 function parsePagination(c: Context): { limit: number; offset: number } {
   let limit = parseInt(c.req.query("limit") ?? String(DEFAULT_PAGINATION_LIMIT), 10);
   let offset = parseInt(c.req.query("offset") ?? "0", 10);
 
-  // N-9 FIX: Validate and cap pagination params
   if (isNaN(limit) || limit < 1) limit = DEFAULT_PAGINATION_LIMIT;
   if (limit > MAX_PAGINATION_LIMIT) limit = MAX_PAGINATION_LIMIT;
   if (isNaN(offset) || offset < 0) offset = 0;
@@ -85,7 +61,6 @@ function parsePagination(c: Context): { limit: number; offset: number } {
 export function registerCrud(app: Hono, cfg: CrudConfig) {
   const base = `${PREFIX}/${cfg.slug}`;
 
-  // Resolve hasIsActive: default true when softDelete is true
   const isActiveSoftDelete = cfg.softDelete && cfg.hasIsActive !== false;
 
   // ── LIST ──────────────────────────────────────────────────────
@@ -96,7 +71,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
 
     let query = db.from(cfg.table).select("*", { count: "exact" });
 
-    // Parent filter (required when configured)
     if (cfg.parentKey) {
       const parentValue = c.req.query(cfg.parentKey);
       if (!parentValue) {
@@ -105,7 +79,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       query = query.eq(cfg.parentKey, parentValue);
     }
 
-    // Optional filters
     if (cfg.optionalFilters) {
       for (const f of cfg.optionalFilters) {
         const v = c.req.query(f);
@@ -113,12 +86,10 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       }
     }
 
-    // Scope to authenticated user (student-owned data)
     if (cfg.scopeToUser) {
       query = query.eq(cfg.scopeToUser, user.id);
     }
 
-    // Soft-delete: hide deleted records by default
     if (cfg.softDelete) {
       const includeDeleted = c.req.query("include_deleted") === "true";
       if (!includeDeleted) {
@@ -126,11 +97,9 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       }
     }
 
-    // Order
     const orderCol = cfg.hasOrderIndex ? "order_index" : "created_at";
     query = query.order(orderCol, { ascending: true });
 
-    // Pagination (N-9 FIX: validated + capped)
     const { limit, offset } = parsePagination(c);
     query = query.range(offset, offset + limit - 1);
 
@@ -140,17 +109,21 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
   });
 
   // ── GET BY ID ─────────────────────────────────────────────────
+  // O-5 FIX: Now applies scopeToUser filter (matches LIST/UPDATE/DELETE)
   app.get(`${base}/:id`, async (c: Context) => {
     const auth = await authenticate(c);
     if (auth instanceof Response) return auth;
-    const { db } = auth;
+    const { user, db } = auth;
 
     const id = c.req.param("id");
-    const { data, error } = await db
-      .from(cfg.table)
-      .select("*")
-      .eq("id", id)
-      .single();
+    let query = db.from(cfg.table).select("*").eq("id", id);
+
+    // Scope: students can only read their own records
+    if (cfg.scopeToUser) {
+      query = query.eq(cfg.scopeToUser, user.id);
+    }
+
+    const { data, error } = await query.single();
     if (error)
       return err(c, `Get ${cfg.table} ${id} failed: ${error.message}`, 404);
     return ok(c, data);
@@ -166,7 +139,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     if (!body) return err(c, "Invalid or missing JSON body", 400);
     const row: Record<string, unknown> = {};
 
-    // Parent FK (required on create)
     if (cfg.parentKey) {
       if (!body[cfg.parentKey]) {
         return err(c, `Missing required field: ${cfg.parentKey}`, 400);
@@ -174,9 +146,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       row[cfg.parentKey] = body[cfg.parentKey];
     }
 
-    // Required fields validation
-    // Catches: undefined, null, "", "   " (whitespace-only strings)
-    // Allows: 0, false (valid non-empty values)
     if (cfg.requiredFields) {
       const missing = cfg.requiredFields.filter((f) => {
         const v = body[f];
@@ -190,15 +159,11 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       }
     }
 
-    // Pick allowed create fields
     for (const f of cfg.createFields) {
       if (body[f] !== undefined) row[f] = body[f];
     }
 
-    // Auto-set created_by
     if (cfg.hasCreatedBy) row.created_by = user.id;
-
-    // Auto-set scope to user (e.g. student_id)
     if (cfg.scopeToUser) row[cfg.scopeToUser] = user.id;
 
     const { data, error } = await db
@@ -233,8 +198,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     if (cfg.hasUpdatedAt) row.updated_at = new Date().toISOString();
 
     let query = db.from(cfg.table).update(row).eq("id", id);
-
-    // Scope: students can only update their own records
     if (cfg.scopeToUser) query = query.eq(cfg.scopeToUser, user.id);
 
     const { data, error } = await query.select().single();
@@ -262,7 +225,7 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
         .from(cfg.table)
         .update(patch)
         .eq("id", id)
-        .is("deleted_at", null); // prevent double-delete
+        .is("deleted_at", null);
       if (cfg.scopeToUser) query = query.eq(cfg.scopeToUser, user.id);
 
       const { data, error } = await query.select().single();
@@ -304,7 +267,7 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
         .from(cfg.table)
         .update(patch)
         .eq("id", id)
-        .not("deleted_at", "is", null); // only restore deleted records
+        .not("deleted_at", "is", null);
       if (cfg.scopeToUser) query = query.eq(cfg.scopeToUser, user.id);
 
       const { data, error } = await query.select().single();
