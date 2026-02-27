@@ -1,23 +1,10 @@
 /**
  * routes-storage.tsx — File storage routes for Axon v4.4
  *
- * Handles image upload/retrieval/deletion for flashcards and summaries
- * using Supabase Storage.
- *
- * Routes:
- *   POST   /storage/upload      — Upload an image file (multipart or base64 JSON)
- *   POST   /storage/signed-url  — Get signed URL(s) for existing file(s)
- *   DELETE /storage/delete      — Delete file(s) from storage
- *
- * Bucket: axon-images (private, auto-created on first use)
- * Path pattern: {folder}/{userId}/{timestamp}-{random}.{ext}
- * Folders: flashcards, summaries, general
- *
- * Limits: 5MB max, image/jpeg|png|webp|gif only
- * Signed URLs expire after 1 hour.
- *
- * O-2 FIX: signed-url and delete routes now use safeJson() instead of raw c.req.json().
+ * O-2 FIX: signed-url and delete routes use safeJson().
  * O-6 FIX: base64 upload wraps atob() in try/catch.
+ * P-4 FIX: upload JSON path also uses safeJson().
+ * P-7 FIX: signed-url batch capped at 100 paths.
  */
 
 import { Hono } from "npm:hono";
@@ -36,10 +23,11 @@ const ALLOWED_MIME_TYPES = [
   "image/webp",
   "image/gif",
 ];
-const SIGNED_URL_EXPIRY = 3600; // 1 hour in seconds
+const SIGNED_URL_EXPIRY = 3600; // 1 hour
 const VALID_FOLDERS = ["flashcards", "summaries", "general"];
+const MAX_BATCH_PATHS = 100; // P-7 FIX
 
-// ─── Bucket Init (idempotent, cached after first success) ─────────────
+// ─── Bucket Init ─────────────────────────────────────────────────────
 
 let bucketReady = false;
 
@@ -111,11 +99,14 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
     originalName = file.name;
   } else if (contentType.includes("application/json")) {
     // ── Base64 JSON upload (fallback) ───────────────────────────
-    const body = await c.req.json();
+    // P-4 FIX: Use safeJson instead of raw c.req.json()
+    const body = await safeJson(c);
+    if (!body) return err(c, "Invalid or missing JSON body", 400);
+
     if (!body.base64 || !body.mimeType || !body.fileName) {
       return err(c, "JSON upload requires: base64, mimeType, fileName", 400);
     }
-    if (!ALLOWED_MIME_TYPES.includes(body.mimeType)) {
+    if (!ALLOWED_MIME_TYPES.includes(body.mimeType as string)) {
       return err(
         c,
         `Invalid file type: ${body.mimeType}. Allowed: ${ALLOWED_MIME_TYPES.join(", ")}`,
@@ -123,10 +114,10 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
       );
     }
 
-    // O-6 FIX: Wrap atob() in try/catch for invalid base64 input
+    // O-6 FIX: Wrap atob() in try/catch
     let binaryString: string;
     try {
-      binaryString = atob(body.base64);
+      binaryString = atob(body.base64 as string);
     } catch {
       return err(c, "Invalid base64 data", 400);
     }
@@ -145,9 +136,9 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
     }
 
     fileBuffer = bytes.buffer;
-    mimeType = body.mimeType;
-    folder = body.folder || "general";
-    originalName = body.fileName;
+    mimeType = body.mimeType as string;
+    folder = (body.folder as string) || "general";
+    originalName = body.fileName as string;
   } else {
     return err(
       c,
@@ -167,7 +158,6 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
   const random = Math.random().toString(36).substring(2, 8);
   const storagePath = `${folder}/${user.id}/${timestamp}-${random}.${ext}`;
 
-  // Upload via admin client (bypasses RLS)
   const admin = getAdminClient();
   const { error: uploadError } = await admin.storage
     .from(BUCKET_NAME)
@@ -180,7 +170,6 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
     return err(c, `Upload failed: ${uploadError.message}`, 500);
   }
 
-  // Generate signed URL for immediate use
   const { data: signedData, error: signedError } = await admin.storage
     .from(BUCKET_NAME)
     .createSignedUrl(storagePath, SIGNED_URL_EXPIRY);
@@ -207,7 +196,6 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
 });
 
 // ─── POST /storage/signed-url ─────────────────────────────────────
-// O-2 FIX: Uses safeJson() instead of raw c.req.json()
 
 storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -222,6 +210,10 @@ storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
   if (body.paths && Array.isArray(body.paths)) {
     if (body.paths.length === 0) {
       return ok(c, { signedUrls: [], expiresIn: SIGNED_URL_EXPIRY });
+    }
+    // P-7 FIX: Cap batch size
+    if (body.paths.length > MAX_BATCH_PATHS) {
+      return err(c, `Maximum ${MAX_BATCH_PATHS} paths per batch request`, 400);
     }
 
     const { data, error } = await admin.storage
@@ -242,7 +234,7 @@ storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
 
   const { data, error } = await admin.storage
     .from(BUCKET_NAME)
-    .createSignedUrl(body.path, SIGNED_URL_EXPIRY);
+    .createSignedUrl(body.path as string, SIGNED_URL_EXPIRY);
 
   if (error) {
     return err(c, `Signed URL failed: ${error.message}`, 500);
@@ -256,7 +248,6 @@ storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
 });
 
 // ─── DELETE /storage/delete ───────────────────────────────────────
-// O-2 FIX: Uses safeJson() instead of raw c.req.json()
 
 storageRoutes.delete(`${PREFIX}/storage/delete`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -273,7 +264,6 @@ storageRoutes.delete(`${PREFIX}/storage/delete`, async (c: Context) => {
     return err(c, "Missing 'path' or 'paths' in request body", 400);
   }
 
-  // Security: only allow deleting files owned by the authenticated user
   const unauthorized = paths.filter(
     (p: string) => !p.includes(`/${user.id}/`),
   );

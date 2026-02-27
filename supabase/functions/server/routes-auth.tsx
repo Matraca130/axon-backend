@@ -14,11 +14,9 @@
  * GET /me auto-profile-creation:
  *   If the user exists in auth.users but has no profiles row (error PGRST116),
  *   the handler auto-creates the profile from auth user metadata.
- *   This prevents a sign-in loop for users created outside the /signup flow.
  *   N-6 FIX: Now fetches metadata via admin.auth.admin.getUserById()
- *   instead of the (always-undefined) user.user_metadata.
- *
- * Login/logout are handled client-side by supabase-js (not proxied through server).
+ *   P-5 FIX: Password max length capped at 128.
+ *   P-6 FIX: Auto-profile uses upsert to handle concurrent requests.
  */
 
 import { Hono } from "npm:hono";
@@ -35,8 +33,7 @@ import type { Context } from "npm:hono";
 
 const authRoutes = new Hono();
 
-// ─── POST /signup ───────────────────────────────────────────────────
-// Public route — no auth required. Uses admin client to create user.
+// ─── POST /signup ───────────────────────────────────────────────
 
 authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
   const body = await safeJson(c);
@@ -52,8 +49,12 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
   if (!isNonEmpty(password)) {
     return err(c, "password must be a non-empty string", 400);
   }
-  if (password.length < 8) {
+  if (typeof password !== "string" || password.length < 8) {
     return err(c, "Password must be at least 8 characters", 400);
+  }
+  // P-5 FIX: Cap password length to prevent abuse
+  if (password.length > 128) {
+    return err(c, "Password must be at most 128 characters", 400);
   }
 
   const admin = getAdminClient();
@@ -66,7 +67,6 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
       user_metadata: {
         full_name: typeof full_name === "string" ? full_name : "",
       },
-      // Automatically confirm the user's email since an email server hasn't been configured.
       email_confirm: true,
     });
 
@@ -99,10 +99,7 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
   return ok(c, { id: userId, email }, 201);
 });
 
-// ─── GET /me ────────────────────────────────────────────────────────
-// Returns the authenticated user's profile from the `profiles` table.
-// If the profile row is missing (PGRST116), auto-creates it from
-// auth user metadata to prevent sign-in loops.
+// ─── GET /me ───────────────────────────────────────────────────
 
 authRoutes.get(`${PREFIX}/me`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -121,19 +118,23 @@ authRoutes.get(`${PREFIX}/me`, async (c: Context) => {
       console.log(`[Axon] Auto-creating missing profile for user ${user.id}`);
       const admin = getAdminClient();
 
-      // N-6 FIX: authenticate() only returns {id, email} — it does NOT
-      // include user_metadata. Fetch the full user record from Supabase Auth
-      // to get the actual metadata (full_name, etc.).
+      // N-6 FIX: Fetch full user record from Supabase Auth
       const { data: authData } = await admin.auth.admin.getUserById(user.id);
       const meta = authData?.user?.user_metadata || {};
 
+      // P-6 FIX: Use upsert instead of insert to handle race condition.
+      // If two concurrent /me requests both detect PGRST116, the second
+      // upsert will simply update (no-op) instead of failing with duplicate key.
       const { data: created, error: insertErr } = await admin
         .from("profiles")
-        .insert({
-          id: user.id,
-          email: user.email,
-          full_name: meta.full_name || meta.name || "",
-        })
+        .upsert(
+          {
+            id: user.id,
+            email: user.email,
+            full_name: meta.full_name || meta.name || "",
+          },
+          { onConflict: "id" },
+        )
         .select("*")
         .single();
 
@@ -157,8 +158,7 @@ authRoutes.get(`${PREFIX}/me`, async (c: Context) => {
   return ok(c, data);
 });
 
-// ─── PUT /me ────────────────────────────────────────────────────────
-// Update the authenticated user's profile. Only whitelisted fields allowed.
+// ─── PUT /me ───────────────────────────────────────────────────
 
 authRoutes.put(`${PREFIX}/me`, async (c: Context) => {
   const auth = await authenticate(c);
