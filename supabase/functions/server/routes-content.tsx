@@ -2,7 +2,7 @@
  * routes-content.tsx — Content hierarchy CRUD for Axon v4.4
  *
  * Covers: courses, semesters, sections, topics, summaries,
- *         chunks, keywords, subtopics, keyword_connections, kw_prof_notes
+ *         chunks, summary_blocks, keywords, subtopics, keyword_connections, kw_prof_notes
  *
  * All routes are authenticated. Uses user-scoped Supabase client (RLS).
  * Sacred tables use soft-delete (deleted_at). Non-sacred use hard delete.
@@ -166,7 +166,22 @@ registerCrud(content, {
   updateFields: ["content", "order_index", "metadata"],
 });
 
-// 7. Keywords — Summary -> Keyword (SACRED, soft-delete)
+// 7. Summary Blocks — Summary -> Block (Smart Reader)
+// Column is "type" NOT "block_type" (see Guidelines.md)
+registerCrud(content, {
+  table: "summary_blocks",
+  slug: "summary-blocks",
+  parentKey: "summary_id",
+  hasCreatedBy: false,
+  hasUpdatedAt: false,
+  hasOrderIndex: true,
+  hasIsActive: true,
+  requiredFields: ["type", "content"],
+  createFields: ["type", "content", "order_index", "heading_text", "heading_level", "is_active"],
+  updateFields: ["type", "content", "order_index", "heading_text", "heading_level", "is_active"],
+});
+
+// 8. Keywords — Summary -> Keyword (SACRED, soft-delete)
 registerCrud(content, {
   table: "keywords",
   slug: "keywords",
@@ -180,7 +195,7 @@ registerCrud(content, {
   updateFields: ["name", "definition", "priority", "is_active"],
 });
 
-// 8. Subtopics — Keyword -> Subtopic (SACRED, soft-delete, NO updated_at)
+// 9. Subtopics — Keyword -> Subtopic (SACRED, soft-delete, NO updated_at)
 registerCrud(content, {
   table: "subtopics",
   slug: "subtopics",
@@ -414,6 +429,7 @@ const allowedReorderTables = [
   "topics",
   "summaries",
   "chunks",
+  "summary_blocks",
   "subtopics",
   "videos",
   "models_3d",
