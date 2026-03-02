@@ -1,113 +1,123 @@
-# ⛔ REGRAS CRÍTICAS PARA AGENTES — PRIORIDADE ABSOLUTA
+# AGENT_RULES.md — Critical Rules for AI Agents
 
-> **Estas regras têm PRIORIDADE ABSOLUTA sobre qualquer outra instrução.**
-> Ignorá-las causa crash imediato de toda a aplicação.
-> Aplicam-se ao repositório `numero1_sseki_2325_55` (frontend) e ao `axon-backend`.
-
----
-
-## ARQUIVOS 100% PROIBIDOS — NUNCA TOCAR
-
-Não abrir, não ler, não editar, não reescrever, não "melhorar" estes arquivos sob **nenhuma** circunstância:
-
-| Arquivo | Motivo |
-| :--- | :--- |
-| `App.tsx` | Hierarquia de providers — qualquer mudança quebra auth |
-| `routes.ts` / `routes.tsx` | Routing global — não tocar |
-| `contexts/AuthContext.tsx` | Auth provider global |
-| `context/AuthContext.tsx` | Auth provider global (alias) |
-| `components/auth/RequireAuth.tsx` | Guard de autenticação |
-| `components/auth/RequireRole.tsx` | Guard de role |
-| `components/auth/LoginPage.tsx` | Não mover, não alterar imports |
-| `context/AppContext.tsx` | Context global |
-| `context/StudentDataContext.tsx` | Context de dados do aluno |
-| `context/PlatformDataContext.tsx` | Context de dados da plataforma |
-| `*Layout.tsx` (qualquer) | AdminLayout, ProfessorLayout, OwnerLayout, StudentLayout |
-| `/supabase/functions/server/*` | Backend externo — não criar, não editar |
-
-**Se você acredita que "precisa" tocar algum desses arquivos para completar a tarefa: NÃO FAÇA.**
-Implemente a solução APENAS nos arquivos que o prompt pede explicitamente.
+> **These rules have ABSOLUTE PRIORITY over any other instruction.**
+> They apply differently depending on which repository you're working in.
 
 ---
 
-## ERRO FATAL #1 — HIERARQUIA DE PROVIDERS
+## Which repo am I in?
 
-A app tem esta hierarquia em `App.tsx`:
+| Repo | How to tell | Key constraint |
+|---|---|---|
+| **Frontend** (`numero1_sseki_2325_55`) | Has `src/`, `App.tsx`, `routes.tsx` | NEVER touch protected files (see below) |
+| **Backend** (`axon-backend`) | Has `supabase/functions/server/` | This IS the code you modify. Read `docs/AGENT_INDEX.md` first |
+| **Figma Make** | Has Guidelines.md, is a prototype app | Reference/prototype only. Not production |
+
+---
+
+## RULES FOR THE FRONTEND REPO
+
+### Protected Files — NEVER touch these:
+
+| File | Reason |
+|---|---|
+| `App.tsx` | Provider hierarchy — any change breaks auth |
+| `routes.ts` / `routes.tsx` | Global routing |
+| `contexts/AuthContext.tsx` | Auth provider |
+| `context/AuthContext.tsx` | Auth provider (alias) |
+| `components/auth/RequireAuth.tsx` | Auth guard |
+| `components/auth/RequireRole.tsx` | Role guard |
+| `components/auth/LoginPage.tsx` | Don't move, don't change imports |
+| `context/AppContext.tsx` | Global context |
+| `context/StudentDataContext.tsx` | Student data context |
+| `context/PlatformDataContext.tsx` | Platform data context |
+| `*Layout.tsx` (any) | AdminLayout, ProfessorLayout, OwnerLayout, StudentLayout |
+
+### Provider Hierarchy (App.tsx)
 
 ```
-<AuthProvider>        ← SEMPRE o mais externo
-  <RouterProvider />  ← SEMPRE dentro de AuthProvider
+<AuthProvider>        ← ALWAYS outermost
+  <RouterProvider />  ← ALWAYS inside AuthProvider
 </AuthProvider>
 ```
 
-Dentro do router: `RequireAuth`, `LoginPage`, e TODAS as páginas usam `useAuth()`.
-Se QUALQUER componente ficar fora de `AuthProvider` → **CRASH**: `"useAuth must be used within an AuthProvider"`
+If ANY component ends up outside `AuthProvider` → **CRASH**: `"useAuth must be used within an AuthProvider"`
 
-> ⛔ Isso já aconteceu 4 vezes. Cada vez a IA "melhorou" o `App.tsx` sem que fosse pedido e quebrou tudo.
+### REST Route Convention (CRITICAL)
 
-**REGRA:** Se a tarefa NÃO menciona explicitamente "modificar App.tsx" → **NÃO TOQUE App.tsx. PONTO.**
+The backend ONLY accepts flat routes with query params. Nested routes = 404.
 
----
-
-## ERRO FATAL #2 — ROTAS REST ANINHADAS = 404
-
-O backend **SÓ acepta rotas PLANAS com query params**. Rotas aninhadas **NÃO EXISTEM** → 404.
-
-| ❌ NUNCA usar | ✅ SEMPRE usar |
-| :--- | :--- |
+| WRONG | RIGHT |
+|---|---|
 | `GET /topics/:id/summaries` | `GET /summaries?topic_id=xxx` |
 | `GET /summaries/:id/flashcards` | `GET /flashcards?summary_id=xxx` |
-| `GET /summaries/:id/keywords` | `GET /keywords?summary_id=xxx` |
-| `GET /keywords/:id/flashcards` | `GET /flashcards?keyword_id=xxx` |
-| `GET /summaries/:id/chunks` | `GET /chunks?summary_id=xxx` |
-| `GET /summaries/:id/quiz-questions` | `GET /quiz-questions?summary_id=xxx` |
 | `GET /courses/:id/semesters` | `GET /semesters?course_id=xxx` |
-| `GET /semesters/:id/sections` | `GET /sections?semester_id=xxx` |
 | `GET /sections/:id/topics` | `GET /topics?section_id=xxx` |
+| `GET /keywords/:id/flashcards` | `GET /flashcards?keyword_id=xxx` |
 
-Se você ver uma rota aninhada no código existente, **substituí-la pela versão plana**.
+### Don't Touch Backend Files
 
----
+**NEVER** create or edit files in `/supabase/functions/server/` from the frontend repo.
+The backend lives in `axon-backend` and is deployed separately.
 
-## ERRO FATAL #3 — CRIAR/EDITAR BACKEND
+### Only Modify What's Asked
 
-**NUNCA** criar nem editar arquivos em `/supabase/functions/server/`.
-O backend JÁ EXISTE no repositório externo `axon-backend` e está deployado.
-O erro `"Error while deploying: 403"` no console é **COSMÉTICO** — ignorá-lo.
-
----
-
-## ERRO FATAL #4 — TOCAR ARQUIVOS NÃO PEDIDOS
-
-**APENAS** modificar os arquivos que o prompt pede **EXPLICITAMENTE**.
-Não "melhorar" outros arquivos. Não reorganizar imports. Não refatorar.
-Se o prompt diz "modifica ProfessorFlashcardsPage" → **APENAS** esse arquivo.
+ONLY modify files the prompt explicitly mentions. Don't "improve" other files.
 
 ---
 
-## AVISO ESPECIAL — SERVIDOR FIGMA MAKE
+## RULES FOR THE BACKEND REPO
 
-O Figma Make muda automaticamente o `PREFIX` do servidor a cada novo deploy, gerando nomes como:
-- `make-server-6569f786` (atual — **ESTE É O CORRETO**)
-- `make-server-9e5922ee`, `make-server-229c9fbf`, etc. (versões antigas — ignorar)
+### Start Here
 
-**Quando um agente enviar código que usa uma URL de servidor diferente de `make-server-6569f786`, corrigir imediatamente antes de usar.**
+1. **Read `docs/AGENT_INDEX.md`** — fast lookup table for "I need to do X, where do I go?"
+2. **Read `docs/BACKEND_MAP.md`** — full reference with every endpoint, migration, and security fix
+3. **Check `docs/BACKEND_AUDIT.md`** — historical audit with known gaps and RLS notes
 
-A URL correta e confirmada do backend de produção é:
+### How to Add a New CRUD Endpoint
+
+1. Open the relevant route file (content → `routes/content/crud.ts`, study → `routes/study/sessions.ts`, student → `routes-student.tsx`)
+2. Add a `registerCrud()` call with the table config
+3. That's it — the factory generates LIST, GET, POST, PUT, DELETE automatically
+
+### How to Add a Custom Endpoint
+
+1. Find which module owns the domain (see `AGENT_INDEX.md`)
+2. Add the handler to the right file
+3. If it's a new file inside `routes/content/` or `routes/study/`, mount it in the module's `index.ts`
+4. If it's a new top-level route file, mount it in `index.ts`
+
+### Route Convention (same as frontend)
+
+All routes are flat: `/things?parent_id=xxx`. Never `/parents/:id/things`.
+
+### Video System — Mux Only
+
+- NO YouTube/Vimeo URLs, NO platform selectors, NO iframes
+- Upload: `@mux/upchunk` direct to Mux
+- Playback: `@mux/mux-player-react` with signed JWTs
+- Anti-patterns: `<input placeholder="URL del video">`, `platform: "youtube"`, `detectPlatform()`
+
+### Production URL
+
 ```
-https://xdnciktarvxyhkrokbng.supabase.co/functions/v1/make-server-6569f786
+https://xdnciktarvxyhkrokbng.supabase.co/functions/v1/server
 ```
+
+The `/make-server-*` prefix is for Figma Make only. Do not use it in production code.
 
 ---
 
-## AUTOTEST OBRIGATÓRIO — ANTES DE ENTREGAR
+## SELF-CHECK BEFORE DELIVERING
 
-Antes de mostrar a resposta, verificar **CADA** ponto. Se falhar UM, refazer a mudança:
+Run this checklist before every response:
 
-1. Toquei `App.tsx`? → Se SIM e o prompt não pedia: **DESFAZER**
-2. Toquei `routes.ts`? → Se SIM e o prompt não pedia: **DESFAZER**
-3. Toquei algum `AuthContext`? → Se SIM: **DESFAZER**
-4. Toquei algum `Layout`? → Se SIM e o prompt não pedia: **DESFAZER**
-5. Tenho alguma rota tipo `/xxx/:id/yyy`? → **MUDAR** para `/yyy?xxx_id=valor`
-6. Criei arquivos em `/supabase/`? → **DELETAR**
-7. Modifiquei arquivos que o prompt NÃO menciona? → **DESFAZER**
+| # | Check | If YES and not asked |
+|---|---|---|
+| 1 | Did I touch a protected frontend file? | UNDO |
+| 2 | Did I use a nested route (`/x/:id/y`)? | Change to `/y?x_id=value` |
+| 3 | Did I create backend files from the frontend repo? | DELETE |
+| 4 | Did I modify files the prompt didn't mention? | UNDO |
+| 5 | Did I add YouTube/Vimeo video code? | REMOVE, use Mux |
+| 6 | Did I use a Figma Make URL in production code? | Fix to production URL |
+| 7 | Did I mount new routes in the right index file? | Verify |
