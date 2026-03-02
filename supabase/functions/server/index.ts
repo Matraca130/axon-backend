@@ -12,9 +12,9 @@ import { rateLimitMiddleware } from "./rate-limit.ts";
 
 import { authRoutes } from "./routes-auth.tsx";
 import { memberRoutes } from "./routes-members.tsx";
-import { content } from "./routes-content.tsx";
+import { content } from "./routes/content/index.ts";
 import { studentRoutes } from "./routes-student.tsx";
-import { studyRoutes } from "./routes-study.tsx";
+import { studyRoutes } from "./routes/study/index.ts";
 import { studyQueueRoutes } from "./routes-study-queue.tsx";
 import { modelRoutes } from "./routes-models.tsx";
 import { planRoutes } from "./routes-plans.tsx";
