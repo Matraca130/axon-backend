@@ -1,6 +1,9 @@
 /**
  * routes/study/progress.ts — Student progress tracking
  *
+ * UNIFIED ENDPOINT (speed optimization):
+ *   GET /topic-progress?topic_id=xxx — summaries + reading states + flashcard counts in 1 request
+ *
  * UPSERT TABLES — atomic .upsert({ onConflict }):
  *   reading_states    — per-summary reading progress
  *   daily_activities  — per-day activity log
@@ -43,6 +46,102 @@ export async function atomicUpsert(
     .single();
   return { data, error };
 }
+
+// ═════════════════════════════════════════════════════════════════════
+// UNIFIED ENDPOINT: topic-progress (N+1 → 1 request)
+//
+// GET /topic-progress?topic_id=xxx
+//
+// Returns all summaries for a topic, enriched with:
+//   - reading_state (per student, from reading_states table)
+//   - flashcard_count (active flashcards per summary)
+//
+// This replaces the N+1 pattern where the frontend did:
+//   1 request  → GET /summaries?topic_id=xxx
+//   N requests → GET /reading-states?summary_id=yyy  (per summary)
+//   N requests → GET /flashcards?summary_id=yyy      (per summary)
+//   Total: 1 + 2N requests (up to 21 for 10 summaries)
+//
+// Now: 1 request → GET /topic-progress?topic_id=xxx
+//   Server does 3 parallel queries internally.
+// ═════════════════════════════════════════════════════════════════════
+
+progressRoutes.get(`${PREFIX}/topic-progress`, async (c: Context) => {
+  const auth = await authenticate(c);
+  if (auth instanceof Response) return auth;
+  const { user, db } = auth;
+
+  const topicId = c.req.query("topic_id");
+  if (!isUuid(topicId)) {
+    return err(c, "topic_id must be a valid UUID", 400);
+  }
+
+  try {
+    // Step 1: Get published summaries for this topic
+    const { data: summaries, error: sumErr } = await db
+      .from("summaries")
+      .select("*")
+      .eq("topic_id", topicId)
+      .eq("status", "published")
+      .eq("is_active", true)
+      .is("deleted_at", null)
+      .order("order_index", { ascending: true });
+
+    if (sumErr) {
+      return err(c, `Failed to fetch summaries: ${sumErr.message}`, 500);
+    }
+
+    if (!summaries || summaries.length === 0) {
+      return ok(c, { summaries: [], reading_states: {}, flashcard_counts: {} });
+    }
+
+    const summaryIds = summaries.map((s: any) => s.id);
+
+    // Step 2: Batch fetch reading states + flashcard counts in parallel
+    const [readingStatesResult, flashcardsResult] = await Promise.all([
+      // Batch reading states: WHERE student_id = user AND summary_id IN (...)
+      db
+        .from("reading_states")
+        .select("*")
+        .eq("student_id", user.id)
+        .in("summary_id", summaryIds),
+
+      // Batch flashcard counts: WHERE summary_id IN (...) AND is_active AND NOT deleted
+      // We only need the count per summary, so select minimal columns
+      db
+        .from("flashcards")
+        .select("id, summary_id")
+        .in("summary_id", summaryIds)
+        .eq("is_active", true)
+        .is("deleted_at", null),
+    ]);
+
+    // Process reading states into a map: { summary_id: ReadingState }
+    const readingStatesMap: Record<string, unknown> = {};
+    if (!readingStatesResult.error && readingStatesResult.data) {
+      for (const rs of readingStatesResult.data) {
+        readingStatesMap[rs.summary_id] = rs;
+      }
+    }
+
+    // Process flashcard counts into a map: { summary_id: count }
+    const flashcardCountsMap: Record<string, number> = {};
+    if (!flashcardsResult.error && flashcardsResult.data) {
+      for (const fc of flashcardsResult.data) {
+        flashcardCountsMap[fc.summary_id] =
+          (flashcardCountsMap[fc.summary_id] || 0) + 1;
+      }
+    }
+
+    return ok(c, {
+      summaries,
+      reading_states: readingStatesMap,
+      flashcard_counts: flashcardCountsMap,
+    });
+  } catch (e: any) {
+    return err(c, `topic-progress failed: ${e.message}`, 500);
+  }
+});
 
 // ─── Reading States ───────────────────────────────────────────────────
 
