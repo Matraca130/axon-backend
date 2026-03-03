@@ -7,6 +7,10 @@
  * The entire NeedScore calculation, filtering, and ranking happens in SQL.
  * Falls back to the original JS-side logic if the RPC is unavailable.
  *
+ * S-3b FIX: RPC now returns total_count via COUNT(*) OVER() so
+ * total_in_queue accurately reflects ALL matching cards, not just
+ * the LIMIT-ed subset returned.
+ *
  * The algorithm combines three systems:
  *   1. BKT (Bayesian Knowledge Tracing) — concept-level mastery per subtopic
  *   2. FSRS (Free Spaced Repetition Scheduler) — card-level scheduling
@@ -166,7 +170,7 @@ async function getStudyQueueFromRpc(
   courseId: string | null,
   limit: number,
   includeFuture: boolean,
-): Promise<{ queue: unknown[]; totalDue: number; totalNew: number } | null> {
+): Promise<{ queue: unknown[]; totalDue: number; totalNew: number; totalInQueue: number } | null> {
   try {
     const { data, error } = await db.rpc("get_study_queue", {
       p_student_id: userId,
@@ -182,9 +186,15 @@ async function getStudyQueueFromRpc(
       return null;
     }
 
-    if (!data) return null;
+    if (!data || data.length === 0) {
+      return { queue: [], totalDue: 0, totalNew: 0, totalInQueue: 0 };
+    }
 
-    // Count new vs review from results
+    // S-3b FIX: Extract total_count from the first row (window function)
+    // Every row has the same total_count value, so we only need the first.
+    const totalInQueue = Number(data[0].total_count) || 0;
+
+    // Count new vs review from the returned (limited) results
     let totalNew = 0;
     let totalDue = 0;
     for (const item of data) {
@@ -192,7 +202,13 @@ async function getStudyQueueFromRpc(
       else totalDue++;
     }
 
-    return { queue: data, totalDue, totalNew };
+    // Strip total_count from response items (internal field)
+    const queue = data.map((item: Record<string, unknown>) => {
+      const { total_count: _tc, ...rest } = item;
+      return rest;
+    });
+
+    return { queue, totalDue, totalNew, totalInQueue };
   } catch (e) {
     console.warn(
       `[StudyQueue] RPC exception: ${(e as Error).message}. Falling back to JS.`,
@@ -210,7 +226,7 @@ async function getStudyQueueFromJs(
   limit: number,
   includeFuture: boolean,
   now: Date,
-): Promise<{ queue: unknown[]; totalDue: number; totalNew: number }> {
+): Promise<{ queue: unknown[]; totalDue: number; totalNew: number; totalInQueue: number }> {
   // Build FSRS query
   let fsrsQuery = db
     .from("fsrs_states")
@@ -251,7 +267,7 @@ async function getStudyQueueFromJs(
   if (flashcardsResult.error) throw new Error(`Fetch flashcards failed: ${flashcardsResult.error.message}`);
 
   if (courseId && allowedSummaryIds === null) {
-    return { queue: [], totalDue: 0, totalNew: 0 };
+    return { queue: [], totalDue: 0, totalNew: 0, totalInQueue: 0 };
   }
 
   // Build lookup maps
@@ -381,6 +397,7 @@ async function getStudyQueueFromJs(
     queue: queue.slice(0, limit),
     totalDue: totalReview,
     totalNew: totalNew,
+    totalInQueue: queue.length,
   };
 }
 
@@ -434,7 +451,7 @@ studyQueueRoutes.get(`${PREFIX}/study-queue`, async (c: Context) => {
       meta: {
         total_due: result.totalDue,
         total_new: result.totalNew,
-        total_in_queue: result.queue.length,
+        total_in_queue: result.totalInQueue,
         returned: result.queue.length,
         limit,
         include_future: includeFuture,

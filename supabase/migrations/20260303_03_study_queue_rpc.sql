@@ -13,6 +13,9 @@
 --
 -- NeedScore v4.2 algorithm (exact replication from JS):
 --   score = 0.40 * overdue + 0.30 * mastery + 0.20 * fragility + 0.10 * novelty
+--
+-- S-3b FIX: Added total_count via COUNT(*) OVER() window function
+--           so the edge function knows the real total before LIMIT.
 -- ============================================================
 
 CREATE OR REPLACE FUNCTION get_study_queue(
@@ -38,7 +41,8 @@ RETURNS TABLE (
   due_at TIMESTAMPTZ,
   stability NUMERIC,
   difficulty NUMERIC,
-  is_new BOOLEAN
+  is_new BOOLEAN,
+  total_count BIGINT
 )
 LANGUAGE plpgsql
 STABLE
@@ -58,8 +62,6 @@ BEGIN
     JOIN semesters sem ON sem.id = sec.semester_id AND sem.deleted_at IS NULL
     WHERE sem.course_id = p_course_id
       AND s.deleted_at IS NULL
-    -- Only apply this filter when p_course_id is provided
-    -- When NULL, we skip this CTE via the WHERE clause below
   ),
 
   -- Step 2: Get active flashcards (with optional course filter)
@@ -99,13 +101,12 @@ BEGIN
       ON fs.flashcard_id = ac.id
       AND fs.student_id = p_student_id
     WHERE
-      -- Filter: only due cards (unless include_future)
       p_include_future
-      OR fs.flashcard_id IS NULL  -- new cards always included
-      OR fs.due_at <= v_now        -- due cards
+      OR fs.flashcard_id IS NULL
+      OR fs.due_at <= v_now
   ),
 
-  -- Step 4: Join with BKT states for mastery
+  -- Step 4: Join with BKT states for mastery + calculate scores
   cards_with_scores AS (
     SELECT
       c.*,
@@ -113,7 +114,6 @@ BEGIN
 
       -- NeedScore calculation (v4.2)
       (
-        -- Factor 1: Overdue (0.40 weight)
         0.40 * CASE
           WHEN c.fsrs_due_at IS NULL THEN 1.0
           WHEN v_now > c.fsrs_due_at THEN
@@ -123,16 +123,13 @@ BEGIN
           ELSE 0.0
         END
         +
-        -- Factor 2: Mastery need (0.30 weight)
         0.30 * (1.0 - COALESCE(bkt.p_know, 0))
         +
-        -- Factor 3: Fragility (0.20 weight)
         0.20 * LEAST(1.0,
           COALESCE(c.fsrs_lapses, 0)::NUMERIC
           / GREATEST(1, COALESCE(c.fsrs_reps, 0) + COALESCE(c.fsrs_lapses, 0) + 1)::NUMERIC
         )
         +
-        -- Factor 4: Novelty (0.10 weight)
         0.10 * CASE WHEN COALESCE(c.fsrs_state_val, 'new') = 'new' THEN 1.0 ELSE 0.0 END
       ) AS computed_need_score,
 
@@ -162,6 +159,7 @@ BEGIN
   )
 
   -- Final: select, sort by NeedScore DESC, limit
+  -- S-3b FIX: COUNT(*) OVER() gives total matching rows before LIMIT
   SELECT
     cs.id AS flashcard_id,
     cs.summary_id,
@@ -179,7 +177,8 @@ BEGIN
     cs.fsrs_due_at AS due_at,
     COALESCE(cs.fsrs_stability, 1) AS stability,
     COALESCE(cs.fsrs_difficulty, 5) AS difficulty,
-    cs.card_is_new AS is_new
+    cs.card_is_new AS is_new,
+    COUNT(*) OVER() AS total_count
   FROM cards_with_scores cs
   ORDER BY
     cs.computed_need_score DESC,
