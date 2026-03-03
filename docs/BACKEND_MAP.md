@@ -1,7 +1,7 @@
 # Axon Backend Map
 
 > Single source of truth for navigating the `axon-backend` repository.
-> Last updated: 2026-03-03 (post refactor/organize-backend-v3)
+> Last updated: 2026-03-03 (post organize-backend-v3 merge)
 
 ## Repository Structure
 
@@ -14,9 +14,8 @@ axon-backend/
 │   ├── BACKEND_AUDIT.md                ← Historical audit (Feb 2026)
 │   ├── BACKEND_MAP.md                  ← THIS FILE
 │   └── figma-make/                     ← Figma Make context docs (6 files)
-├── migrations/                         ← ⚠️ LEGACY — delete after verifying supabase/migrations/
 ├── supabase/
-│   ├── migrations/                     ← PRIMARY migrations (13 files)
+│   ├── migrations/                     ← All SQL migrations (13 files)
 │   └── functions/server/               ← Edge Function (Hono + Deno)
 │       ├── index.ts                    ← ENTRYPOINT: mounts all routes + middleware
 │       ├── db.ts                       ← Supabase clients, auth, response helpers
@@ -25,63 +24,77 @@ axon-backend/
 │       ├── rate-limit.ts               ← In-memory sliding window rate limiter
 │       ├── timing-safe.ts              ← Constant-time string comparison
 │       │
-│       ├── routes/                     ← MODULAR ROUTE SYSTEM
-│       │   ├── content/                ← Content hierarchy (was 17KB monolith)
+│       ├── routes/                     ← SPLIT MODULES (6 domains)
+│       │   ├── content/                ← Content hierarchy (6 files)
 │       │   │   ├── index.ts            ← Module combiner
-│       │   │   ├── crud.ts             ← 9 registerCrud calls (courses→subtopics)
-│       │   │   ├── keyword-connections.ts  ← Manual CRUD for keyword_connections
-│       │   │   ├── prof-notes.ts       ← Manual CRUD for kw_prof_notes
-│       │   │   ├── reorder.ts          ← PUT /reorder (bulk, M-3 RPC)
-│       │   │   └── content-tree.ts     ← GET /content-tree (nested hierarchy)
-│       │   ├── study/                  ← Study system (was 27KB monolith)
+│       │   │   ├── crud.ts             ← 9 registerCrud (courses→subtopics)
+│       │   │   ├── keyword-connections.ts  ← Manual CRUD
+│       │   │   ├── prof-notes.ts       ← kw_prof_notes upsert
+│       │   │   ├── reorder.ts          ← Bulk reorder (M-3 RPC + fallback)
+│       │   │   └── content-tree.ts     ← Nested hierarchy GET
+│       │   ├── study/                  ← Study system (5 files)
 │       │   │   ├── index.ts            ← Module combiner
-│       │   │   ├── sessions.ts         ← 3 CRUDs: study-sessions, plans, tasks
+│       │   │   ├── sessions.ts         ← 3 registerCrud (sessions, plans, tasks)
 │       │   │   ├── reviews.ts          ← Reviews + quiz-attempts (O-3 ownership)
 │       │   │   ├── progress.ts         ← topic-progress, topics-overview, reading-states, daily-activities, student-stats
-│       │   │   └── spaced-rep.ts       ← FSRS + BKT state upserts
-│       │   ├── members/                ← Institutions + memberships (was 17KB)
+│       │   │   └── spaced-rep.ts       ← FSRS + BKT states
+│       │   ├── members/                ← Institutions + memberships (4 files)
 │       │   │   ├── index.ts
-│       │   │   ├── institutions.ts     ← 5 endpoints (CRUD + owner membership)
-│       │   │   ├── memberships.ts      ← 5 endpoints (CRUD + admin client)
-│       │   │   └── admin-scopes.ts     ← 3 endpoints (GET/POST/DELETE)
-│       │   ├── mux/                    ← Mux video integration (was 17KB)
+│       │   │   ├── institutions.ts
+│       │   │   ├── memberships.ts
+│       │   │   └── admin-scopes.ts
+│       │   ├── mux/                    ← Mux video integration (5 files)
 │       │   │   ├── index.ts
-│       │   │   ├── helpers.ts          ← muxFetch, verifyWebhook, buildJWT, completionSignal
-│       │   │   ├── api.ts              ← create-upload, playback-token, video-stats, delete
-│       │   │   ├── webhook.ts          ← POST /webhooks/mux (HMAC, no auth)
-│       │   │   └── tracking.ts         ← POST /mux/track-view (N-7 atomic)
-│       │   ├── plans/                  ← Plans + AI + diagnostics (was 13KB)
+│       │   │   ├── api.ts              ← create-upload, playback-token, asset
+│       │   │   ├── helpers.ts          ← Mux client, JWT signing
+│       │   │   ├── tracking.ts         ← track-view, video-stats
+│       │   │   └── webhook.ts          ← /webhooks/mux
+│       │   ├── plans/                  ← Plans + AI + access control (5 files)
 │       │   │   ├── index.ts
-│       │   │   ├── crud.ts             ← 4 registerCrud calls
-│       │   │   ├── ai-generations.ts   ← AI audit log (LIST + POST)
-│       │   │   ├── diagnostics.ts      ← Summary diagnostics (LIST + POST)
-│       │   │   └── access.ts           ← content-access + usage-today
-│       │   └── search/                 ← Global search + trash (was 13KB)
+│       │   │   ├── crud.ts             ← 4 registerCrud (platform/institution plans, rules, subscriptions)
+│       │   │   ├── ai-generations.ts   ← AI generation tracking + usage-today
+│       │   │   ├── diagnostics.ts      ← Summary diagnostics
+│       │   │   └── access.ts           ← /content-access check
+│       │   └── search/                 ← Global search + trash (4 files)
 │       │       ├── index.ts
-│       │       ├── helpers.ts          ← escapeLike, escapeOrQuote, batchResolvePaths
-│       │       ├── search.ts           ← GET /search (N-1 parallel queries)
-│       │       └── trash-restore.ts    ← GET /trash + POST /restore
+│       │       ├── search.ts           ← GET /search (N-1: parallel queries)
+│       │       ├── trash-restore.ts    ← GET /trash, POST /restore/:table/:id
+│       │       └── helpers.ts          ← escapeLike, path resolution
 │       │
-│       ├── routes-auth.tsx             ← Auth & profiles (6KB) — small, no split needed
-│       ├── routes-billing.tsx          ← Stripe integration (15KB) — split pending
-│       ├── routes-models.tsx           ← 3D models, pins, notes (2KB) — small
+│       ├── routes-auth.tsx             ← Auth & profiles (6KB)
+│       ├── routes-billing.tsx          ← Stripe integration (15KB) — pending split
+│       ├── routes-models.tsx           ← 3D models, pins, notes (2KB) — small, no split needed
 │       ├── routes-storage.tsx          ← File upload/download/delete (9KB)
 │       ├── routes-student.tsx          ← Student instruments & notes (6KB)
-│       ├── routes-study-queue.tsx      ← Study queue algorithm (15KB) — single complex endpoint
+│       ├── routes-study-queue.tsx      ← Study queue algorithm (15KB) — single complex function
 │       │
-│       ├── routes-content.tsx          ← THIN RE-EXPORT → routes/content/
-│       ├── routes-study.tsx            ← THIN RE-EXPORT → routes/study/
-│       ├── routes-members.tsx          ← THIN RE-EXPORT → routes/members/
-│       ├── routes-mux.ts              ← THIN RE-EXPORT → routes/mux/
-│       ├── routes-plans.tsx            ← THIN RE-EXPORT → routes/plans/
-│       ├── routes-search.ts            ← THIN RE-EXPORT → routes/search/
-│       │
-│       ├── tests/                      ← Deno-native tests (3 files)
-│       │   ├── rate_limit_test.ts
-│       │   ├── validate_test.ts
-│       │   └── timing_safe_test.ts     ← NEW (consolidated from __tests__/)
-│       └── __tests__/                  ← ⚠️ LEGACY Jest-style — delete after merge
+│       └── tests/                      ← Deno-native tests (3 files)
+│           ├── rate_limit_test.ts
+│           ├── validate_test.ts
+│           └── timing_safe_test.ts
 └── README.md
+```
+
+---
+
+## How index.ts Imports Everything
+
+```ts
+// Split modules (direct import from routes/)
+import { content }       from "./routes/content/index.ts";
+import { studyRoutes }   from "./routes/study/index.ts";
+import { memberRoutes }  from "./routes/members/index.ts";
+import { muxRoutes }     from "./routes/mux/index.ts";
+import { planRoutes }    from "./routes/plans/index.ts";
+import { searchRoutes }  from "./routes/search/index.ts";
+
+// Flat route files (small enough or single-purpose)
+import { authRoutes }        from "./routes-auth.tsx";
+import { billingRoutes }     from "./routes-billing.tsx";
+import { modelRoutes }       from "./routes-models.tsx";
+import { storageRoutes }     from "./routes-storage.tsx";
+import { studentRoutes }     from "./routes-student.tsx";
+import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 ```
 
 ---
@@ -102,9 +115,11 @@ axon-backend/
 | `err(c, message, status)` | Standard error response `{ error }` with logging |
 
 ### `crud-factory.ts` — Generic CRUD Generator
-`registerCrud(app, config)` generates 5 endpoints per table.
+
+`registerCrud(app, config)` generates 5 endpoints per table (LIST, GET, CREATE, UPDATE, DELETE).
 
 ### `validate.ts` — Runtime Validation
+
 **Type guards:** `isStr`, `isNonEmpty`, `isNum`, `isBool`, `isObj`
 **Format validators:** `isUuid`, `isEmail`, `isIsoTs`, `isDateOnly`
 **Numeric ranges:** `inRange(v, min, max)`, `isNonNeg`, `isNonNegInt`, `isProbability`
@@ -134,120 +149,145 @@ axon-backend/
 | GET | `/kw-prof-notes/:id` | prof-notes.ts | Get by ID |
 | POST | `/kw-prof-notes` | prof-notes.ts | Upsert (one per prof per keyword) |
 | DELETE | `/kw-prof-notes/:id` | prof-notes.ts | Hard delete |
-| PUT | `/reorder` | reorder.ts | Bulk reorder (M-3: uses DB function) |
+| PUT | `/reorder` | reorder.ts | Bulk reorder (M-3: RPC + fallback) |
 | GET | `/content-tree?institution_id=` | content-tree.ts | Nested hierarchy tree |
 
 ### `routes/study/` — Study System (5 files)
 
 **Factory CRUD (3 tables):** `study-sessions`, `study-plans`, `study-plan-tasks`
 
-**Unified endpoints (N+1 killers):**
+**Unified endpoints (N+1 eliminators):**
 
 | Method | Path | File | Description |
 |---|---|---|---|
 | GET | `/topic-progress?topic_id=` | progress.ts | Summaries + reading states + flashcard counts in 1 request (was 1+2N) |
-| GET | `/topics-overview?topic_ids=a,b,c` | progress.ts | Summaries by topic + keyword counts, batch max 50 (was T+T×S) |
+| GET | `/topics-overview?topic_ids=a,b,c` | progress.ts | Summaries by topic + keyword counts (batch, max 50) |
 
 **Manual endpoints:**
 
 | Method | Path | File | Description |
 |---|---|---|---|
-| GET/POST | `/reviews` | reviews.ts | O-3: session ownership verification |
-| GET/POST | `/quiz-attempts` | reviews.ts | Student quiz answers |
-| GET/POST | `/reading-states` | progress.ts | Per-summary reading progress |
-| GET/POST | `/daily-activities` | progress.ts | P-2: capped 500 |
-| GET/POST | `/student-stats` | progress.ts | Aggregated stats |
-| GET/POST | `/fsrs-states` | spaced-rep.ts | P-2: capped 500 |
-| GET/POST | `/bkt-states` | spaced-rep.ts | P-2: capped 500 |
+| GET | `/reviews?session_id=` | reviews.ts | List reviews (O-3: session ownership) |
+| POST | `/reviews` | reviews.ts | Create review (grade 0-5) |
+| GET | `/quiz-attempts?quiz_question_id=&session_id=` | reviews.ts | List attempts |
+| POST | `/quiz-attempts` | reviews.ts | Create attempt |
+| GET | `/reading-states?summary_id=` | progress.ts | Get reading state |
+| POST | `/reading-states` | progress.ts | Upsert reading state |
+| GET | `/daily-activities?from=&to=` | progress.ts | List (P-2: capped 500) |
+| POST | `/daily-activities` | progress.ts | Upsert |
+| GET | `/student-stats` | progress.ts | Get student stats |
+| POST | `/student-stats` | progress.ts | Upsert |
+| GET | `/fsrs-states?flashcard_id=&state=&due_before=` | spaced-rep.ts | List (capped 500) |
+| POST | `/fsrs-states` | spaced-rep.ts | Upsert |
+| GET | `/bkt-states?subtopic_id=` | spaced-rep.ts | List (capped 500) |
+| POST | `/bkt-states` | spaced-rep.ts | Upsert |
 
 ### `routes/members/` — Institutions & Memberships (4 files)
 
-| Method | Path | File | Description |
-|---|---|---|---|
-| POST | `/institutions` | institutions.ts | Create + owner membership (admin client) |
-| GET | `/institutions` | institutions.ts | List user's institutions |
-| GET/PUT/DELETE | `/institutions/:id` | institutions.ts | CRUD |
-| GET | `/memberships?institution_id=` | memberships.ts | List members |
-| GET/POST/PUT/DELETE | `/memberships(/:id)` | memberships.ts | CRUD |
-| GET | `/admin-scopes?membership_id=` | admin-scopes.ts | List scopes |
-| POST/DELETE | `/admin-scopes(/:id)` | admin-scopes.ts | Add/remove scope |
+| File | Endpoints |
+|---|---|
+| institutions.ts | CRUD for institutions + join-by-code |
+| memberships.ts | CRUD for institution memberships |
+| admin-scopes.ts | Admin scope management |
 
 ### `routes/mux/` — Mux Video Integration (5 files)
 
-| Method | Path | File | Description |
-|---|---|---|---|
-| POST | `/mux/create-upload` | api.ts | Direct upload to Mux |
-| GET | `/mux/playback-token?video_id=` | api.ts | Signed JWT (RS256) |
-| GET | `/mux/video-stats?video_id=` | api.ts | Aggregated viewer stats |
-| DELETE | `/mux/asset/:video_id` | api.ts | Mux delete + soft-delete |
-| POST | `/mux/track-view` | tracking.ts | N-7: atomic upsert_video_view() |
-| POST | `/webhooks/mux` | webhook.ts | HMAC-verified, no auth |
+| File | Endpoints |
+|---|---|
+| api.ts | `/mux/create-upload`, `/mux/playback-token`, `/mux/asset/:video_id` |
+| tracking.ts | `/mux/track-view`, `/mux/video-stats` |
+| webhook.ts | `/webhooks/mux` (O-7: idempotent) |
+| helpers.ts | Mux client, JWT signing utilities |
 
-### `routes/plans/` — Plans & AI Logs (5 files)
+### `routes/plans/` — Plans & AI (5 files)
 
-**Factory CRUD (4 tables):** `platform-plans`, `institution-plans`, `plan-access-rules`, `institution-subscriptions`
-
-| Method | Path | File | Description |
-|---|---|---|---|
-| GET/POST | `/ai-generations` | ai-generations.ts | P-2: capped 500 |
-| GET/POST | `/summary-diagnostics` | diagnostics.ts | AI diagnostic results |
-| GET | `/content-access?user_id=&institution_id=` | access.ts | Subscription + plan rules |
-| GET | `/usage-today?user_id=&institution_id=` | access.ts | P-8: proper date boundary |
+| File | Endpoints |
+|---|---|
+| crud.ts | CRUD for `platform-plans`, `institution-plans`, `plan-access-rules`, `institution-subscriptions` |
+| ai-generations.ts | `/ai-generations`, `/usage-today` (P-8: proper boundary) |
+| diagnostics.ts | `/summary-diagnostics` |
+| access.ts | `/content-access` |
 
 ### `routes/search/` — Global Search & Trash (4 files)
 
-| Method | Path | File | Description |
-|---|---|---|---|
-| GET | `/search?q=&type=` | search.ts | N-1: parallel queries, O-1/P-3: safe quoting |
-| GET | `/trash?type=` | trash-restore.ts | N-2: parallel trash queries |
-| POST | `/restore/:table/:id` | trash-restore.ts | Role-restricted restore |
+| File | Endpoints |
+|---|---|
+| search.ts | `GET /search` (N-1: parallel queries, N-8: escapeLike) |
+| trash-restore.ts | `GET /trash`, `POST /restore/:table/:id` |
+| helpers.ts | `escapeLike()`, path resolution (P-1, P-3) |
 
-### Non-split Route Files
+### Flat Route Files (not split)
 
-| File | Size | Endpoints | Why not split |
-|---|---|---|---|
-| `routes-auth.tsx` | 6KB | `/signup`, `/me` (GET/PUT) | Small, cohesive |
-| `routes-billing.tsx` | 15KB | Stripe checkout/portal/webhooks | Split pending |
-| `routes-models.tsx` | 2KB | 3D models, pins, notes (3 CRUDs) | Tiny |
-| `routes-storage.tsx` | 9KB | upload, signed-url, delete | Moderate, cohesive |
-| `routes-student.tsx` | 6KB | flashcards, quiz-questions, notes, etc. | Small |
-| `routes-study-queue.tsx` | 15KB | GET /study-queue (single algorithmic endpoint) | One complex function |
+| File | Size | Endpoints |
+|---|---|---|
+| `routes-auth.tsx` | 6KB | `/signup`, `/me` (GET/PUT) |
+| `routes-billing.tsx` | 15KB | `/billing/*`, `/webhooks/stripe` (N-10: timing-safe) |
+| `routes-models.tsx` | 2KB | CRUD for `models-3d`, `model-3d-pins`, `model-3d-notes` |
+| `routes-storage.tsx` | 9KB | `/storage/upload`, `/storage/signed-url`, `/storage/delete` |
+| `routes-student.tsx` | 6KB | CRUD for `flashcards`, `quiz-questions`, `student-notes`, `student-annotations`, `videos`, `highlight-tags` |
+| `routes-study-queue.tsx` | 15KB | `GET /study-queue` (custom algorithm) |
 
 ---
 
 ## Migrations Inventory
 
-### `supabase/migrations/` (primary — 13 files)
+### `supabase/migrations/` (13 files — single canonical directory)
 
 | File | Code | Status | Description |
 |---|---|---|---|
-| `20260224_01` | EV-9 | ✅ Applied | Mux columns on videos table |
-| `20260224_02` | EV-9 | ✅ Applied | video_views table + indexes |
-| `20260227_01` | M-3 | ✅ Applied | bulk_reorder() DB function |
-| `20260227_02` | — | ✅ Applied | get_course_summary_ids() helper |
-| `20260227_03` | N-7 | ✅ Applied | upsert_video_view() atomic function |
-| `20260227_04` | N-5 | ⚠️ PENDING | get_content_tree() RPC |
-| `20260227_05` | O-4 | ⚠️ PENDING | Trigram indexes for search |
-| `20260227_06` | O-7 | ⚠️ PENDING | processed_webhook_events table |
-| `20260228_01` | — | ✅ Applied | Dashboard aggregation triggers |
-| `20260228_02` | — | ✅ Applied | summary_blocks table |
-| `20260228_03` | — | ✅ Applied | keyword_connections.relationship |
-| `20260302_01` | — | ⚠️ PENDING | Composite/partial performance indexes |
-| `20260303_01` | — | ✅ Applied | estimated_study_minutes column |
-
-### `migrations/` root (⚠️ LEGACY — delete after merge)
-
-All 3 unique files have been copied to `supabase/migrations/`. The duplicate `_03` and the originals can be safely deleted.
+| `20260224_01` | EV-9 | Applied | Mux columns on videos table |
+| `20260224_02` | EV-9 | Applied | video_views table + indexes |
+| `20260227_01` | M-3 | Applied | bulk_reorder() DB function |
+| `20260227_02` | — | Applied | get_course_summary_ids() helper |
+| `20260227_03` | N-7 | Applied | upsert_video_view() atomic function |
+| `20260227_04` | N-5 | PENDING | get_content_tree() RPC |
+| `20260227_05` | O-4 | PENDING | Trigram indexes for ILIKE search |
+| `20260227_06` | O-7 | PENDING | processed_webhook_events table |
+| `20260228_01` | — | Applied | Dashboard aggregation triggers + backfill |
+| `20260228_02` | — | Applied | summary_blocks table |
+| `20260228_03` | — | Applied | keyword_connections.relationship column |
+| `20260302_01` | — | PENDING | Composite/partial indexes for high-read tables |
+| `20260303_01` | — | Applied | summaries.estimated_study_minutes column |
 
 ---
 
-## Tests
+## Security Fixes Log
 
-### `tests/` (Deno-native — 3 files) ✅ CANONICAL
-`rate_limit_test.ts`, `validate_test.ts`, `timing_safe_test.ts`
+### N-series (Network/Performance)
+| Code | Fix | File |
+|---|---|---|
+| N-1 | Search queries run in parallel | routes/search/search.ts |
+| N-2 | Trash queries run in parallel | routes/search/trash-restore.ts |
+| N-5 | Content tree DB function (RPC with graceful fallback) | routes/content/content-tree.ts |
+| N-6 | Auto-profile fetches metadata via admin.auth | routes-auth.tsx |
+| N-7 | Atomic upsert_video_view (no race condition) | routes/mux/tracking.ts |
+| N-8 | escapeLike() sanitizes SQL wildcards | routes/search/helpers.ts |
+| N-10 | Timing-safe Stripe signature verification | routes-billing.tsx |
+| NEW | topic-progress unified endpoint (N+1→1) | routes/study/progress.ts |
+| NEW | topics-overview batch endpoint (N+1→1) | routes/study/progress.ts |
 
-### `__tests__/` (⚠️ LEGACY Jest-style — delete after merge)
-`rate-limit.test.ts`, `timing-safe.test.ts`, `validate.test.ts`
+### O-series (Security/Safety)
+| Code | Fix | File |
+|---|---|---|
+| O-1 | or() filter values quoted (injection-safe) | routes/search/search.ts |
+| O-2 | signed-url and delete use safeJson() | routes-storage.tsx |
+| O-3 | Session ownership verification for reviews | routes/study/reviews.ts |
+| O-4 | Trigram indexes for search performance | migration 20260227_05 |
+| O-6 | base64 upload wraps atob() in try/catch | routes-storage.tsx |
+| O-7 | Webhook idempotency via event tracking | routes-billing.tsx, routes/mux/webhook.ts |
+| O-8 | Rate limiting middleware (120 req/min) | rate-limit.ts, index.ts |
+
+### P-series (Polish/Validation)
+| Code | Fix | File |
+|---|---|---|
+| P-1 | Full Course>Semester>Topic>Summary path resolution | routes/search/helpers.ts |
+| P-2 | Pagination capped at 500 items | routes/plans/*, routes/study/progress.ts |
+| P-3 | Double quotes escaped in PostgREST or() | routes/search/helpers.ts |
+| P-4 | Upload JSON path uses safeJson() | routes-storage.tsx |
+| P-5 | Password max length capped at 128 | routes-auth.tsx |
+| P-6 | Auto-profile uses upsert (race condition) | routes-auth.tsx |
+| P-7 | Signed URL batch capped at 100 paths | routes-storage.tsx |
+| P-8 | usage-today uses proper tomorrow boundary | routes/plans/ai-generations.ts |
 
 ---
 
@@ -262,22 +302,32 @@ All 3 unique files have been copied to `supabase/migrations/`. The duplicate `_0
 | `STRIPE_WEBHOOK_SECRET` | For billing | routes-billing.tsx |
 | `MUX_TOKEN_ID` | For video | routes/mux/helpers.ts |
 | `MUX_TOKEN_SECRET` | For video | routes/mux/helpers.ts |
-| `MUX_WEBHOOK_SECRET` | For video | routes/mux/helpers.ts |
+| `MUX_WEBHOOK_SECRET` | For video | routes/mux/webhook.ts |
 | `MUX_SIGNING_KEY_ID` | For video | routes/mux/helpers.ts |
 | `MUX_SIGNING_KEY_SECRET` | For video | routes/mux/helpers.ts |
 
 ---
 
-## Post-Merge Cleanup Checklist
+## Tests
 
-After merging `refactor/organize-backend-v3` → `main`:
+### `tests/` (Deno-native — 3 files)
 
-- [ ] Delete `migrations/` root directory (all content now in `supabase/migrations/`)
-- [ ] Delete `__tests__/` directory (all tests now in `tests/`)
-- [ ] Delete thin re-export files (optional — they're tiny and harmless):
-      `routes-content.tsx`, `routes-study.tsx`, `routes-members.tsx`,
-      `routes-mux.ts`, `routes-plans.tsx`, `routes-search.ts`
-- [ ] Apply pending migrations: `_04`, `_05`, `_06`, `20260302_01`
-- [ ] Close old PR from `refactor/organize-backend-v2`
-- [ ] Delete branches: `v1`, `v2`
-- [ ] Consider splitting `routes-billing.tsx` (15KB) in a future PR
+| File | Covers |
+|---|---|
+| `rate_limit_test.ts` | Sliding window rate limiter |
+| `validate_test.ts` | All type guards + validateFields |
+| `timing_safe_test.ts` | Constant-time comparison |
+
+Run: `deno test supabase/functions/server/tests/`
+
+---
+
+## Pending Work
+
+### Route Splitting
+- `routes-billing.tsx` (15KB) — Could split into `routes/billing/` (checkout, portal, subscription, webhook)
+- `routes-study-queue.tsx` (15KB) — Single complex algorithm, split may not help
+
+### File Extensions
+- Some flat route files use `.tsx` despite not using JSX (historical artifact)
+- Low priority: rename to `.ts` when convenient
