@@ -16,7 +16,14 @@
 --
 -- S-3b FIX: Added total_count via COUNT(*) OVER() window function
 --           so the edge function knows the real total before LIMIT.
+--
+-- NOTE: DROP FUNCTION is required because adding total_count changes
+-- the RETURNS TABLE signature. CREATE OR REPLACE cannot add new OUT
+-- parameters to an existing function.
 -- ============================================================
+
+-- Must drop first: adding total_count changes the return signature
+DROP FUNCTION IF EXISTS get_study_queue(uuid, uuid, integer, boolean);
 
 CREATE OR REPLACE FUNCTION get_study_queue(
   p_student_id UUID,
