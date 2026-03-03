@@ -10,22 +10,23 @@ import { logger } from "npm:hono/logger";
 import { PREFIX } from "./db.ts";
 import { rateLimitMiddleware } from "./rate-limit.ts";
 
+// ─── Route modules (direct imports from routes/) ───────────────────
 import { authRoutes } from "./routes-auth.tsx";
-import { memberRoutes } from "./routes-members.tsx";
-import { content } from "./routes-content.tsx";
+import { memberRoutes } from "./routes/members/index.ts";
+import { content } from "./routes/content/index.ts";
 import { studentRoutes } from "./routes-student.tsx";
-import { studyRoutes } from "./routes-study.tsx";
+import { studyRoutes } from "./routes/study/index.ts";
 import { studyQueueRoutes } from "./routes-study-queue.tsx";
 import { modelRoutes } from "./routes-models.tsx";
-import { planRoutes } from "./routes-plans.tsx";
+import { planRoutes } from "./routes/plans/index.ts";
 import { billingRoutes } from "./routes-billing.tsx";
-import { muxRoutes } from "./routes-mux.ts";
-import { searchRoutes } from "./routes-search.ts";
+import { muxRoutes } from "./routes/mux/index.ts";
+import { searchRoutes } from "./routes/search/index.ts";
 import { storageRoutes } from "./routes-storage.tsx";
 
 const app = new Hono();
 
-// ─── Middleware ──────────────────────────────────────────────────────
+// ─── Middleware ───────────────────────────────────────────────────────
 
 app.use("*", logger(console.log));
 
@@ -43,7 +44,7 @@ app.use(
 // O-8 FIX: Rate limiting (after CORS, before routes)
 app.use("*", rateLimitMiddleware);
 
-// ─── Health Check ───────────────────────────────────────────────────
+// ─── Health Check ────────────────────────────────────────────────────
 
 app.get(`${PREFIX}/health`, (c) => {
   return c.json({
@@ -53,7 +54,7 @@ app.get(`${PREFIX}/health`, (c) => {
   });
 });
 
-// ─── Mount Route Modules ────────────────────────────────────────────
+// ─── Mount Route Modules ─────────────────────────────────────────────
 
 app.route("/", authRoutes);
 app.route("/", memberRoutes);
@@ -68,7 +69,7 @@ app.route("/", muxRoutes);
 app.route("/", searchRoutes);
 app.route("/", storageRoutes);
 
-// ─── Catch-all 404 ──────────────────────────────────────────────────
+// ─── Catch-all 404 ───────────────────────────────────────────────────
 
 app.all("*", (c) => {
   console.log(`[404] ${c.req.method} ${c.req.path}`);
