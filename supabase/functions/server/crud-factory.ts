@@ -14,6 +14,8 @@
  *
  * N-9 FIX: Pagination limit capped at 500, offset validated >= 0.
  * O-5 FIX: GET /:id now applies scopeToUser filter (was missing before).
+ * S-1 FIX: Default count mode changed to "estimated" for performance.
+ *          Clients can opt-in to exact count via ?exact_count=true.
  */
 
 import { Hono } from "npm:hono";
@@ -56,6 +58,16 @@ function parsePagination(c: Context): { limit: number; offset: number } {
   return { limit, offset };
 }
 
+// ─── Count Mode Helper ────────────────────────────────────────────────
+// S-1 FIX: Use "estimated" count by default to avoid full table scans.
+// PostgREST "estimated" uses pg_class reltuples (nearly free).
+// Clients that need precise totals (e.g. last-page pagination) can
+// pass ?exact_count=true to get the old behavior.
+
+function parseCountMode(c: Context): "exact" | "estimated" {
+  return c.req.query("exact_count") === "true" ? "exact" : "estimated";
+}
+
 // ─── Factory ──────────────────────────────────────────────────────────
 
 export function registerCrud(app: Hono, cfg: CrudConfig) {
@@ -69,7 +81,8 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     if (auth instanceof Response) return auth;
     const { user, db } = auth;
 
-    let query = db.from(cfg.table).select("*", { count: "exact" });
+    const countMode = parseCountMode(c);
+    let query = db.from(cfg.table).select("*", { count: countMode });
 
     if (cfg.parentKey) {
       const parentValue = c.req.query(cfg.parentKey);
