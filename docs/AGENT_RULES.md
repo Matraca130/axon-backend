@@ -76,16 +76,18 @@ ONLY modify files the prompt explicitly mentions. Don't "improve" other files.
 
 ### How to Add a New CRUD Endpoint
 
-1. Open the relevant route file (content → `routes/content/crud.ts`, study → `routes/study/sessions.ts`, student → `routes-student.tsx`)
+1. Open the relevant route file:
+   - Content → `routes-content.tsx`
+   - Study → `routes-study.tsx`
+   - Student instruments → `routes-student.tsx`
 2. Add a `registerCrud()` call with the table config
 3. That's it — the factory generates LIST, GET, POST, PUT, DELETE automatically
 
 ### How to Add a Custom Endpoint
 
-1. Find which module owns the domain (see `AGENT_INDEX.md`)
-2. Add the handler to the right file
-3. If it's a new file inside `routes/content/` or `routes/study/`, mount it in the module's `index.ts`
-4. If it's a new top-level route file, mount it in `index.ts`
+1. Find which route file owns the domain (see `AGENT_INDEX.md`)
+2. Add the handler to that file
+3. If it's a new top-level route file, mount it in `index.ts` with `app.route("/", newRoutes)`
 
 ### Route Convention (same as frontend)
 
@@ -120,4 +122,4 @@ Run this checklist before every response:
 | 4 | Did I modify files the prompt didn't mention? | UNDO |
 | 5 | Did I add YouTube/Vimeo video code? | REMOVE, use Mux |
 | 6 | Did I use a Figma Make URL in production code? | Fix to production URL |
-| 7 | Did I mount new routes in the right index file? | Verify |
+| 7 | Did I mount new routes in index.ts? | Verify |
