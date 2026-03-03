@@ -86,6 +86,13 @@ export function checkRateLimitLocal(
   return { allowed: true, current: entry.count };
 }
 
+/**
+ * Backward-compatible alias for checkRateLimitLocal.
+ * Kept for existing tests and external consumers.
+ * @deprecated Use checkRateLimitLocal instead.
+ */
+export const checkRateLimit = checkRateLimitLocal;
+
 // ─── Primary: Distributed Rate Limiting via PostgreSQL RPC ──────
 
 async function checkRateLimitDistributed(
