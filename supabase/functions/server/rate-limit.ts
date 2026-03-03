@@ -1,17 +1,16 @@
 /**
- * rate-limit.ts — In-memory sliding window rate limiter for Axon v4.4
+ * rate-limit.ts — Distributed rate limiter for Axon v4.4
  *
- * O-8 FIX: Prevents abuse by capping requests per user per window.
+ * S-2 FIX: Replaced in-memory Map with PostgreSQL-backed rate limiting.
  *
  * Architecture:
- *   - Uses a Map<string, { count, resetAt }> keyed by user token prefix.
- *   - Suitable for Supabase Edge Functions (single Deno isolate per function).
- *   - Periodic cleanup removes expired entries to prevent memory leaks.
+ *   - Primary: Uses check_rate_limit() RPC in PostgreSQL (shared across all isolates).
+ *   - Fallback: In-memory Map if the RPC is unavailable (migration not applied yet).
+ *   - Key: first 32 chars of the user's JWT token.
  *
  * Configuration:
  *   - WINDOW_MS: 60,000ms (1 minute)
  *   - MAX_REQUESTS: 120 requests per window per user
- *   - CLEANUP_INTERVAL: Every 5 minutes
  *
  * Exemptions:
  *   - Health check (/health)
@@ -19,39 +18,38 @@
  */
 
 import type { Context, Next } from "npm:hono";
-import { extractToken } from "./db.ts";
+import { extractToken, getAdminClient } from "./db.ts";
 
 // ─── Configuration ─────────────────────────────────────────────────
 
 export const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
 export const RATE_LIMIT_MAX_REQUESTS = 120;  // 120 req/min/user
-const CLEANUP_INTERVAL_MS = 5 * 60_000;     // 5 minutes
 
-// ─── State ───────────────────────────────────────────────────────
+// ─── Fallback: In-Memory State (used if DB RPC is unavailable) ───
 
 export interface RateLimitEntry {
   count: number;
   resetAt: number;
 }
 
-// Exported for testing
 export const rateLimitMap = new Map<string, RateLimitEntry>();
 let lastCleanup = Date.now();
+const CLEANUP_INTERVAL_MS = 5 * 60_000;
+
+// Track whether DB-backed rate limiting is available
+let useDistributed = true;
+let distributedFailCount = 0;
+const MAX_DISTRIBUTED_FAILURES = 5; // After 5 consecutive failures, fall back permanently for this isolate
 
 /**
  * Extract a stable key from the user's token.
- * Uses the first 32 chars of the JWT (header + partial payload hash)
- * which is stable across requests from the same user but different
- * enough to distinguish users.
  */
 function extractKey(token: string): string {
   return token.substring(0, 32);
 }
 
-/**
- * Remove expired entries from the map.
- * Called lazily — only when CLEANUP_INTERVAL has elapsed.
- */
+// ─── Fallback: In-Memory Rate Limiting ──────────────────────────
+
 export function cleanupExpired(now: number = Date.now()): number {
   let cleaned = 0;
   for (const [key, entry] of rateLimitMap) {
@@ -64,18 +62,13 @@ export function cleanupExpired(now: number = Date.now()): number {
   return cleaned;
 }
 
-/**
- * Check rate limit for a given key.
- * Returns { allowed: true } or { allowed: false, retryAfterMs }.
- */
-export function checkRateLimit(
+export function checkRateLimitLocal(
   key: string,
   now: number = Date.now(),
 ): { allowed: boolean; retryAfterMs?: number; current?: number } {
   const entry = rateLimitMap.get(key);
 
   if (!entry || now > entry.resetAt) {
-    // New window
     rateLimitMap.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
     return { allowed: true, current: 1 };
   }
@@ -91,6 +84,45 @@ export function checkRateLimit(
   }
 
   return { allowed: true, current: entry.count };
+}
+
+/**
+ * Backward-compatible alias for checkRateLimitLocal.
+ * Kept for existing tests and external consumers.
+ * @deprecated Use checkRateLimitLocal instead.
+ */
+export const checkRateLimit = checkRateLimitLocal;
+
+// ─── Primary: Distributed Rate Limiting via PostgreSQL RPC ──────
+
+async function checkRateLimitDistributed(
+  key: string,
+): Promise<{ allowed: boolean; retryAfterMs: number; current: number } | null> {
+  try {
+    const adminDb = getAdminClient();
+    const { data, error } = await adminDb.rpc("check_rate_limit", {
+      p_key: key,
+      p_max_requests: RATE_LIMIT_MAX_REQUESTS,
+      p_window_ms: RATE_LIMIT_WINDOW_MS,
+    });
+
+    if (error) {
+      console.warn(`[RateLimit] Distributed check failed: ${error.message}`);
+      return null; // Signal to fall back
+    }
+
+    // Reset failure counter on success
+    distributedFailCount = 0;
+
+    return {
+      allowed: data.allowed,
+      current: data.current,
+      retryAfterMs: data.retry_after_ms ?? 0,
+    };
+  } catch (e) {
+    console.warn(`[RateLimit] Distributed check exception: ${(e as Error).message}`);
+    return null; // Signal to fall back
+  }
 }
 
 // ─── Hono Middleware ─────────────────────────────────────────────
@@ -112,23 +144,58 @@ export async function rateLimitMiddleware(
     return next(); // Let auth middleware handle missing tokens
   }
 
-  const now = Date.now();
+  const key = extractKey(token);
 
-  // Periodic cleanup (lazy, non-blocking)
-  if (now - lastCleanup > CLEANUP_INTERVAL_MS) {
-    const cleaned = cleanupExpired(now);
-    if (cleaned > 0) {
-      console.log(`[RateLimit] Cleaned ${cleaned} expired entries`);
+  // ── Try distributed (PostgreSQL) rate limiting first ──
+  if (useDistributed) {
+    const result = await checkRateLimitDistributed(key);
+
+    if (result !== null) {
+      // Distributed check succeeded
+      if (!result.allowed) {
+        const retryAfterSec = Math.ceil(result.retryAfterMs / 1000);
+        console.warn(
+          `[RateLimit] Distributed: rate limit exceeded for key ${key.substring(0, 8)}...: ${result.current} requests`,
+        );
+        return c.json(
+          {
+            error: "Rate limit exceeded. Please try again later.",
+            retry_after_seconds: retryAfterSec,
+          },
+          429,
+        );
+      }
+      return next();
+    }
+
+    // Distributed check failed — increment failure counter
+    distributedFailCount++;
+    if (distributedFailCount >= MAX_DISTRIBUTED_FAILURES) {
+      console.warn(
+        `[RateLimit] ${MAX_DISTRIBUTED_FAILURES} consecutive distributed failures. ` +
+        `Falling back to in-memory rate limiting for this isolate.`,
+      );
+      useDistributed = false;
     }
   }
 
-  const key = extractKey(token);
-  const result = checkRateLimit(key, now);
+  // ── Fallback: in-memory rate limiting ──
+  const now = Date.now();
 
-  if (!result.allowed) {
-    const retryAfterSec = Math.ceil((result.retryAfterMs ?? 0) / 1000);
+  // Periodic cleanup
+  if (now - lastCleanup > CLEANUP_INTERVAL_MS) {
+    const cleaned = cleanupExpired(now);
+    if (cleaned > 0) {
+      console.log(`[RateLimit] Fallback: cleaned ${cleaned} expired entries`);
+    }
+  }
+
+  const localResult = checkRateLimitLocal(key, now);
+
+  if (!localResult.allowed) {
+    const retryAfterSec = Math.ceil((localResult.retryAfterMs ?? 0) / 1000);
     console.warn(
-      `[RateLimit] Rate limit exceeded for key ${key.substring(0, 8)}...: ${result.current} requests`,
+      `[RateLimit] Fallback: rate limit exceeded for key ${key.substring(0, 8)}...: ${localResult.current} requests`,
     );
     return c.json(
       {

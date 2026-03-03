@@ -14,7 +14,7 @@
 -- Impact: INSERT/UPDATE slightly slower (GIN maintenance),
 --         SELECT with ilike dramatically faster at >1000 rows.
 --
--- Status: PENDING — run in Supabase SQL Editor
+-- Status: APPLIED via supabase/migrations pipeline
 -- ============================================================
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
