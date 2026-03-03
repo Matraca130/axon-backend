@@ -10,16 +10,18 @@
 
 | I need to... | Go to | Notes |
 |---|---|---|
-| **Add a new CRUD table** | `routes-content.tsx` or `routes-study.tsx` or `routes-student.tsx` | Use `registerCrud()` from `crud-factory.ts`. Add one config block. Done. |
-| **Add a custom endpoint for content** | `routes-content.tsx` | Content hierarchy: courses→summaries, keywords, reorder, content-tree |
-| **Add a custom endpoint for study** | `routes-study.tsx` | Study system: sessions, reviews, progress, spaced-rep |
+| **Add a new CRUD table (content)** | `routes/content/crud.ts` | Add a `registerCrud()` call. Done. |
+| **Add a new CRUD table (study)** | `routes/study/sessions.ts` | Add a `registerCrud()` call. Done. |
+| **Add a new CRUD table (student)** | `routes-student.tsx` | Add a `registerCrud()` call. Done. |
+| **Add a custom endpoint for content** | Pick the right file in `routes/content/` | keyword-connections, prof-notes, reorder, content-tree |
+| **Add a custom endpoint for study** | Pick the right file in `routes/study/` | reviews, progress, spaced-rep |
 | **Add a new domain** (auth, billing, etc.) | Create `routes-{domain}.ts` at server root | Mount it in `index.ts` |
 | **Find how auth works** | `db.ts` | `authenticate(c)` returns `{ user, db }`. See dual-header pattern below |
 | **Find how CRUD factory works** | `crud-factory.ts` | Generates LIST/GET/POST/PUT/DELETE from one config object |
 | **Add validation** | `validate.ts` | Type guards + `validateFields()` for declarative batch validation |
 | **Find an endpoint** | Search table below or `BACKEND_MAP.md` | All routes are flat: `/things?parent_id=xxx` |
 | **Add a DB migration** | `supabase/migrations/` | Name: `YYYYMMDD_NN_description.sql`. Mark status in BACKEND_MAP.md |
-| **Add a test** | `__tests__/` (Jest-style) or `tests/` (Deno-style) | ⚠️ Two folders exist — see Pending Cleanup |
+| **Add a test** | `tests/` | Deno-native. Run with: `cd supabase/functions/server && deno test tests/` |
 | **Check env vars** | `BACKEND_MAP.md` > Environment Variables | Or grep for `Deno.env.get` |
 | **Understand the Mux video system** | `routes-mux.ts` | Upload via @mux/upchunk, playback via signed JWTs |
 | **Understand Stripe billing** | `routes-billing.tsx` | Checkout, portal, webhooks (timing-safe + idempotent) |
@@ -38,26 +40,35 @@ supabase/functions/server/
 ├─ rate-limit.ts         ← 120 req/min sliding window
 ├─ timing-safe.ts        ← Constant-time comparison
 │
-├─ routes-content.tsx    ← Content hierarchy (10 CRUD + 4 custom groups) [17KB]
-├─ routes-study.tsx      ← Study system (3 CRUD + 4 custom groups) [20KB]
+├─ routes/
+│  ├─ content/             ← Content hierarchy (was routes-content.tsx)
+│  │  ├─ index.ts          ← Combiner: mounts all content sub-modules
+│  │  ├─ crud.ts           ← 10 registerCrud calls (courses→subtopics)
+│  │  ├─ keyword-connections.ts ← manual CRUD for keyword_connections
+│  │  ├─ prof-notes.ts     ← manual CRUD for kw_prof_notes
+│  │  ├─ reorder.ts        ← PUT /reorder (bulk reorder)
+│  │  └─ content-tree.ts   ← GET /content-tree (nested hierarchy)
+│  └─ study/               ← Study system (was routes-study.tsx)
+│     ├─ index.ts          ← Combiner: mounts all study sub-modules
+│     ├─ sessions.ts       ← 3 registerCrud calls (sessions, plans, tasks)
+│     ├─ reviews.ts        ← reviews + quiz-attempts (O-3 ownership)
+│     ├─ progress.ts       ← reading-states, daily-activities, student-stats
+│     └─ spaced-rep.ts     ← fsrs-states, bkt-states
 │
-├─ routes-auth.tsx       ← signup, /me
-├─ routes-billing.tsx    ← Stripe checkout/portal/webhooks
-├─ routes-members.tsx    ← Institutions + memberships + scopes
-├─ routes-models.tsx     ← 3D models (tiny, 3 CRUDs)
-├─ routes-mux.ts         ← Mux video upload/playback/tracking
-├─ routes-plans.tsx      ← Plans + AI generation logs + diagnostics
-├─ routes-search.ts      ← Global search + trash + restore
-├─ routes-storage.tsx    ← File upload/download/delete
-├─ routes-student.tsx    ← Flashcards, quizzes, notes, videos
+├─ routes-auth.tsx        ← signup, /me
+├─ routes-billing.tsx     ← Stripe checkout/portal/webhooks
+├─ routes-members.tsx     ← Institutions + memberships + scopes
+├─ routes-models.tsx      ← 3D models (tiny, 3 CRUDs)
+├─ routes-mux.ts          ← Mux video upload/playback/tracking
+├─ routes-plans.tsx       ← Plans + AI generation logs + diagnostics
+├─ routes-search.ts       ← Global search + trash + restore
+├─ routes-storage.tsx     ← File upload/download/delete
+├─ routes-student.tsx     ← Flashcards, quizzes, notes, videos
 ├─ routes-study-queue.tsx ← Study queue algorithm
 │
-├─ __tests__/            ← Jest-style tests (3 files)
-│   ├─ rate-limit.test.ts
-│   ├─ timing-safe.test.ts
-│   └─ validate.test.ts
-└─ tests/                ← Deno-native tests (2 files)
+└─ tests/                 ← Deno-native tests (3 files)
     ├─ rate_limit_test.ts
+    ├─ timing_safe_test.ts
     └─ validate_test.ts
 ```
 
@@ -104,19 +115,19 @@ Two headers required from frontend:
 
 ## Quick Endpoint Finder
 
-### Content Hierarchy (CRUD factory — in `routes-content.tsx`)
+### Content Hierarchy (CRUD factory — in `routes/content/crud.ts`)
 `courses`, `semesters`, `sections`, `topics`, `summaries`, `chunks`, `summary-blocks`, `keywords`, `subtopics`
 
-### Content Custom (in `routes-content.tsx`)
+### Content Custom (in `routes/content/`)
 `/keyword-connections`, `/kw-prof-notes`, `/reorder`, `/content-tree`
 
 ### Student Instruments (CRUD factory — in `routes-student.tsx`)
 `flashcards`, `quiz-questions`, `student-notes`, `student-annotations`, `videos`, `highlight-tags`
 
-### Study (CRUD factory — in `routes-study.tsx`)
+### Study (CRUD factory — in `routes/study/sessions.ts`)
 `study-sessions`, `study-plans`, `study-plan-tasks`
 
-### Study Custom (in `routes-study.tsx`)
+### Study Custom (in `routes/study/`)
 `/reviews`, `/quiz-attempts`, `/reading-states`, `/daily-activities`, `/student-stats`, `/fsrs-states`, `/bkt-states`
 
 ### Auth & Members
@@ -142,16 +153,3 @@ Two headers required from frontend:
 
 ### Study Queue
 `/study-queue` (custom algorithm)
-
----
-
-## Pending Cleanup (from unmerged PR #2)
-
-PR [#2](https://github.com/Matraca130/axon-backend/pull/2) (`refactor/organize-backend`) was tested but not yet merged. It would:
-1. Split `routes-content.tsx` → `routes/content/` (5 files)
-2. Split `routes-study.tsx` → `routes/study/` (4 files)
-3. Consolidate `__tests__/` + `tests/` into `tests/` only
-4. Move `migrations/` root files into `supabase/migrations/`
-5. Delete old monolith files
-
-**Until that PR is merged, the current structure is monolithic.**

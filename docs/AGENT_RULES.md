@@ -76,9 +76,9 @@ ONLY modify files the prompt explicitly mentions. Don't "improve" other files.
 
 ### How to Add a New CRUD Endpoint
 
-1. Open the relevant route file:
-   - Content → `routes-content.tsx`
-   - Study → `routes-study.tsx`
+1. Pick the right file based on domain:
+   - Content hierarchy → `routes/content/crud.ts`
+   - Study tables → `routes/study/sessions.ts`
    - Student instruments → `routes-student.tsx`
 2. Add a `registerCrud()` call with the table config
 3. That's it — the factory generates LIST, GET, POST, PUT, DELETE automatically
@@ -86,7 +86,7 @@ ONLY modify files the prompt explicitly mentions. Don't "improve" other files.
 ### How to Add a Custom Endpoint
 
 1. Find which route file owns the domain (see `AGENT_INDEX.md`)
-2. Add the handler to that file
+2. Add the handler to that file (e.g., `routes/content/keyword-connections.ts`)
 3. If it's a new top-level route file, mount it in `index.ts` with `app.route("/", newRoutes)`
 
 ### Route Convention (same as frontend)
