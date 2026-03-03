@@ -1,8 +1,9 @@
 /**
  * routes/study/progress.ts — Student progress tracking
  *
- * UNIFIED ENDPOINT (speed optimization):
+ * UNIFIED ENDPOINTS (speed optimizations):
  *   GET /topic-progress?topic_id=xxx — summaries + reading states + flashcard counts in 1 request
+ *   GET /topics-overview?topic_ids=a,b,c — summaries by topic + keyword counts (batch, max 50)
  *
  * UPSERT TABLES — atomic .upsert({ onConflict }):
  *   reading_states    — per-summary reading progress
@@ -29,6 +30,7 @@ import type { Context } from "npm:hono";
 export const progressRoutes = new Hono();
 
 const MAX_PAGINATION_LIMIT = 500;
+const MAX_TOPIC_IDS = 50;
 
 // ─── Shared Helper ────────────────────────────────────────────────────
 
@@ -99,15 +101,12 @@ progressRoutes.get(`${PREFIX}/topic-progress`, async (c: Context) => {
 
     // Step 2: Batch fetch reading states + flashcard counts in parallel
     const [readingStatesResult, flashcardsResult] = await Promise.all([
-      // Batch reading states: WHERE student_id = user AND summary_id IN (...)
       db
         .from("reading_states")
         .select("*")
         .eq("student_id", user.id)
         .in("summary_id", summaryIds),
 
-      // Batch flashcard counts: WHERE summary_id IN (...) AND is_active AND NOT deleted
-      // We only need the count per summary, so select minimal columns
       db
         .from("flashcards")
         .select("id, summary_id")
@@ -140,6 +139,123 @@ progressRoutes.get(`${PREFIX}/topic-progress`, async (c: Context) => {
     });
   } catch (e: any) {
     return err(c, `topic-progress failed: ${e.message}`, 500);
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════
+// UNIFIED ENDPOINT: topics-overview (section N+1 → 1 request)
+//
+// GET /topics-overview?topic_ids=uuid1,uuid2,uuid3,...
+//
+// Batch endpoint for SectionStudyPlanView: returns summaries grouped
+// by topic + keyword counts per topic, all in 1 HTTP call.
+//
+// Replaces the N+1 pattern where the frontend did:
+//   T requests → GET /summaries?topic_id=xxx  (per topic)
+//   T×S requests → GET /keywords?summary_id=yyy (per summary)
+//   Total: T + (T×S) requests (e.g. 30 for 5 topics × 5 summaries)
+//
+// Now: 1 request → GET /topics-overview?topic_ids=uuid1,uuid2,...
+//   Server does 2 parallel queries internally.
+//
+// Max 50 topic_ids per call (safety cap).
+// ═════════════════════════════════════════════════════════════════════
+
+progressRoutes.get(`${PREFIX}/topics-overview`, async (c: Context) => {
+  const auth = await authenticate(c);
+  if (auth instanceof Response) return auth;
+  const { db } = auth;
+
+  const topicIdsRaw = c.req.query("topic_ids");
+  if (!topicIdsRaw || topicIdsRaw.trim() === "") {
+    return err(c, "topic_ids query param is required (comma-separated UUIDs)", 400);
+  }
+
+  // Parse and validate each UUID
+  const topicIds = topicIdsRaw.split(",").map((id) => id.trim()).filter(Boolean);
+  if (topicIds.length === 0) {
+    return err(c, "topic_ids must contain at least one UUID", 400);
+  }
+  if (topicIds.length > MAX_TOPIC_IDS) {
+    return err(c, `topic_ids cannot exceed ${MAX_TOPIC_IDS} items`, 400);
+  }
+  for (const id of topicIds) {
+    if (!isUuid(id)) {
+      return err(c, `Invalid UUID in topic_ids: ${id}`, 400);
+    }
+  }
+
+  try {
+    // Step 1: Get all active summaries for all requested topics
+    const { data: allSummaries, error: sumErr } = await db
+      .from("summaries")
+      .select("*")
+      .in("topic_id", topicIds)
+      .eq("is_active", true)
+      .is("deleted_at", null)
+      .order("order_index", { ascending: true });
+
+    if (sumErr) {
+      return err(c, `Failed to fetch summaries: ${sumErr.message}`, 500);
+    }
+
+    // Group summaries by topic_id
+    const summariesByTopic: Record<string, unknown[]> = {};
+    for (const tid of topicIds) {
+      summariesByTopic[tid] = [];
+    }
+
+    const allSummaryIds: string[] = [];
+    if (allSummaries) {
+      for (const s of allSummaries) {
+        if (!summariesByTopic[s.topic_id]) {
+          summariesByTopic[s.topic_id] = [];
+        }
+        summariesByTopic[s.topic_id].push(s);
+        allSummaryIds.push(s.id);
+      }
+    }
+
+    // Step 2: If there are summaries, batch-fetch keyword counts
+    const keywordCountsByTopic: Record<string, number> = {};
+    for (const tid of topicIds) {
+      keywordCountsByTopic[tid] = 0;
+    }
+
+    if (allSummaryIds.length > 0) {
+      const { data: keywords, error: kwErr } = await db
+        .from("keywords")
+        .select("id, summary_id")
+        .in("summary_id", allSummaryIds)
+        .eq("is_active", true)
+        .is("deleted_at", null);
+
+      if (!kwErr && keywords) {
+        // Build summary_id → topic_id lookup
+        const summaryToTopic: Record<string, string> = {};
+        if (allSummaries) {
+          for (const s of allSummaries) {
+            summaryToTopic[s.id] = s.topic_id;
+          }
+        }
+
+        // Count keywords per topic
+        for (const kw of keywords) {
+          const topicId = summaryToTopic[kw.summary_id];
+          if (topicId) {
+            keywordCountsByTopic[topicId] =
+              (keywordCountsByTopic[topicId] || 0) + 1;
+          }
+        }
+      }
+    }
+
+    return ok(c, {
+      summaries_by_topic: summariesByTopic,
+      keyword_counts_by_topic: keywordCountsByTopic,
+    });
+  } catch (e: any) {
+    return err(c, `topics-overview failed: ${e.message}`, 500);
   }
 });
 
