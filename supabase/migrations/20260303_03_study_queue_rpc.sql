@@ -175,8 +175,8 @@ BEGIN
     ROUND(cs.bkt_p_know::NUMERIC, 3) AS p_know,
     COALESCE(cs.fsrs_state_val, 'new') AS fsrs_state,
     cs.fsrs_due_at AS due_at,
-    COALESCE(cs.fsrs_stability, 1) AS stability,
-    COALESCE(cs.fsrs_difficulty, 5) AS difficulty,
+    COALESCE(cs.fsrs_stability, 1)::NUMERIC AS stability,
+    COALESCE(cs.fsrs_difficulty, 5)::NUMERIC AS difficulty,
     cs.card_is_new AS is_new,
     COUNT(*) OVER() AS total_count
   FROM cards_with_scores cs
