@@ -1,7 +1,7 @@
 # Axon Backend Map
 
 > Single source of truth for navigating the `axon-backend` repository.
-> Last updated: 2026-03-02 (refactor/organize-backend PR #2)
+> Last updated: 2026-03-02
 
 ## Repository Structure
 
@@ -9,8 +9,11 @@
 axon-backend/
 ├── .github/workflows/deploy.yml       ← GitHub Actions: deploy to Supabase on push to main
 ├── docs/
-│   ├── AGENT_RULES.md                  ← Rules for AI agents working on this repo
-│   └── BACKEND_MAP.md                  ← THIS FILE
+│   ├── AGENT_INDEX.md                  ← Quick lookup for agents (start here)
+│   ├── AGENT_RULES.md                  ← Critical rules for AI agents
+│   ├── BACKEND_AUDIT.md                ← Historical audit (Feb 2026)
+│   ├── BACKEND_MAP.md                  ← THIS FILE
+│   └── figma-make/                     ← Figma Make context docs
 ├── supabase/
 │   ├── migrations/                     ← SQL migrations (SINGLE location)
 │   │   ├── 20260224_01_videos_mux_columns.sql
@@ -69,7 +72,7 @@ axon-backend/
 
 ## Infrastructure Files
 
-### `db.ts` — Core Auth & Database (8KB)
+### `db.ts` — Core Auth & Database
 
 | Export | Description |
 |---|---|
@@ -84,7 +87,7 @@ axon-backend/
 
 **Auth strategy:** JWT decoded locally for speed. Cryptographic validation deferred to PostgREST/RLS on every DB query. For admin-only routes, use `getAdminClient().auth.getUser(token)` for verified auth.
 
-### `crud-factory.ts` — Generic CRUD Generator (10KB)
+### `crud-factory.ts` — Generic CRUD Generator
 
 `registerCrud(app, config)` generates 5 endpoints per table:
 - `GET /{slug}?{parentKey}=xxx` — LIST with optional filters
@@ -95,7 +98,7 @@ axon-backend/
 
 Config options: `table`, `slug`, `parentKey`, `scopeToUser`, `softDelete`, `hasCreatedBy`, `hasUpdatedAt`, `hasOrderIndex`, `hasIsActive`, `requiredFields`, `createFields`, `updateFields`, `optionalFilters`.
 
-### `validate.ts` — Runtime Validation (5KB)
+### `validate.ts` — Runtime Validation
 
 **Type guards:** `isStr`, `isNonEmpty`, `isNum`, `isBool`, `isObj`
 **Format validators:** `isUuid`, `isEmail`, `isIsoTs`, `isDateOnly`
@@ -103,14 +106,14 @@ Config options: `table`, `slug`, `parentKey`, `scopeToUser`, `softDelete`, `hasC
 **Enum validator:** `isOneOf(v, values)`
 **Declarative batch:** `validateFields(body, rules)` — validates + picks fields in one call
 
-### `rate-limit.ts` — Rate Limiter Middleware (4KB)
+### `rate-limit.ts` — Rate Limiter Middleware
 
 - Sliding window: 120 requests/minute per user
 - In-memory Map keyed by JWT prefix
 - Exemptions: `/health` and `/webhooks/`
 - Periodic cleanup every 5 minutes
 
-### `timing-safe.ts` — Constant-time Comparison (1KB)
+### `timing-safe.ts` — Constant-time Comparison
 
 `timingSafeEqual(a, b)` — prevents timing attacks on webhook signature verification.
 
@@ -178,7 +181,7 @@ Config options: `table`, `slug`, `parentKey`, `scopeToUser`, `softDelete`, `hasC
 | GET | `/bkt-states?subtopic_id=` | spaced-rep.ts | List BKT states |
 | POST | `/bkt-states` | spaced-rep.ts | Upsert BKT state |
 
-### `routes-auth.tsx` — Authentication & Profiles (6KB)
+### `routes-auth.tsx` — Authentication & Profiles
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -186,7 +189,7 @@ Config options: `table`, `slug`, `parentKey`, `scopeToUser`, `softDelete`, `hasC
 | GET | `/me` | user | Get profile (auto-creates if missing, P-6: upsert) |
 | PUT | `/me` | user | Update profile (full_name, avatar_url) |
 
-### `routes-members.tsx` — Institutions & Memberships (17KB)
+### `routes-members.tsx` — Institutions & Memberships
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -204,7 +207,7 @@ Config options: `table`, `slug`, `parentKey`, `scopeToUser`, `softDelete`, `hasC
 | POST | `/admin-scopes` | user | Add scope |
 | DELETE | `/admin-scopes/:id` | user | Remove scope (hard delete) |
 
-### `routes-billing.tsx` — Stripe Integration (15KB)
+### `routes-billing.tsx` — Stripe Integration
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -213,7 +216,7 @@ Config options: `table`, `slug`, `parentKey`, `scopeToUser`, `softDelete`, `hasC
 | POST | `/webhooks/stripe` | HMAC | Webhook (N-10: timing-safe, O-7: idempotency) |
 | GET | `/billing/subscription-status?user_id=&institution_id=` | user | Subscription status |
 
-### `routes-mux.ts` — Mux Video (17KB)
+### `routes-mux.ts` — Mux Video
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -224,7 +227,7 @@ Config options: `table`, `slug`, `parentKey`, `scopeToUser`, `softDelete`, `hasC
 | GET | `/mux/video-stats?video_id=` | user | Aggregated stats for professor |
 | DELETE | `/mux/asset/:video_id` | user | Delete from Mux + soft-delete in DB |
 
-### `routes-plans.tsx` — Plans & AI (13KB)
+### `routes-plans.tsx` — Plans & AI
 
 **Factory CRUD (4 tables):** `platform-plans`, `institution-plans`, `plan-access-rules`, `institution-subscriptions`
 
@@ -237,7 +240,7 @@ Config options: `table`, `slug`, `parentKey`, `scopeToUser`, `softDelete`, `hasC
 | GET | `/content-access?user_id=&institution_id=` | user | Check plan-based content access |
 | GET | `/usage-today?user_id=&institution_id=` | user | Today's usage counts (P-8: proper dates) |
 
-### `routes-search.ts` — Search & Trash (13KB)
+### `routes-search.ts` — Search & Trash
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -245,7 +248,7 @@ Config options: `table`, `slug`, `parentKey`, `scopeToUser`, `softDelete`, `hasC
 | GET | `/trash?type=` | user | List soft-deleted items (N-2: parallel) |
 | POST | `/restore/:table/:id` | user | Restore soft-deleted item (role-restricted) |
 
-### `routes-storage.tsx` — File Storage (9KB)
+### `routes-storage.tsx` — File Storage
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -253,7 +256,7 @@ Config options: `table`, `slug`, `parentKey`, `scopeToUser`, `softDelete`, `hasC
 | POST | `/storage/signed-url` | user | Get signed URL(s) (P-7: batch capped 100) |
 | DELETE | `/storage/delete` | user | Delete file(s) (ownership enforced) |
 
-### `routes-student.tsx` — Student Instruments (6KB)
+### `routes-student.tsx` — Student Instruments
 
 **Factory CRUD (6 tables):**
 
@@ -266,11 +269,11 @@ Config options: `table`, `slug`, `parentKey`, `scopeToUser`, `softDelete`, `hasC
 | `videos` | videos | `summary_id` | created_by, soft-delete, order_index |
 | `highlight-tags` | highlight_tags | `student_id` | none |
 
-### `routes-models.tsx` — 3D Models (2KB)
+### `routes-models.tsx` — 3D Models
 
 **Factory CRUD (3 tables):** `models-3d` (topic_id), `model-3d-pins` (model_id), `model-3d-notes` (model_id, student_id scope)
 
-### `routes-study-queue.tsx` — Study Queue Algorithm (15KB)
+### `routes-study-queue.tsx` — Study Queue Algorithm
 
 Custom spaced repetition queue builder.
 
@@ -374,7 +377,6 @@ deno test tests/
 2. Split `routes-study.tsx` (20KB, 5+ systems) → `routes/study/` (4 files)
 3. Consolidated 2 migration folders (`migrations/` root + `supabase/migrations/`) into 1
 4. Consolidated 2 test folders (`__tests__/` Jest + `tests/` Deno) into 1
-5. Created this documentation
 
 **What was NOT touched (audited and confirmed well-scoped):**
 - `routes-auth.tsx` (6KB) — single domain, small
