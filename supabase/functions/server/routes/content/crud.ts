@@ -82,13 +82,14 @@ registerCrud(contentCrudRoutes, {
   hasOrderIndex: true,
   softDelete: true,
   requiredFields: ["title"],
-  createFields: ["title", "content_markdown", "status", "order_index"],
+  createFields: ["title", "content_markdown", "status", "order_index", "estimated_study_minutes"],
   updateFields: [
     "title",
     "content_markdown",
     "status",
     "order_index",
     "is_active",
+    "estimated_study_minutes",
   ],
 });
 
