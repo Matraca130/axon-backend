@@ -29,3 +29,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_pwe_event_id_source
 -- WHERE processed_at < NOW() - INTERVAL '7 days';
 CREATE INDEX IF NOT EXISTS idx_pwe_processed_at
   ON processed_webhook_events (processed_at);
+
+-- Verification query:
+-- SELECT tablename FROM pg_tables
+-- WHERE tablename = 'processed_webhook_events';
