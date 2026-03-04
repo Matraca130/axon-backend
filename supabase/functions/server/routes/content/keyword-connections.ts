@@ -4,6 +4,8 @@
  * LIST, GET, CREATE, DELETE for keyword_connections table.
  * Enforces canonical order (a < b) on creation.
  * Not a CRUD factory table — uses manual endpoints.
+ *
+ * U-4 FIX: Safety limit added to LIST endpoint.
  */
 
 import { Hono } from "npm:hono";
@@ -24,11 +26,13 @@ keywordConnectionRoutes.get(connBase, async (c: Context) => {
   if (!keywordId)
     return err(c, "Missing required query param: keyword_id", 400);
 
+  // U-4 FIX: Safety limit (was unbounded)
   const { data, error } = await db
     .from("keyword_connections")
     .select("*")
     .or(`keyword_a_id.eq.${keywordId},keyword_b_id.eq.${keywordId}`)
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: true })
+    .limit(200);
 
   if (error)
     return err(c, `List keyword_connections failed: ${error.message}`, 500);
