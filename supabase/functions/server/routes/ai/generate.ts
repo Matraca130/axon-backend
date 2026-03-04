@@ -18,6 +18,9 @@
  *
  * Live-audit fixes applied:
  *   LA-07 FIX: truncateAtWord() respects word boundaries
+ *
+ * Deploy fixes:
+ *   D-18 FIX: Use GENERATE_MODEL constant in _meta (was hardcoded as gemini-2.0-flash)
  */
 
 import { Hono } from "npm:hono";
@@ -29,7 +32,7 @@ import {
   isDenied,
   ALL_ROLES,
 } from "../../auth-helpers.ts";
-import { generateText, parseGeminiJson } from "../../gemini.ts";
+import { generateText, parseGeminiJson, GENERATE_MODEL } from "../../gemini.ts";
 
 export const aiGenerateRoutes = new Hono();
 
@@ -67,7 +70,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
     ? body.wrong_answer : null;
   const related = body.related !== false;
 
-  // ── BUG-3 FIX: Institution scoping ───────────────────────
+  // ── BUG-3 FIX: Institution scoping ─────────────────────────
   // ⚠️ PF-05: This Supabase query MUST happen before the Gemini API call.
   // authenticate() only decodes the JWT locally. The cryptographic signature
   // is validated by PostgREST when this RPC executes. Moving the Gemini call
@@ -91,7 +94,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
     .single();
   if (!summary) return err(c, "Summary not found", 404);
 
-  // ── BUG-4 FIX: Resolve keyword_id ───────────────────────
+  // ── BUG-4 FIX: Resolve keyword_id ─────────────────────────
   let keywordId = isUuid(body.keyword_id) ? (body.keyword_id as string) : null;
   if (!keywordId) {
     const { data: kws } = await db
@@ -254,7 +257,7 @@ Responde en JSON con este schema exacto:
       return ok(c, {
         ...inserted,
         _meta: {
-          model: "gemini-2.0-flash",
+          model: GENERATE_MODEL,  // D-18 FIX: use constant instead of hardcoded string
           tokens: result.tokensUsed,
           had_wrong_answer: !!wrongAnswer,
         },
@@ -281,7 +284,7 @@ Responde en JSON con este schema exacto:
       return ok(c, {
         ...inserted,
         _meta: {
-          model: "gemini-2.0-flash",
+          model: GENERATE_MODEL,  // D-18 FIX: use constant instead of hardcoded string
           tokens: result.tokensUsed,
           related,
         },
