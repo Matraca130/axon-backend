@@ -8,6 +8,10 @@
  *
  * H-5 FIX: Now verifies caller has CONTENT_WRITE_ROLES in the institution
  * that the first item belongs to.
+ *
+ * A-10 FIX: Only checks institution for tables supported by the
+ * resolve_parent_institution RPC. Tables outside the content hierarchy
+ * (e.g. study_plan_tasks) proceed without institution check.
  */
 
 import { Hono } from "npm:hono";
@@ -66,6 +70,27 @@ const tablesWithUpdatedAt = new Set([
   "model_3d_pins",
 ]);
 
+// A-10 FIX: Tables that the resolve_parent_institution() RPC can resolve.
+// Only these tables get institution-scoped checks in reorder.
+// Tables NOT in this set (e.g. study_plan_tasks) proceed without
+// institution check — they're protected by other means (user-scoped parents).
+const INSTITUTION_RESOLVABLE_TABLES = new Set([
+  "courses",
+  "semesters",
+  "sections",
+  "topics",
+  "summaries",
+  "chunks",
+  "summary_blocks",
+  "subtopics",
+  "keywords",
+  "keyword_connections",
+  "kw_prof_notes",
+  "videos",
+  "models_3d",
+  "model_3d_pins",
+]);
+
 // ─── Endpoint ───────────────────────────────────────────────────
 
 reorderRoutes.put(`${PREFIX}/reorder`, async (c: Context) => {
@@ -118,28 +143,33 @@ reorderRoutes.put(`${PREFIX}/reorder`, async (c: Context) => {
 
   const typedItems = items as Array<{ id: string; order_index: number }>;
 
-  // H-5 FIX: Resolve institution from the first item, verify caller has write access.
-  // All items in a reorder batch should belong to the same parent (and thus institution).
-  try {
-    const { data: institutionId, error: resolveErr } = await db.rpc(
-      "resolve_parent_institution",
-      { p_table: table, p_id: typedItems[0].id },
-    );
+  // H-5 + A-10 FIX: Only check institution for tables the RPC supports.
+  // Tables like study_plan_tasks are not in the content hierarchy and
+  // their parents are user-scoped — checking would fail with 404.
+  if (INSTITUTION_RESOLVABLE_TABLES.has(table)) {
+    try {
+      const { data: institutionId, error: resolveErr } = await db.rpc(
+        "resolve_parent_institution",
+        { p_table: table, p_id: typedItems[0].id },
+      );
 
-    if (resolveErr || !institutionId) {
-      return err(c, "Cannot resolve institution for reorder items", 404);
+      if (resolveErr || !institutionId) {
+        return err(c, "Cannot resolve institution for reorder items", 404);
+      }
+
+      const roleCheck = await requireInstitutionRole(
+        db,
+        user.id,
+        institutionId as string,
+        CONTENT_WRITE_ROLES,
+      );
+      if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+    } catch {
+      return err(c, "Institution resolution failed", 500);
     }
-
-    const roleCheck = await requireInstitutionRole(
-      db,
-      user.id,
-      institutionId as string,
-      CONTENT_WRITE_ROLES,
-    );
-    if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
-  } catch {
-    return err(c, "Institution resolution failed", 500);
   }
+  // else: table not in content hierarchy (e.g. study_plan_tasks)
+  // → skip institution check, proceed with reorder
 
   // ── Primary path: single DB function call (M-3) ──
   const { data: rpcData, error: rpcError } = await db.rpc("bulk_reorder", {

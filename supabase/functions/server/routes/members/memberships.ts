@@ -15,6 +15,10 @@
  *   - DELETE: resolves target institution, verifies management role
  *   - GET (list): verifies caller is member of the queried institution
  *   - GET /:id: resolves institution, verifies membership
+ *
+ * A-5 FIX: PUT now enforces role hierarchy for is_active changes.
+ *   An admin cannot deactivate an owner. Destructive changes to a
+ *   membership require the caller's role to be >= the target's role.
  */
 
 import { Hono } from "npm:hono";
@@ -26,6 +30,7 @@ import {
   canAssignRole,
   ALL_ROLES,
   MANAGEMENT_ROLES,
+  ROLE_HIERARCHY,
 } from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
 
@@ -40,7 +45,6 @@ const DEFAULT_PAGINATION_LIMIT = 100;
 const VALID_ROLES = ["student", "professor", "admin", "owner"];
 
 // ── GET /memberships ─────────────────────────────────────────────
-// H-3 FIX: Verify caller is a member of the queried institution.
 membershipRoutes.get(memBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -49,11 +53,9 @@ membershipRoutes.get(memBase, async (c: Context) => {
   const institutionId = c.req.query("institution_id");
   if (!institutionId) return err(c, "Missing required query param: institution_id", 400);
 
-  // H-3 FIX: Any active member can list memberships in their institution
   const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
-  // U-2 FIX: Pagination (was returning all rows unbounded)
   let limit = parseInt(c.req.query("limit") ?? String(DEFAULT_PAGINATION_LIMIT), 10);
   if (isNaN(limit) || limit < 1) limit = DEFAULT_PAGINATION_LIMIT;
   if (limit > MAX_PAGINATION_LIMIT) limit = MAX_PAGINATION_LIMIT;
@@ -71,7 +73,6 @@ membershipRoutes.get(memBase, async (c: Context) => {
 });
 
 // ── GET /memberships/:id ─────────────────────────────────────────
-// H-3 FIX: Verify caller is a member of the target membership's institution.
 membershipRoutes.get(`${memBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -79,7 +80,6 @@ membershipRoutes.get(`${memBase}/:id`, async (c: Context) => {
 
   const id = c.req.param("id");
 
-  // H-3 FIX: Resolve target membership's institution, verify caller is a member
   const institutionId = await resolveMembershipInstitution(db, id);
   if (!institutionId) return err(c, "Membership not found", 404);
 
@@ -92,7 +92,6 @@ membershipRoutes.get(`${memBase}/:id`, async (c: Context) => {
 });
 
 // ── POST /memberships ────────────────────────────────────────────
-// H-3 FIX: Verify caller has management role + enforce role hierarchy.
 membershipRoutes.post(memBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -108,12 +107,9 @@ membershipRoutes.post(memBase, async (c: Context) => {
   if (typeof role !== "string" || !VALID_ROLES.includes(role))
     return err(c, `role must be one of: ${VALID_ROLES.join(", ")}`, 400);
 
-  // H-3 FIX: Verify caller has management role in the target institution
   const roleCheck = await requireInstitutionRole(db, user.id, institution_id, MANAGEMENT_ROLES);
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
-  // H-3 FIX: Prevent privilege escalation — caller can't assign a role
-  // higher than their own. Owner(4) can assign all. Admin(3) can't assign owner.
   if (!canAssignRole(roleCheck.role, role)) {
     return err(
       c,
@@ -122,7 +118,6 @@ membershipRoutes.post(memBase, async (c: Context) => {
     );
   }
 
-  // Audit log: track who created the membership and with what authority
   console.log(
     `[Axon Audit] Membership created by ${user.id} (${roleCheck.role}): ` +
     `target_user=${user_id}, institution=${institution_id}, assigned_role=${role}`,
@@ -138,8 +133,9 @@ membershipRoutes.post(memBase, async (c: Context) => {
 });
 
 // ── PUT /memberships/:id ─────────────────────────────────────────
-// H-3 FIX: Resolve target institution, verify caller authority,
-// enforce role hierarchy when changing roles.
+// A-5 FIX: Enforces role hierarchy for is_active and role changes.
+// An admin (level 3) cannot deactivate or change the role of an owner (level 4).
+// This prevents privilege escalation via indirect paths.
 membershipRoutes.put(`${memBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -147,7 +143,6 @@ membershipRoutes.put(`${memBase}/:id`, async (c: Context) => {
 
   const id = c.req.param("id");
 
-  // H-3 FIX: Resolve target membership's institution
   const institutionId = await resolveMembershipInstitution(db, id);
   if (!institutionId) return err(c, "Membership not found", 404);
 
@@ -161,11 +156,62 @@ membershipRoutes.put(`${memBase}/:id`, async (c: Context) => {
   const patch: Record<string, unknown> = {};
   for (const f of allowedFields) { if (body[f] !== undefined) patch[f] = body[f]; }
 
+  // A-5 FIX: For destructive changes (role change or deactivation), verify
+  // the caller's role is >= the target membership's current role.
+  // This prevents an admin from deactivating the owner.
+  const isDestructiveChange =
+    (typeof patch.role === "string") ||
+    (patch.is_active === false);
+
+  if (isDestructiveChange) {
+    // Fetch the target membership's current role
+    const { data: targetMem, error: targetErr } = await db
+      .from("memberships")
+      .select("role, user_id")
+      .eq("id", id)
+      .single();
+
+    if (targetErr || !targetMem) {
+      return err(c, "Target membership not found", 404);
+    }
+
+    const callerLevel = ROLE_HIERARCHY[roleCheck.role] ?? 0;
+    const targetLevel = ROLE_HIERARCHY[targetMem.role as string] ?? 0;
+
+    // Caller must have >= authority than the target
+    if (callerLevel < targetLevel) {
+      return err(
+        c,
+        `Cannot modify a ${targetMem.role} membership with your ${roleCheck.role} role`,
+        403,
+      );
+    }
+
+    // Prevent self-deactivation if caller is the last owner
+    if (patch.is_active === false && targetMem.user_id === user.id && targetMem.role === "owner") {
+      // Check if there's at least one other active owner
+      const { count, error: countErr } = await db
+        .from("memberships")
+        .select("id", { count: "exact", head: true })
+        .eq("institution_id", institutionId)
+        .eq("role", "owner")
+        .eq("is_active", true)
+        .neq("id", id);
+
+      if (countErr || (count ?? 0) < 1) {
+        return err(
+          c,
+          "Cannot deactivate the last owner of an institution",
+          403,
+        );
+      }
+    }
+  }
+
   if (typeof patch.role === "string") {
     if (!VALID_ROLES.includes(patch.role as string))
       return err(c, `role must be one of: ${VALID_ROLES.join(", ")}`, 400);
 
-    // H-3 FIX: Prevent privilege escalation when changing roles
     if (!canAssignRole(roleCheck.role, patch.role as string)) {
       return err(
         c,
@@ -183,7 +229,7 @@ membershipRoutes.put(`${memBase}/:id`, async (c: Context) => {
 });
 
 // ── DELETE /memberships/:id ──────────────────────────────────────
-// H-3 FIX: Resolve target institution, verify caller has management role.
+// A-5 FIX: Also applies hierarchy check — admin can't delete owner.
 membershipRoutes.delete(`${memBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -191,12 +237,48 @@ membershipRoutes.delete(`${memBase}/:id`, async (c: Context) => {
 
   const id = c.req.param("id");
 
-  // H-3 FIX: Resolve target membership's institution, verify authority
   const institutionId = await resolveMembershipInstitution(db, id);
   if (!institutionId) return err(c, "Membership not found", 404);
 
   const roleCheck = await requireInstitutionRole(db, user.id, institutionId, MANAGEMENT_ROLES);
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
+  // A-5 FIX: Verify caller has authority over the target membership
+  const { data: targetMem, error: targetErr } = await db
+    .from("memberships")
+    .select("role, user_id")
+    .eq("id", id)
+    .single();
+
+  if (targetErr || !targetMem) {
+    return err(c, "Target membership not found", 404);
+  }
+
+  const callerLevel = ROLE_HIERARCHY[roleCheck.role] ?? 0;
+  const targetLevel = ROLE_HIERARCHY[targetMem.role as string] ?? 0;
+
+  if (callerLevel < targetLevel) {
+    return err(
+      c,
+      `Cannot deactivate a ${targetMem.role} membership with your ${roleCheck.role} role`,
+      403,
+    );
+  }
+
+  // Prevent deleting the last owner
+  if (targetMem.role === "owner") {
+    const { count, error: countErr } = await db
+      .from("memberships")
+      .select("id", { count: "exact", head: true })
+      .eq("institution_id", institutionId)
+      .eq("role", "owner")
+      .eq("is_active", true)
+      .neq("id", id);
+
+    if (countErr || (count ?? 0) < 1) {
+      return err(c, "Cannot deactivate the last owner of an institution", 403);
+    }
+  }
 
   const { data, error } = await db
     .from("memberships")

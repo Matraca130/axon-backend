@@ -23,6 +23,15 @@
  *   - Skipped for scopeToUser tables (student data, already user-scoped)
  *   - courses (parentKey=institution_id): shortcut, no RPC needed
  *   - All other tables: resolve via resolve_parent_institution() RPC
+ *
+ * A-10 FIX: Institution scoping only applies to KNOWN content-hierarchy
+ *   parentKeys. Tables with parentKeys not in the mapping (e.g.
+ *   study_plan_tasks → study_plan_id) are not part of the content
+ *   hierarchy and are skipped. This prevents false 404s on tables
+ *   whose parents are user-scoped or otherwise outside the hierarchy.
+ *
+ * A-2 FIX: POST endpoint validates requiredFields BEFORE calling
+ *   checkContentScope, avoiding unnecessary RPC calls on invalid bodies.
  */
 
 import { Hono } from "npm:hono";
@@ -40,9 +49,14 @@ import type { Context } from "npm:hono";
 const MAX_PAGINATION_LIMIT = 500;
 const DEFAULT_PAGINATION_LIMIT = 100;
 
-// ─── H-5: Parent key to table mapping ─────────────────────────────
+// ─── H-5 + A-10: Parent key to table mapping ─────────────────────
 // Maps FK column names to their parent table for institution resolution.
 // "institution_id" is handled as a special case (direct, no RPC needed).
+//
+// IMPORTANT: Only parentKeys that connect to the content hierarchy
+// (courses → subtopics) are listed here. ParentKeys for non-content
+// tables (e.g. study_plan_id) are intentionally excluded — those tables
+// are either user-scoped or don't have a clean FK path to institution_id.
 
 const PARENT_KEY_TO_TABLE: Record<string, string> = {
   course_id: "courses",
@@ -51,6 +65,7 @@ const PARENT_KEY_TO_TABLE: Record<string, string> = {
   topic_id: "topics",
   summary_id: "summaries",
   keyword_id: "keywords",
+  model_id: "models_3d",    // A-10 FIX: model_3d_pins → models_3d → topics → ... → courses
 };
 
 // ─── Types ──────────────────────────────────────────────────────
@@ -91,7 +106,16 @@ function parseCountMode(c: Context): "exact" | "estimated" {
   return c.req.query("exact_count") === "true" ? "exact" : "estimated";
 }
 
-// ─── H-5: Institution Resolution Helpers ─────────────────────────
+// ─── H-5 + A-10: Institution Resolution Helpers ──────────────────
+
+/**
+ * Determine if a parentKey connects to the content hierarchy.
+ * Returns true for "institution_id" (direct) or any key in PARENT_KEY_TO_TABLE.
+ * Returns false for unknown keys like "study_plan_id".
+ */
+function isContentHierarchyParent(parentKey: string): boolean {
+  return parentKey === "institution_id" || parentKey in PARENT_KEY_TO_TABLE;
+}
 
 /**
  * Resolve institution_id from a parent FK key + value.
@@ -144,7 +168,12 @@ async function resolveInstitutionFromRow(
 /**
  * Check institution scoping for a content operation.
  * Returns Response (error) if denied, or null if access is granted.
- * Skips check for user-scoped tables (scopeToUser) and tables without parentKey.
+ *
+ * Skips the check entirely when:
+ *   - cfg.scopeToUser is set (student data, already user-scoped)
+ *   - cfg.parentKey is absent (no parent, top-level table)
+ *   - cfg.parentKey is NOT in the content hierarchy mapping (A-10 fix:
+ *     tables like study_plan_tasks whose parent is user-scoped)
  */
 async function checkContentScope(
   c: Context,
@@ -157,8 +186,14 @@ async function checkContentScope(
     isWrite: boolean;     // true = CONTENT_WRITE_ROLES, false = ALL_ROLES
   },
 ): Promise<Response | null> {
-  // Skip for user-scoped tables (student data) or tables without a parent
+  // Skip for user-scoped tables or tables without a parent
   if (cfg.scopeToUser || !cfg.parentKey) return null;
+
+  // A-10 FIX: Only apply institution scoping to known content-hierarchy parents.
+  // Tables with parentKeys NOT in the mapping (e.g. study_plan_id → study_plans)
+  // are not part of the content hierarchy and don't have a clean FK path to
+  // institution_id. Skipping is safe because their parents are user-scoped.
+  if (!isContentHierarchyParent(cfg.parentKey)) return null;
 
   let institutionId: string | null = null;
 
@@ -288,13 +323,8 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       row[cfg.parentKey] = parentValue;
     }
 
-    // H-5 FIX: Verify caller has write access in this resource's institution
-    const scopeErr = await checkContentScope(c, db, user.id, cfg, {
-      parentValue,
-      isWrite: true,
-    });
-    if (scopeErr) return scopeErr;
-
+    // A-2 FIX: Validate required fields BEFORE institution check.
+    // Avoids unnecessary RPC call when body is incomplete.
     if (cfg.requiredFields) {
       const missing = cfg.requiredFields.filter((f) => {
         const v = body[f];
@@ -307,6 +337,13 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
         return err(c, `Missing required fields: ${missing.join(", ")}`, 400);
       }
     }
+
+    // H-5 FIX: Verify caller has write access in this resource's institution
+    const scopeErr = await checkContentScope(c, db, user.id, cfg, {
+      parentValue,
+      isWrite: true,
+    });
+    if (scopeErr) return scopeErr;
 
     for (const f of cfg.createFields) {
       if (body[f] !== undefined) row[f] = body[f];
