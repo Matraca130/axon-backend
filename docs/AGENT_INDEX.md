@@ -25,16 +25,18 @@
 | **Understand the Mux video system** | `routes/mux/` | Upload via @mux/upchunk, playback via signed JWTs |
 | **Understand Stripe billing** | `routes-billing.tsx` | Checkout, portal, webhooks (timing-safe + idempotent) |
 | **Understand the study algorithm** | `routes-study-queue.tsx` | Custom spaced repetition queue builder |
-| **Use AI generation (flashcards/quiz)** | `routes/ai/generate.ts` | POST `/ai/generate` — needs `action` + `summary_id`. See [AI_PIPELINE.md](./AI_PIPELINE.md) |
-| **Use RAG Chat (semantic search + answer)** | `routes/ai/chat.ts` | POST `/ai/rag-chat` — needs `message` (NOT `question`). See [AI_PIPELINE.md](./AI_PIPELINE.md) |
-| **Ingest embeddings for RAG** | `routes/ai/ingest.ts` | POST `/ai/ingest-embeddings` — needs `institution_id`. Run before RAG Chat works |
+| **Use AI generation (flashcards/quiz)** | `routes/ai/generate.ts` | POST `/ai/generate` -- needs `action` + `summary_id`. See [AI_PIPELINE.md](./AI_PIPELINE.md) |
+| **Use RAG Chat (semantic search + answer)** | `routes/ai/chat.ts` | POST `/ai/rag-chat` -- needs `message` (NOT `question`). See [AI_PIPELINE.md](./AI_PIPELINE.md) |
+| **Ingest embeddings for RAG** | `routes/ai/ingest.ts` | POST `/ai/ingest-embeddings` -- needs `institution_id`. Run before RAG Chat works |
 | **Change the AI model** | `gemini.ts` | Edit `GENERATE_MODEL` constant. Single source of truth (D-18 fix) |
-| **Debug AI/embedding issues** | `routes/ai/list-models.ts` | GET `/ai/list-models` — shows available models for current API key |
+| **Debug AI/embedding issues** | `routes/ai/list-models.ts` | GET `/ai/list-models` -- shows available models for current API key |
 | **Understand the RAG pipeline** | [AI_PIPELINE.md](./AI_PIPELINE.md) | Architecture, security model, RPCs, fix history |
 
 ---
 
 ## File Structure at a Glance
+
+For the full tree with every file, see [BACKEND_MAP.md > Repository Structure](./BACKEND_MAP.md#repository-structure).
 
 ```
 supabase/functions/server/
@@ -49,27 +51,8 @@ supabase/functions/server/
 |-- gemini.ts             <- Gemini API helpers (generateText, generateEmbedding, GENERATE_MODEL)
 |
 |-- routes/content/       <- Content hierarchy (6 files)
-|   |-- index.ts          <- Module combiner
-|   |-- crud.ts           <- 9 registerCrud (courses -> subtopics)
-|   |-- keyword-connections.ts
-|   |-- prof-notes.ts
-|   |-- reorder.ts
-|   +-- content-tree.ts
-|
 |-- routes/study/         <- Study system (5 files)
-|   |-- index.ts          <- Module combiner
-|   |-- sessions.ts       <- 3 registerCrud (sessions, plans, tasks)
-|   |-- reviews.ts        <- Reviews + quiz-attempts
-|   |-- progress.ts       <- topic-progress, reading-states, daily-activities, student-stats
-|   +-- spaced-rep.ts     <- FSRS + BKT states
-|
 |-- routes/ai/            <- AI / RAG module (5 files)
-|   |-- index.ts          <- AI module combiner
-|   |-- generate.ts       <- POST /ai/generate (flashcards + quiz questions)
-|   |-- ingest.ts         <- POST /ai/ingest-embeddings (batch embeddings)
-|   |-- chat.ts           <- POST /ai/rag-chat (semantic search + Gemini)
-|   +-- list-models.ts    <- GET /ai/list-models (diagnostic)
-|
 |-- routes/members/       <- Institutions + memberships (4 files)
 |-- routes/mux/           <- Mux video integration (5 files)
 |-- routes/plans/         <- Plans + AI logs + access (5 files)
@@ -84,9 +67,6 @@ supabase/functions/server/
 |-- routes-study-queue.tsx <- Study queue algorithm
 |
 +-- tests/                <- Deno-native tests (3 files)
-    |-- rate_limit_test.ts
-    |-- validate_test.ts
-    +-- timing_safe_test.ts
 ```
 
 ---
@@ -103,8 +83,8 @@ const { user, db } = auth;
 ```
 
 Two headers required from frontend:
-- `Authorization: Bearer <ANON_KEY>` — passes Supabase gateway
-- `X-Access-Token: <USER_JWT>` — identifies the user
+- `Authorization: Bearer <ANON_KEY>` -- passes Supabase gateway
+- `X-Access-Token: <USER_JWT>` -- identifies the user
 
 ---
 
@@ -128,9 +108,8 @@ Two headers required from frontend:
 4. **Hardcoding Figma Make URLs** -> Production URL is `https://xdnciktarvxyhkrokbng.supabase.co/functions/v1/server`
 5. **Adding YouTube/Vimeo video code** -> Video is Mux-only. No URL fields, no platform selectors, no iframes
 6. **Making N+1 requests from frontend** -> Use `/topic-progress` unified endpoint instead of separate calls
-7. **Using `question` in RAG Chat** -> The field is `message`, not `question`
-8. **Hardcoding model names** -> Import `GENERATE_MODEL` from `gemini.ts`
-9. **Calling Gemini before DB query** -> DB query validates JWT cryptographically. Gemini call must come AFTER (PF-05)
+
+> For AI-specific mistakes, see the [AI mistakes table](#common-mistakes-with-ai-endpoints) below.
 
 ---
 
@@ -141,7 +120,7 @@ Two headers required from frontend:
 | POST | `/ai/ingest-embeddings` | Batch-generate embeddings for chunks | `institution_id` (req), `summary_id` (opt), `batch_size` |
 | POST | `/ai/generate` | Generate flashcard or quiz question | `action` (req), `summary_id` (req) |
 | POST | `/ai/rag-chat` | Semantic search + AI answer | `message` (req), `summary_id` (opt), `history` (opt) |
-| GET | `/ai/list-models` | List available Gemini models | — |
+| GET | `/ai/list-models` | List available Gemini models | -- |
 
 ### Common mistakes with AI endpoints
 
@@ -151,37 +130,38 @@ Two headers required from frontend:
 | Calling `/ai/generate` without `action` | `{ "action": "flashcard", "summary_id": "..." }` | `action` is required |
 | Calling `/ai/generate` without `summary_id` | Always include `summary_id` | Required for content context |
 | Hardcoding model name in `_meta` | Import `GENERATE_MODEL` from `gemini.ts` | Single source of truth (D-18) |
-| Calling Gemini before DB query | DB query first, then Gemini | Security: JWT validated by PostgREST (PF-05) |
-
-> Full reference: [AI_PIPELINE.md](./AI_PIPELINE.md) and [figma-make/06-ai-rag.md](./figma-make/06-ai-rag.md)
+| Calling Gemini before DB query | DB query first, then Gemini | Security: JWT validated by PostgREST (PF-05). See [AI_PIPELINE.md](./AI_PIPELINE.md#security-model) |
 
 ---
 
 ## Quick Endpoint Finder
 
-### Content Hierarchy (CRUD factory — in `routes/content/crud.ts`)
+### Content Hierarchy (CRUD factory -- in `routes/content/crud.ts`)
 `courses`, `semesters`, `sections`, `topics`, `summaries`, `chunks`, `summary-blocks`, `keywords`, `subtopics`
 
 ### Content Custom (in `routes/content/`)
 `/keyword-connections`, `/kw-prof-notes`, `/reorder`, `/content-tree`
 
-### Student Instruments (CRUD factory — in `routes-student.tsx`)
-`flashcards`, `quiz-questions`, `student-notes`, `student-annotations`, `videos`, `highlight-tags`
+### Student Instruments (CRUD factory -- in `routes-student.tsx`)
+`flashcards`, `quiz-questions`, `quizzes`, `student-notes`, `student-annotations`, `videos`, `highlight-tags`
 
-### Study (CRUD factory — in `routes/study/sessions.ts`)
+### Study (CRUD factory -- in `routes/study/sessions.ts`)
 `study-sessions`, `study-plans`, `study-plan-tasks`
 
 ### Study Custom (in `routes/study/`)
 `/topic-progress`, `/topics-overview`
 `/reviews`, `/quiz-attempts`, `/reading-states`, `/daily-activities`, `/student-stats`, `/fsrs-states`, `/bkt-states`
 
-### Auth & Members (in `routes/members/`)
-`/signup`, `/me`, `/institutions`, `/memberships`, `/admin-scopes`
+### Auth (in `routes-auth.tsx`)
+`/signup`, `/me` (GET/PUT)
 
-### Billing
+### Members (in `routes/members/`)
+`/institutions`, `/memberships`, `/admin-scopes`
+
+### Billing (in `routes-billing.tsx`)
 `/billing/checkout-session`, `/billing/portal-session`, `/billing/subscription-status`, `/webhooks/stripe`
 
-### Video (Mux — in `routes/mux/`)
+### Video (Mux -- in `routes/mux/`)
 `/mux/create-upload`, `/mux/playback-token`, `/mux/track-view`, `/mux/video-stats`, `/mux/asset/:video_id`, `/webhooks/mux`
 
 ### Plans & AI Logs (in `routes/plans/`)
@@ -193,11 +173,11 @@ Two headers required from frontend:
 ### Search (in `routes/search/`)
 `/search?q=&type=`, `/trash?type=`, `/restore/:table/:id`
 
-### Storage
+### Storage (in `routes-storage.tsx`)
 `/storage/upload`, `/storage/signed-url`, `/storage/delete`
 
-### 3D Models (CRUD factory)
+### 3D Models (CRUD factory -- in `routes-models.tsx`)
 `models-3d`, `model-3d-pins`, `model-3d-notes`
 
-### Study Queue
+### Study Queue (in `routes-study-queue.tsx`)
 `/study-queue` (custom algorithm)
