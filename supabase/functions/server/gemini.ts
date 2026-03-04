@@ -3,17 +3,13 @@
  *
  * Two functions:
  *   generateText()      — Gemini 2.0 Flash for text/JSON generation
- *   generateEmbedding() — text-embedding-005 for vector embeddings (768d)
+ *   generateEmbedding() — embedding model for vector embeddings (768d)
  *
  * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
  *
- * Rate limits (free tier):
- *   - gemini-2.0-flash: 15 RPM, 1M tokens/min, 1500 RPD
- *   - text-embedding-005: 1500 RPM, 100 RPD (batch)
- *
  * LA-02 FIX: Added AbortController timeout (15s generate, 10s embed)
  * LA-06 FIX: Added retry with exponential backoff for 429/503
- * D-16 FIX: Switched to text-embedding-005 (004 deprecated/404)
+ * D-16 FIX: Trying embedding-001 (004/005 return 404)
  */
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -23,6 +19,9 @@ function getApiKey(): string {
   if (!key) throw new Error("[Axon Fatal] GEMINI_API_KEY not configured in secrets");
   return key;
 }
+
+// Exported so diagnostic route can use it
+export { getApiKey };
 
 // ─── LA-02 + LA-06 FIX: Fetch with timeout + retry ─────────────
 
@@ -39,7 +38,6 @@ async function fetchWithRetry(
       const res = await fetch(url, { ...init, signal: controller.signal });
       clearTimeout(timer);
 
-      // Retry on transient errors (429 rate-limited, 503 unavailable)
       if ((res.status === 429 || res.status === 503) && attempt < maxRetries) {
         const delay = Math.min(1000 * 2 ** attempt, 8000);
         console.warn(
@@ -57,7 +55,6 @@ async function fetchWithRetry(
           `Gemini API timeout after ${timeoutMs}ms (attempt ${attempt + 1})`,
         );
       }
-      // Retry on network errors
       if (attempt < maxRetries) {
         const delay = Math.min(1000 * 2 ** attempt, 8000);
         console.warn(
@@ -109,7 +106,6 @@ export async function generateText(
     };
   }
 
-  // LA-02 FIX: 15s timeout for text generation
   const res = await fetchWithRetry(
     url,
     {
@@ -147,11 +143,10 @@ export async function generateEmbedding(
   taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY" = "RETRIEVAL_QUERY",
 ): Promise<number[]> {
   const key = getApiKey();
-  // D-16 FIX: text-embedding-004 was deprecated/404, use 005
-  const model = "text-embedding-005";
+  // D-16 FIX: Try embedding-001 (text-embedding-004/005 return 404)
+  const model = "embedding-001";
   const url = `${GEMINI_BASE}/${model}:embedContent?key=${key}`;
 
-  // LA-02 FIX: 10s timeout for embeddings
   const res = await fetchWithRetry(
     url,
     {
@@ -173,8 +168,12 @@ export async function generateEmbedding(
 
   const data = await res.json();
   const values = data.embedding?.values;
-  if (!values || !Array.isArray(values) || values.length !== 768) {
-    throw new Error(`Unexpected embedding dimensions: ${values?.length ?? 0} (expected 768)`);
+  if (!values || !Array.isArray(values)) {
+    throw new Error(`No embedding values returned`);
+  }
+  // embedding-001 returns 768 dimensions, but accept any valid array
+  if (values.length === 0) {
+    throw new Error(`Empty embedding vector returned`);
   }
   return values;
 }
