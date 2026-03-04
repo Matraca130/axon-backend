@@ -13,9 +13,13 @@
  *           + truncate to 768 dims to match DB vector column
  * D-17 FIX: Switch from gemini-2.0-flash to gemini-2.5-flash
  *           (separate quota bucket, avoids free tier exhaustion)
+ * D-18 FIX: Export GENERATE_MODEL so _meta always reports correct model
  */
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+
+// D-17 + D-18: Single source of truth for the generation model name
+export const GENERATE_MODEL = "gemini-2.5-flash";
 
 function getApiKey(): string {
   const key = Deno.env.get("GEMINI_API_KEY");
@@ -92,7 +96,7 @@ export async function generateText(
 ): Promise<GeminiGenerateResult> {
   const key = getApiKey();
   // D-17 FIX: Use gemini-2.5-flash (separate quota bucket from 2.0-flash)
-  const model = "gemini-2.5-flash";
+  const model = GENERATE_MODEL;
   const url = `${GEMINI_BASE}/${model}:generateContent?key=${key}`;
 
   const body: Record<string, unknown> = {
