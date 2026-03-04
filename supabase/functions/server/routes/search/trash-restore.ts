@@ -10,11 +10,10 @@
  *   - POST /restore now resolves the item's institution via
  *     resolve_summary_institution() RPC, then verifies caller has
  *     CONTENT_WRITE_ROLES in that institution.
- *   - Fixes the ambiguous .single() on memberships (was only filtering
- *     by user_id without institution scoping).
  *
- * Previous fix preserved:
- *   N-2: Parallel trash queries (now single RPC call, even better)
+ * A-3 FIX: POST /restore now also sets is_active = true for tables
+ *   that use the is_active flag (summaries, keywords, videos).
+ *   Previously only deleted_at was cleared, leaving items invisible.
  */
 
 import { Hono } from "npm:hono";
@@ -40,9 +39,16 @@ const RESTORE_WHITELIST: Record<string, string> = {
 
 const VALID_TRASH_TYPES = ["all", ...Object.keys(RESTORE_WHITELIST)];
 
+// A-3 FIX: Tables that have an is_active column alongside deleted_at.
+// When restoring, we need to set is_active = true in addition to
+// clearing deleted_at, otherwise the item remains invisible.
+const TABLES_WITH_IS_ACTIVE = new Set([
+  "summaries",
+  "keywords",
+  "videos",
+]);
+
 // ── GET /trash ─────────────────────────────────────────────────────
-// H-4 FIX: Calls trash_scoped() RPC which uses auth.uid() to scope
-// deleted items to the caller's accessible institutions.
 trashRestoreRoutes.get(`${PREFIX}/trash`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -77,14 +83,6 @@ trashRestoreRoutes.get(`${PREFIX}/trash`, async (c: Context) => {
 });
 
 // ── POST /restore/:table/:id ─────────────────────────────────────
-// H-4 FIX:
-//   1. Resolve the item's summary_id (or the item IS a summary)
-//   2. Call resolve_summary_institution() RPC to get institution_id
-//   3. requireInstitutionRole with CONTENT_WRITE_ROLES
-//   4. Proceed with restore
-//
-// This replaces the broken .single() on memberships that only
-// filtered by user_id (ambiguous with multiple memberships).
 trashRestoreRoutes.post(`${PREFIX}/restore/:table/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -106,10 +104,8 @@ trashRestoreRoutes.post(`${PREFIX}/restore/:table/:id`, async (c: Context) => {
     let summaryId: string | null = null;
 
     if (realTable === "summaries") {
-      // The item IS a summary
       summaryId = id;
     } else {
-      // keywords, flashcards, quiz_questions, videos all have summary_id
       const { data: item, error: itemErr } = await db
         .from(realTable)
         .select("summary_id")
@@ -142,9 +138,17 @@ trashRestoreRoutes.post(`${PREFIX}/restore/:table/:id`, async (c: Context) => {
     if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
     // Step 4: Proceed with restore
+    // A-3 FIX: Also restore is_active for tables that use it.
+    // Without this, items were restored (deleted_at=null) but remained
+    // invisible in queries that filter by is_active=true.
+    const restorePatch: Record<string, unknown> = { deleted_at: null };
+    if (TABLES_WITH_IS_ACTIVE.has(realTable)) {
+      restorePatch.is_active = true;
+    }
+
     const { data, error } = await db
       .from(realTable)
-      .update({ deleted_at: null })
+      .update(restorePatch)
       .eq("id", id)
       .not("deleted_at", "is", null)
       .select()
