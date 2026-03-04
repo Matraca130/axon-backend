@@ -5,6 +5,10 @@
  *   study_sessions   — per-student study sessions
  *   study_plans      — per-student study plans
  *   study_plan_tasks — tasks within study plans
+ *
+ * DT-02 FIX: Added completion_date, weekly_hours, metadata to
+ *   study_plans createFields/updateFields. Requires Migration 001
+ *   (ALTER TABLE study_plans ADD COLUMN ...) before frontend sends data.
  */
 
 import { Hono } from "npm:hono";
@@ -34,8 +38,8 @@ registerCrud(sessionRoutes, {
   hasUpdatedAt: true,
   hasOrderIndex: false,
   requiredFields: ["name"],
-  createFields: ["course_id", "name", "status"],
-  updateFields: ["name", "status"],
+  createFields: ["course_id", "name", "status", "completion_date", "weekly_hours", "metadata"],
+  updateFields: ["name", "status", "completion_date", "weekly_hours", "metadata"],
 });
 
 registerCrud(sessionRoutes, {
