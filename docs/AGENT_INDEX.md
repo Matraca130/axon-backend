@@ -4,6 +4,7 @@
 > For full details on any section, see [BACKEND_MAP.md](./BACKEND_MAP.md).
 > For critical rules, see [AGENT_RULES.md](./AGENT_RULES.md).
 > For the AI/RAG pipeline, see [AI_PIPELINE.md](./AI_PIPELINE.md).
+> For the AI implementation roadmap, see [RAG_ROADMAP.md](./RAG_ROADMAP.md).
 
 ---
 
@@ -31,6 +32,11 @@
 | **Change the AI model** | `gemini.ts` | Edit `GENERATE_MODEL` constant. Single source of truth (D-18 fix) |
 | **Debug AI/embedding issues** | `routes/ai/list-models.ts` | GET `/ai/list-models` -- shows available models for current API key |
 | **Understand the RAG pipeline** | [AI_PIPELINE.md](./AI_PIPELINE.md) | Architecture, security model, RPCs, fix history |
+| **See what AI features are pending** | [RAG_ROADMAP.md](./RAG_ROADMAP.md) | 8 phases: chunking, retrieval, re-ranking, adaptive IA, PDF ingest |
+| **Implement chunking strategies** | [RAG_ROADMAP.md > Fase 5](./RAG_ROADMAP.md#fase-5--chunking-inteligente--auto-ingest) | Recursive, Semantic, Parent-Child, Agentic. Decision framework included |
+| **Implement advanced retrieval** | [RAG_ROADMAP.md > Fase 6](./RAG_ROADMAP.md#fase-6--retrieval-avanzado-multi-query--hyde--re-ranking) | Multi-Query (+25% recall), HyDE (+20%), Re-ranking (+40% precision) |
+| **Implement NeedScore in AI generation** | [RAG_ROADMAP.md > Fase 8](./RAG_ROADMAP.md#fase-8--ia-adaptativa-needscore--pre-generacion--calidad) | Smart generation, pre-generation, quality feedback |
+| **Understand the adaptive learning system** | [RAG_ROADMAP.md > Fase 8](./RAG_ROADMAP.md#fase-8--ia-adaptativa-needscore--pre-generacion--calidad) | BKT + FSRS + NeedScore integration |
 
 ---
 
@@ -119,6 +125,7 @@ The module has 4 endpoints: `/ai/generate`, `/ai/ingest-embeddings`, `/ai/rag-ch
 
 For the full endpoint table with methods, descriptions, and file mapping, see [BACKEND_MAP.md > routes/ai/](./BACKEND_MAP.md#routesai--ai--rag-module-5-files).
 For exact payloads and response examples, see [figma-make/06-ai-rag.md](./figma-make/06-ai-rag.md).
+For pending features and implementation plan, see [RAG_ROADMAP.md](./RAG_ROADMAP.md).
 
 ### Common mistakes with AI endpoints
 

@@ -1,5 +1,9 @@
 ## AI / RAG — Endpoints, Payloads y Pipeline
 
+> **Pending features:** For chunking strategies, retrieval improvements (Multi-Query,
+> HyDE, Re-ranking), adaptive IA enhancements, and PDF ingestion, see
+> [RAG_ROADMAP.md](../RAG_ROADMAP.md).
+
 ### Modelos
 
 | Funcion | Modelo | Dims | Constante en codigo |
@@ -137,7 +141,7 @@ Genera una flashcard o quiz question adaptativa usando Gemini + contexto del alu
 
 #### POST `/server/ai/rag-chat`
 
-Pregunta con busqueda semantica hibrida (pgvector cosine + full-text) + generacion adaptativa.
+Pregunta con busqueda semantica hibrida (pgvector cosine + full-text via `to_tsvector('spanish')` + `ts_rank()`) + generacion adaptativa.
 
 **Body:**
 ```json
@@ -178,7 +182,7 @@ Pregunta con busqueda semantica hibrida (pgvector cosine + full-text) + generaci
 **Pipeline interno:**
 1. Autentica usuario + resuelve institucion
 2. Genera embedding del `message` con `generateEmbedding(message, "RETRIEVAL_QUERY")`
-3. Llama RPC `rag_hybrid_search()` (pgvector cosine + pg_trgm full-text, threshold 0.3, top 5)
+3. Llama RPC `rag_hybrid_search()` (pgvector cosine 70% + `ts_rank` FTS 30%, threshold 0.3, top 5)
 4. Fetch perfil del alumno via `get_student_knowledge_context()` RPC
 5. Construye prompt con contexto RAG + perfil + historial
 6. Genera respuesta con `generateText()` (temp 0.5, max 1500 tokens)
@@ -203,7 +207,7 @@ Diagnostico: lista todos los modelos disponibles para la API key configurada.
 3. POST /ai/ingest-embeddings → genera vector 768-dim para cada chunk
 4. Alumno hace POST /ai/rag-chat con su pregunta
    4a. Se genera embedding de la pregunta (RETRIEVAL_QUERY)
-   4b. rag_hybrid_search() busca chunks similares (cosine + full-text)
+   4b. rag_hybrid_search() busca chunks similares (cosine 70% + ts_rank FTS 30%)
    4c. get_student_knowledge_context() obtiene perfil adaptativo
    4d. Gemini genera respuesta contextualizada
 5. POST /ai/generate → genera flashcard/quiz adaptado al nivel del alumno
@@ -216,7 +220,7 @@ Diagnostico: lista todos los modelos disponibles para la API key configurada.
 | RPC | Que hace | Usado en |
 |-----|----------|----------|
 | `resolve_parent_institution(p_table, p_id)` | Sube la jerarquia hasta encontrar la institution_id | generate.ts, chat.ts |
-| `rag_hybrid_search(p_query_embedding, p_query_text, p_institution_id, ...)` | Busqueda hibrida: pgvector cosine + full-text | chat.ts |
+| `rag_hybrid_search(p_query_embedding, p_query_text, p_institution_id, ...)` | Busqueda hibrida: pgvector cosine + `ts_rank` FTS | chat.ts |
 | `get_student_knowledge_context(p_student_id, p_institution_id)` | Perfil adaptativo del alumno | generate.ts, chat.ts |
 | `get_course_summary_ids(p_institution_id)` | Fallback: summary_ids de una institucion | ingest.ts |
 

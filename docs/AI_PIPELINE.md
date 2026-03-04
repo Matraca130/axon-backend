@@ -1,7 +1,8 @@
 # AI Pipeline Reference -- Axon v4.4
 
-> **For agents:** This document explains the complete AI/RAG system.
+> **For agents:** This document explains the complete AI/RAG system as it exists today.
 > Read this BEFORE touching any file in `routes/ai/` or `gemini.ts`.
+> For pending features and implementation plan, see [RAG_ROADMAP.md](./RAG_ROADMAP.md).
 
 ---
 
@@ -62,10 +63,16 @@ And if the new model has different dimensions, also change:
 const EMBEDDING_DIMENSIONS = 768; // <- must match DB column: vector(768)
 ```
 
-> **WARNING:** If you change dimensions, you must also:
-> 1. Alter the DB column: `ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(NEW_DIM)`
-> 2. Re-run ingest for ALL chunks (old embeddings become incompatible)
-> 3. Update the `rag_hybrid_search` RPC if it references dimension size
+> **WARNING — Full dimension migration checklist:**
+>
+> If you change embedding dimensions, you must update ALL of these:
+> 1. `EMBEDDING_DIMENSIONS` in `gemini.ts`
+> 2. `ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(NEW_DIM)`
+> 3. `ALTER TABLE summaries ALTER COLUMN embedding TYPE vector(NEW_DIM)` (if Fase 3 from RAG_ROADMAP implemented)
+> 4. Function signature: `p_query_embedding vector(768)` in `rag_hybrid_search()`
+> 5. Function signature: `p_query_embedding vector(768)` in `rag_coarse_to_fine_search()` (if exists)
+> 6. Re-run ingest for ALL chunks and summaries (old embeddings are incompatible)
+> 7. Recreate HNSW indexes (they are dimension-specific)
 
 ## Retry & Rate Limiting
 
@@ -96,7 +103,7 @@ All AI routes follow this pattern (PF-05):
 | RPC | Signature | Purpose |
 |-----|-----------|---------|
 | `resolve_parent_institution` | `(p_table text, p_id uuid) -> uuid` | Walks hierarchy up to institution |
-| `rag_hybrid_search` | `(p_query_embedding text, p_query_text text, p_institution_id uuid, p_summary_id uuid, p_match_count int, p_similarity_threshold float) -> setof record` | Hybrid search: pgvector cosine + full-text |
+| `rag_hybrid_search` | `(p_query_embedding text, p_query_text text, p_institution_id uuid, p_summary_id uuid, p_match_count int, p_similarity_threshold float) -> setof record` | Hybrid search: pgvector cosine 70% + ts_rank FTS 30% |
 | `get_student_knowledge_context` | `(p_student_id uuid, p_institution_id uuid) -> jsonb` | Student adaptive profile |
 | `get_course_summary_ids` | `(p_institution_id uuid) -> setof record` | Fallback: all summary_ids for institution |
 
@@ -113,3 +120,5 @@ Key fixes to be aware of:
 | **PF-09** | Ingest | Uses `getAdminClient()` to bypass RLS for embedding UPDATEs |
 | **LA-03** | Validation | `message` max 2000 chars, `history` max 6 entries |
 | **D-16** | Embeddings | `outputDimensionality: 768` truncates from 3072 |
+| **LA-04** | Index | HNSW (not IVFFlat) for vector index -- works with 0 rows |
+| **LA-05** | RPC | CTE computes cosine distance once per row (was 3x) |
