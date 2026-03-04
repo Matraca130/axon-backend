@@ -5,7 +5,8 @@
 > `chunking-strategies.md`, `hybrid-retrieval.ts`, `adaptive-ia-study.md`),
 > adaptado a Gemini como provider inicial.
 >
-> **Auditoria v4:** 2026-03-04 — Appendix A con helper functions completas.
+> **Auditoria v5:** 2026-03-04 — Cross-audit con codigo fuente real.
+> v4: Appendix A con helper functions completas.
 > v3: 3 errores corregidos, 12 gaps de investigacion integrados.
 
 ---
@@ -29,7 +30,7 @@
 | 13 | Ingestion multi-fuente (PDF, API) | **PENDIENTE** | blueprint |
 | 14 | Auth + institution scoping | **DONE** | blueprint |
 | 15 | Retry con backoff exponencial | **DONE** | blueprint |
-| 16 | Denormalizacion institution_id | **PENDIENTE** | auditoria v2 |
+| 16 | Denormalizacion institution_id | **DONE** | auditoria v2 → migration `20260304_06` |
 | 17 | Feedback loop (thumbs up/down) en RAG chat | **PENDIENTE** | auditoria v2 |
 | 18 | Monitoring de cobertura de embeddings | **PENDIENTE** | auditoria v2 |
 | 19 | Auto-ingest trigger | **PENDIENTE** | auditoria v2 |
@@ -40,13 +41,13 @@
 | 24 | Decision framework para estrategia de chunking | **PENDIENTE** | chunking-strategies |
 | 25 | NeedScore integration con /ai/generate | **PENDIENTE** | adaptive-ia-study |
 | 26 | Pre-generacion en background | **PENDIENTE** | adaptive-ia-study |
-| 27 | Rate limit especifico para AI (20/hr) | **PENDIENTE** | adaptive-ia-study |
+| 27 | Rate limit especifico para AI (20/hr) | **PARCIAL** | adaptive-ia-study — infra existe (migration `20260303_02`) pero no conectada a AI routes |
 | 28 | Professor notes (kw_prof_notes) en prompt de generate | **PENDIENTE** | adaptive-ia-study |
 | 29 | Report question / flag AI content | **PENDIENTE** | adaptive-ia-study |
 | 30 | Quality dashboard para preguntas AI flaggeadas | **PENDIENTE** | adaptive-ia-study |
 | 31 | chat.ts comentarios stale en header | **PENDIENTE** | auditoria v2 |
 
-**Resumen: 9/31 completados, 22 pendientes.**
+**Resumen: 10/31 completados, 1 parcial, 20 pendientes.**
 
 ---
 
@@ -57,6 +58,30 @@
 | **ERR-1** | "Indices HNSW: PENDIENTE" | Ya existe `idx_chunks_embedding` HNSW en migration `20260305_03` (LA-04) |
 | **ERR-2** | "Full-text via `pg_trgm` en el RPC" | RPC usa `to_tsvector('spanish') + ts_rank()` (FTS estandar). `pg_trgm` es busqueda global |
 | **ERR-3** | Fase 1 proponia crear indices HNSW | Redundante — eliminada, reemplazada por denormalizacion |
+| **ERR-4** | Migration `20260305_03` comment: "Gemini text-embedding-004" | Modelo real es `gemini-embedding-001` (fix D-16). Comentario stale en migration aplicada |
+| **ERR-5** | `get_course_summary_ids` parametro inconsistente | `ingest.ts` llamaba con `p_institution_id` pero RPC solo aceptaba `p_course_id`. Corregido con migration `20260304_05` que agrega overload `get_institution_summary_ids()` |
+
+---
+
+## Cross-audit: Fixes aplicados (2026-03-04)
+
+> Estos fixes fueron identificados por un analisis cruzado automatizado
+> entre este roadmap y el codigo fuente real del backend.
+
+| Fix | INC | Descripcion | Migration/Archivo |
+|---|---|---|---|
+| Fix 5 | INC-5 | Nuevo RPC `get_institution_summary_ids(p_institution_id)` para ingest | `20260304_05` |
+| Fix 5b | INC-7 | Denormalizar `institution_id` en summaries + trigger sync + indice | `20260304_06` |
+| Fix 6 | INC-4 | BACKEND_MAP.md actualizado de 13 a 26 migrations | `docs/BACKEND_MAP.md` |
+| Fix 7 | INC-2 | Este documento actualizado con ERR-4, ERR-5, y estados corregidos | `docs/RAG_ROADMAP.md` |
+
+### Pendientes de aplicar (no requieren migration)
+
+| INC | Prioridad | Descripcion | Archivo | Esfuerzo |
+|---|---|---|---|---|
+| INC-1 | BAJA | chat.ts header: cambiar "embedding-004" a "embedding-001" y "2.0 Flash" a "2.5-flash" | `routes/ai/chat.ts` | 5 min |
+| INC-3 | MEDIA | Conectar `check_rate_limit` RPC a AI routes (20/hr) | `routes/ai/index.ts` | 30 min |
+| INC-6 | MEDIA | Agregar fetch `kw_prof_notes` en generate.ts prompt | `routes/ai/generate.ts` | 15 min |
 
 ---
 
@@ -65,6 +90,7 @@
 **Prioridad:** ALTA — el RPC `rag_hybrid_search()` hace un JOIN de 6 tablas en cada query.
 **Riesgo:** MEDIO — requiere migration + trigger + actualizar el RPC.
 **Impacto:** Elimina 4 JOINs por query (chunks->summaries->topics->sections->semesters->courses).
+**Estado:** **DONE** — migration `20260304_06_denorm_institution_id.sql`
 
 ### Problema actual
 
@@ -82,7 +108,7 @@ WHERE c.institution_id = p_institution_id
 ### Migration SQL
 
 ```sql
--- Archivo: supabase/migrations/YYYYMMDD_01_denorm_institution_id.sql
+-- Archivo: supabase/migrations/20260304_06_denorm_institution_id.sql (APPLIED)
 
 -- 1. Agregar columna denormalizada
 ALTER TABLE summaries
@@ -125,6 +151,10 @@ CREATE TRIGGER trg_summary_institution_sync
 ### RPC actualizado completo (Fase 1 + Fase 2 combinadas)
 
 Ver [Appendix A > rag_hybrid_search v2](#a3-rag_hybrid_search-v2-despues-de-fase-1--fase-2) para la funcion completa.
+
+> **Siguiente paso:** Actualizar el RPC `rag_hybrid_search()` para usar
+> `s.institution_id` directamente en vez del JOIN chain de 6 tablas.
+> La columna ya existe y esta sincronizada; solo falta el CREATE OR REPLACE.
 
 ---
 
@@ -598,6 +628,8 @@ NeedScore = 0.40*overdue + 0.30*(1-p_know) + 0.20*fragility + 0.10*novelty
 
 ### 8C. Professor notes en prompt de generate.ts (QUICK FIX)
 
+> **INC-6 pendiente:** Este fix aun no ha sido aplicado.
+
 ```typescript
 // En generate.ts, despues de fetch keyword:
 const { data: profNotes } = await db
@@ -614,6 +646,9 @@ if (profNotes?.length) {
 
 ### 8D. Rate limit especifico para AI
 
+> **INC-3 pendiente:** La infraestructura existe (migration `20260303_02`
+> con `check_rate_limit()` RPC) pero no esta conectada a las rutas AI.
+
 ```typescript
 // En routes/ai/index.ts (combiner), agregar middleware:
 const AI_RATE_LIMIT = 20; // per user per hour
@@ -621,7 +656,8 @@ const AI_RATE_LIMIT = 20; // per user per hour
 aiRoutes.use('*', async (c, next) => {
   const userId = c.get('userId');
   const key = `ai:${userId}`;
-  // Check distributed rate limit (DB-based, migration 20260303_02)
+  // Usar check_rate_limit RPC (migration 20260303_02)
+  // p_max_requests=20, p_window_ms=3600000 (1 hora)
   // If exceeded: return err(c, "AI rate limit: max 20/hour", 429);
   await next();
 });
@@ -656,12 +692,15 @@ ALTER TABLE flashcards ADD COLUMN IF NOT EXISTS report_reason TEXT;
 ## Orden de implementacion recomendado
 
 ```
-Fase 1: Denormalizar institution_id   [1 dia]  [SQL + RPC]      [elimina 4 JOINs por query]
+Fase 1: Denormalizar institution_id   [DONE]   [migration 20260304_06]
+  |
+  +-- Siguiente: actualizar RPC rag_hybrid_search para usar s.institution_id
   |
 Fase 2: Columnas tsvector + GIN      [1 dia]  [SQL + RPC]      [mejora FTS performance]
   |
-  +-- Quick fix: prof notes en generate.ts  [15 min]  [1 archivo]
-  +-- Quick fix: chat.ts stale comments     [5 min]   [1 archivo]
+  +-- Quick fix: prof notes en generate.ts  [15 min]  [INC-6 pendiente]
+  +-- Quick fix: chat.ts stale comments     [5 min]   [INC-1 pendiente]
+  +-- Quick fix: AI rate limit middleware   [30 min]  [INC-3 pendiente]
   |
 Fase 4: Query log + feedback          [1 dia]  [SQL + chat.ts]  [analytics para iterar]
   |
@@ -677,22 +716,26 @@ Fase 6: Retrieval avanzado            [2 dias] [chat.ts]        [Multi-Query + H
 Fase 7: Ingestion PDF                 [3 dias] [nuevo modulo]   [feature nueva]
 ```
 
-**Total estimado: ~15 dias de trabajo** (+ 20 min quick fixes)
+**Total estimado: ~14 dias restantes** (+ 50 min quick fixes)
 
 ---
 
 ## Housekeeping: Quick fixes
 
-### chat.ts — Comentarios stale en header
+### INC-1: chat.ts — Comentarios stale en header
 
 ```
 // DICE: gemini-embedding-004   -> DEBE SER: gemini-embedding-001 (fix D-16)
 // DICE: Gemini 2.0 Flash       -> DEBE SER: gemini-2.5-flash (fix D-17)
 ```
 
-### generate.ts — Professor notes faltantes
+### INC-6: generate.ts — Professor notes faltantes
 
 Ver Fase 8C. Quick fix independiente.
+
+### INC-3: routes/ai/index.ts — AI rate limit
+
+Ver Fase 8D. Infraestructura lista, solo falta middleware.
 
 ### Migracion de dimensiones: checklist completa
 
@@ -982,6 +1025,10 @@ export function rrfFusion<T extends { chunk_id: string }>(
 ```
 
 ### A.3 `rag_hybrid_search` v2 (despues de Fase 1 + Fase 2)
+
+> **Nota:** Fase 1 (denormalizacion) ya esta aplicada via migration `20260304_06`.
+> El RPC v2 a continuacion reemplaza el actual una vez que Fase 2 (tsvector columns)
+> tambien se aplique.
 
 ```sql
 -- Reemplaza la funcion actual en migration YYYYMMDD_XX_rag_hybrid_search_v2.sql
