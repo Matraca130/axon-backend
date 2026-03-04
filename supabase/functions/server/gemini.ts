@@ -2,7 +2,7 @@
  * gemini.ts — Gemini API helpers for Axon v4.4
  *
  * Two functions:
- *   generateText()      — Gemini 2.0 Flash for text/JSON generation
+ *   generateText()      — Gemini 2.5 Flash for text/JSON generation
  *   generateEmbedding() — gemini-embedding-001 for vector embeddings
  *
  * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
@@ -11,6 +11,8 @@
  * LA-06 FIX: Added retry with exponential backoff for 429/503
  * D-16 FIX: Use gemini-embedding-001 (correct model name per 2026 docs)
  *           + truncate to 768 dims to match DB vector column
+ * D-17 FIX: Switch from gemini-2.0-flash to gemini-2.5-flash
+ *           (separate quota bucket, avoids free tier exhaustion)
  */
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -89,7 +91,8 @@ export async function generateText(
   opts: GeminiGenerateOpts,
 ): Promise<GeminiGenerateResult> {
   const key = getApiKey();
-  const model = "gemini-2.0-flash";
+  // D-17 FIX: Use gemini-2.5-flash (separate quota bucket from 2.0-flash)
+  const model = "gemini-2.5-flash";
   const url = `${GEMINI_BASE}/${model}:generateContent?key=${key}`;
 
   const body: Record<string, unknown> = {
