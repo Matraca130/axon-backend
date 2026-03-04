@@ -16,18 +16,44 @@
  * O-5 FIX: GET /:id now applies scopeToUser filter (was missing before).
  * S-1 FIX: Default count mode changed to "estimated" for performance.
  *          Clients can opt-in to exact count via ?exact_count=true.
+ *
+ * H-5 FIX: Institution scoping added to all 6 endpoint types.
+ *   - READ ops (LIST, GET): requireInstitutionRole(ALL_ROLES)
+ *   - WRITE ops (POST, PUT, DELETE, RESTORE): requireInstitutionRole(CONTENT_WRITE_ROLES)
+ *   - Skipped for scopeToUser tables (student data, already user-scoped)
+ *   - courses (parentKey=institution_id): shortcut, no RPC needed
+ *   - All other tables: resolve via resolve_parent_institution() RPC
  */
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "./db.ts";
+import {
+  requireInstitutionRole,
+  isDenied,
+  ALL_ROLES,
+  CONTENT_WRITE_ROLES,
+} from "./auth-helpers.ts";
 import type { Context } from "npm:hono";
 
-// ─── Constants ────────────────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────
 
 const MAX_PAGINATION_LIMIT = 500;
 const DEFAULT_PAGINATION_LIMIT = 100;
 
-// ─── Types ────────────────────────────────────────────────────────────
+// ─── H-5: Parent key to table mapping ─────────────────────────────
+// Maps FK column names to their parent table for institution resolution.
+// "institution_id" is handled as a special case (direct, no RPC needed).
+
+const PARENT_KEY_TO_TABLE: Record<string, string> = {
+  course_id: "courses",
+  semester_id: "semesters",
+  section_id: "sections",
+  topic_id: "topics",
+  summary_id: "summaries",
+  keyword_id: "keywords",
+};
+
+// ─── Types ──────────────────────────────────────────────────────
 
 export interface CrudConfig {
   table: string;
@@ -45,7 +71,7 @@ export interface CrudConfig {
   updateFields: string[];
 }
 
-// ─── Pagination Helper ────────────────────────────────────────────────
+// ─── Pagination Helper ─────────────────────────────────────────
 
 function parsePagination(c: Context): { limit: number; offset: number } {
   let limit = parseInt(c.req.query("limit") ?? String(DEFAULT_PAGINATION_LIMIT), 10);
@@ -58,24 +84,111 @@ function parsePagination(c: Context): { limit: number; offset: number } {
   return { limit, offset };
 }
 
-// ─── Count Mode Helper ────────────────────────────────────────────────
+// ─── Count Mode Helper ─────────────────────────────────────────
 // S-1 FIX: Use "estimated" count by default to avoid full table scans.
-// PostgREST "estimated" uses pg_class reltuples (nearly free).
-// Clients that need precise totals (e.g. last-page pagination) can
-// pass ?exact_count=true to get the old behavior.
 
 function parseCountMode(c: Context): "exact" | "estimated" {
   return c.req.query("exact_count") === "true" ? "exact" : "estimated";
 }
 
-// ─── Factory ──────────────────────────────────────────────────────────
+// ─── H-5: Institution Resolution Helpers ─────────────────────────
+
+/**
+ * Resolve institution_id from a parent FK key + value.
+ * For "institution_id": returns the value directly (it IS the institution).
+ * For others: calls resolve_parent_institution RPC.
+ */
+async function resolveInstitutionFromParent(
+  db: any,
+  parentKey: string,
+  parentValue: string,
+): Promise<string | null> {
+  if (parentKey === "institution_id") return parentValue;
+
+  const parentTable = PARENT_KEY_TO_TABLE[parentKey];
+  if (!parentTable) return null; // Unknown parent key → fail-closed
+
+  try {
+    const { data, error } = await db.rpc("resolve_parent_institution", {
+      p_table: parentTable,
+      p_id: parentValue,
+    });
+    if (error || !data) return null;
+    return data as string;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve institution_id from a row's own table + ID.
+ * Used for GET/PUT/DELETE/RESTORE where we don't have the parent value.
+ */
+async function resolveInstitutionFromRow(
+  db: any,
+  table: string,
+  rowId: string,
+): Promise<string | null> {
+  try {
+    const { data, error } = await db.rpc("resolve_parent_institution", {
+      p_table: table,
+      p_id: rowId,
+    });
+    if (error || !data) return null;
+    return data as string;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check institution scoping for a content operation.
+ * Returns Response (error) if denied, or null if access is granted.
+ * Skips check for user-scoped tables (scopeToUser) and tables without parentKey.
+ */
+async function checkContentScope(
+  c: Context,
+  db: any,
+  userId: string,
+  cfg: CrudConfig,
+  opts: {
+    parentValue?: string; // For LIST/POST: the parent FK value
+    rowId?: string;       // For GET/PUT/DELETE/RESTORE: the row's own ID
+    isWrite: boolean;     // true = CONTENT_WRITE_ROLES, false = ALL_ROLES
+  },
+): Promise<Response | null> {
+  // Skip for user-scoped tables (student data) or tables without a parent
+  if (cfg.scopeToUser || !cfg.parentKey) return null;
+
+  let institutionId: string | null = null;
+
+  if (opts.parentValue) {
+    institutionId = await resolveInstitutionFromParent(db, cfg.parentKey, opts.parentValue);
+  } else if (opts.rowId) {
+    institutionId = await resolveInstitutionFromRow(db, cfg.table, opts.rowId);
+  }
+
+  if (!institutionId) {
+    return err(c, "Cannot resolve institution for this resource", 404);
+  }
+
+  const allowedRoles = opts.isWrite ? CONTENT_WRITE_ROLES : ALL_ROLES;
+  const roleCheck = await requireInstitutionRole(db, userId, institutionId, allowedRoles);
+  if (isDenied(roleCheck)) {
+    return err(c, roleCheck.message, roleCheck.status);
+  }
+
+  return null; // Access granted
+}
+
+// ─── Factory ───────────────────────────────────────────────────
 
 export function registerCrud(app: Hono, cfg: CrudConfig) {
   const base = `${PREFIX}/${cfg.slug}`;
 
   const isActiveSoftDelete = cfg.softDelete && cfg.hasIsActive !== false;
 
-  // ── LIST ──────────────────────────────────────────────────────
+  // ── LIST ──────────────────────────────────────────────────
   app.get(base, async (c: Context) => {
     const auth = await authenticate(c);
     if (auth instanceof Response) return auth;
@@ -84,13 +197,21 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     const countMode = parseCountMode(c);
     let query = db.from(cfg.table).select("*", { count: countMode });
 
+    let parentValue: string | undefined;
     if (cfg.parentKey) {
-      const parentValue = c.req.query(cfg.parentKey);
+      parentValue = c.req.query(cfg.parentKey);
       if (!parentValue) {
         return err(c, `Missing required query param: ${cfg.parentKey}`, 400);
       }
       query = query.eq(cfg.parentKey, parentValue);
     }
+
+    // H-5 FIX: Verify caller has membership in this resource's institution
+    const scopeErr = await checkContentScope(c, db, user.id, cfg, {
+      parentValue,
+      isWrite: false,
+    });
+    if (scopeErr) return scopeErr;
 
     if (cfg.optionalFilters) {
       for (const f of cfg.optionalFilters) {
@@ -121,17 +242,23 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     return ok(c, { items: data, total: count, limit, offset });
   });
 
-  // ── GET BY ID ─────────────────────────────────────────────────
-  // O-5 FIX: Now applies scopeToUser filter (matches LIST/UPDATE/DELETE)
+  // ── GET BY ID ─────────────────────────────────────────────
   app.get(`${base}/:id`, async (c: Context) => {
     const auth = await authenticate(c);
     if (auth instanceof Response) return auth;
     const { user, db } = auth;
 
     const id = c.req.param("id");
+
+    // H-5 FIX: Verify caller has membership in this resource's institution
+    const scopeErr = await checkContentScope(c, db, user.id, cfg, {
+      rowId: id,
+      isWrite: false,
+    });
+    if (scopeErr) return scopeErr;
+
     let query = db.from(cfg.table).select("*").eq("id", id);
 
-    // Scope: students can only read their own records
     if (cfg.scopeToUser) {
       query = query.eq(cfg.scopeToUser, user.id);
     }
@@ -142,7 +269,7 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     return ok(c, data);
   });
 
-  // ── CREATE ────────────────────────────────────────────────────
+  // ── CREATE ────────────────────────────────────────────────
   app.post(base, async (c: Context) => {
     const auth = await authenticate(c);
     if (auth instanceof Response) return auth;
@@ -152,12 +279,21 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     if (!body) return err(c, "Invalid or missing JSON body", 400);
     const row: Record<string, unknown> = {};
 
+    let parentValue: string | undefined;
     if (cfg.parentKey) {
       if (!body[cfg.parentKey]) {
         return err(c, `Missing required field: ${cfg.parentKey}`, 400);
       }
-      row[cfg.parentKey] = body[cfg.parentKey];
+      parentValue = body[cfg.parentKey] as string;
+      row[cfg.parentKey] = parentValue;
     }
+
+    // H-5 FIX: Verify caller has write access in this resource's institution
+    const scopeErr = await checkContentScope(c, db, user.id, cfg, {
+      parentValue,
+      isWrite: true,
+    });
+    if (scopeErr) return scopeErr;
 
     if (cfg.requiredFields) {
       const missing = cfg.requiredFields.filter((f) => {
@@ -189,13 +325,21 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     return ok(c, data, 201);
   });
 
-  // ── UPDATE ────────────────────────────────────────────────────
+  // ── UPDATE ────────────────────────────────────────────────
   app.put(`${base}/:id`, async (c: Context) => {
     const auth = await authenticate(c);
     if (auth instanceof Response) return auth;
     const { user, db } = auth;
 
     const id = c.req.param("id");
+
+    // H-5 FIX: Verify caller has write access in this resource's institution
+    const scopeErr = await checkContentScope(c, db, user.id, cfg, {
+      rowId: id,
+      isWrite: true,
+    });
+    if (scopeErr) return scopeErr;
+
     const body = await safeJson(c);
     if (!body) return err(c, "Invalid or missing JSON body", 400);
     const row: Record<string, unknown> = {};
@@ -219,13 +363,20 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     return ok(c, data);
   });
 
-  // ── DELETE ────────────────────────────────────────────────────
+  // ── DELETE ────────────────────────────────────────────────
   app.delete(`${base}/:id`, async (c: Context) => {
     const auth = await authenticate(c);
     if (auth instanceof Response) return auth;
     const { user, db } = auth;
 
     const id = c.req.param("id");
+
+    // H-5 FIX: Verify caller has write access in this resource's institution
+    const scopeErr = await checkContentScope(c, db, user.id, cfg, {
+      rowId: id,
+      isWrite: true,
+    });
+    if (scopeErr) return scopeErr;
 
     if (cfg.softDelete) {
       const patch: Record<string, unknown> = {
@@ -272,6 +423,14 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       const { user, db } = auth;
 
       const id = c.req.param("id");
+
+      // H-5 FIX: Verify caller has write access in this resource's institution
+      const scopeErr = await checkContentScope(c, db, user.id, cfg, {
+        rowId: id,
+        isWrite: true,
+      });
+      if (scopeErr) return scopeErr;
+
       const patch: Record<string, unknown> = { deleted_at: null };
       if (isActiveSoftDelete) patch.is_active = true;
       if (cfg.hasUpdatedAt) patch.updated_at = new Date().toISOString();

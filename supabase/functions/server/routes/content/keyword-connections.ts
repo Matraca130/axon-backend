@@ -6,27 +6,61 @@
  * Not a CRUD factory table — uses manual endpoints.
  *
  * U-4 FIX: Safety limit added to LIST endpoint.
+ *
+ * H-5 FIX: All endpoints now verify caller has membership in the
+ * resource's institution via resolve_parent_institution RPC.
  */
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import {
+  requireInstitutionRole,
+  isDenied,
+  ALL_ROLES,
+  CONTENT_WRITE_ROLES,
+} from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
 
 export const keywordConnectionRoutes = new Hono();
 
 const connBase = `${PREFIX}/keyword-connections`;
 
+/**
+ * H-5 helper: resolve institution_id from a keyword_id or connection ID.
+ */
+async function resolveInstitution(
+  db: any,
+  table: string,
+  id: string,
+): Promise<string | null> {
+  try {
+    const { data, error } = await db.rpc("resolve_parent_institution", {
+      p_table: table,
+      p_id: id,
+    });
+    if (error || !data) return null;
+    return data as string;
+  } catch {
+    return null;
+  }
+}
+
 // LIST — get connections for a keyword (either side)
 keywordConnectionRoutes.get(connBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const keywordId = c.req.query("keyword_id");
   if (!keywordId)
     return err(c, "Missing required query param: keyword_id", 400);
 
-  // U-4 FIX: Safety limit (was unbounded)
+  // H-5 FIX: Verify caller is a member of the keyword's institution
+  const institutionId = await resolveInstitution(db, "keywords", keywordId);
+  if (!institutionId) return err(c, "Keyword not found", 404);
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
   const { data, error } = await db
     .from("keyword_connections")
     .select("*")
@@ -43,9 +77,16 @@ keywordConnectionRoutes.get(connBase, async (c: Context) => {
 keywordConnectionRoutes.get(`${connBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const id = c.req.param("id");
+
+  // H-5 FIX: Verify caller is a member of the connection's institution
+  const institutionId = await resolveInstitution(db, "keyword_connections", id);
+  if (!institutionId) return err(c, "Connection not found", 404);
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
   const { data, error } = await db
     .from("keyword_connections")
     .select("*")
@@ -64,7 +105,7 @@ keywordConnectionRoutes.get(`${connBase}/:id`, async (c: Context) => {
 keywordConnectionRoutes.post(connBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
@@ -80,7 +121,21 @@ keywordConnectionRoutes.post(connBase, async (c: Context) => {
     return err(c, "Cannot connect a keyword to itself", 400);
   }
 
-  // Enforce canonical order: a < b (the DB CHECK constraint also enforces this)
+  // H-5 FIX: Verify caller has write access + both keywords are in the same institution
+  const instA = await resolveInstitution(db, "keywords", keyword_a_id);
+  if (!instA) return err(c, "Keyword A not found", 404);
+
+  const instB = await resolveInstitution(db, "keywords", keyword_b_id);
+  if (!instB) return err(c, "Keyword B not found", 404);
+
+  if (instA !== instB) {
+    return err(c, "Cannot connect keywords from different institutions", 403);
+  }
+
+  const roleCheck = await requireInstitutionRole(db, user.id, instA, CONTENT_WRITE_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
+  // Enforce canonical order: a < b
   const [a, b] =
     keyword_a_id < keyword_b_id
       ? [keyword_a_id, keyword_b_id]
@@ -109,9 +164,16 @@ keywordConnectionRoutes.post(connBase, async (c: Context) => {
 keywordConnectionRoutes.delete(`${connBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const id = c.req.param("id");
+
+  // H-5 FIX: Verify caller has write access in the connection's institution
+  const institutionId = await resolveInstitution(db, "keyword_connections", id);
+  if (!institutionId) return err(c, "Connection not found", 404);
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, CONTENT_WRITE_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
   const { error } = await db
     .from("keyword_connections")
     .delete()
