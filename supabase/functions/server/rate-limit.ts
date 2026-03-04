@@ -2,11 +2,14 @@
  * rate-limit.ts — Distributed rate limiter for Axon v4.4
  *
  * S-2 FIX: Replaced in-memory Map with PostgreSQL-backed rate limiting.
+ * C-1 FIX: Rate limit key now uses JWT `sub` (user UUID) instead of
+ *          the first 32 chars of the token header (which was identical
+ *          for all users, causing a shared global bucket).
  *
  * Architecture:
  *   - Primary: Uses check_rate_limit() RPC in PostgreSQL (shared across all isolates).
  *   - Fallback: In-memory Map if the RPC is unavailable (migration not applied yet).
- *   - Key: first 32 chars of the user's JWT token.
+ *   - Key: JWT `sub` claim (user UUID), with fallback to JWT signature.
  *
  * Configuration:
  *   - WINDOW_MS: 60,000ms (1 minute)
@@ -41,11 +44,58 @@ let useDistributed = true;
 let distributedFailCount = 0;
 const MAX_DISTRIBUTED_FAILURES = 5; // After 5 consecutive failures, fall back permanently for this isolate
 
+// ─── Key Extraction ─────────────────────────────────────────────
+
 /**
- * Extract a stable key from the user's token.
+ * Extract a stable per-user key from the JWT token.
+ *
+ * C-1 FIX: The old implementation used token.substring(0, 32) which
+ * returned the JWT header — identical for ALL Supabase HS256 tokens.
+ * All users shared one 120 req/min bucket.
+ *
+ * New approach:
+ *   1. Primary: Decode JWT payload → extract `sub` (user UUID).
+ *      This is the correct semantic key: rate limit is per-USER.
+ *      Survives token refresh (same user = same key).
+ *      Cost: ~0.1ms (same as authenticate() in db.ts).
+ *
+ *   2. Fallback: If decode fails, use the JWT signature (last segment).
+ *      The signature is unique per token issuance.
+ *      Less ideal (resets on refresh) but still per-token, not global.
+ *
+ * Prefixes (uid:/sig:) prevent collisions between strategies.
  */
-function extractKey(token: string): string {
-  return token.substring(0, 32);
+export function extractKey(token: string): string {
+  // ── Primary: decode JWT payload and use `sub` (user UUID) ──
+  try {
+    const parts = token.split(".");
+    if (parts.length === 3) {
+      // Base64URL → Base64
+      let base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+
+      // Restore padding (JWT spec strips it)
+      const pad = base64.length % 4;
+      if (pad === 1) throw new Error("invalid base64"); // impossible in valid Base64
+      if (pad) base64 += "=".repeat(4 - pad);
+
+      const payload = JSON.parse(atob(base64));
+      if (typeof payload.sub === "string" && payload.sub.length > 0) {
+        return `uid:${payload.sub}`;
+      }
+    }
+  } catch {
+    // Decode failed — fall through to signature-based key
+  }
+
+  // ── Fallback: use JWT signature (unique per token issuance) ──
+  const lastDot = token.lastIndexOf(".");
+  if (lastDot !== -1 && lastDot < token.length - 1) {
+    const sig = token.substring(lastDot + 1);
+    return `sig:${sig.substring(0, 32)}`;
+  }
+
+  // ── Last resort: use end of token (shouldn't happen with valid JWTs) ──
+  return `raw:${token.substring(Math.max(0, token.length - 32))}`;
 }
 
 // ─── Fallback: In-Memory Rate Limiting ──────────────────────────
@@ -155,7 +205,7 @@ export async function rateLimitMiddleware(
       if (!result.allowed) {
         const retryAfterSec = Math.ceil(result.retryAfterMs / 1000);
         console.warn(
-          `[RateLimit] Distributed: rate limit exceeded for key ${key.substring(0, 8)}...: ${result.current} requests`,
+          `[RateLimit] Distributed: rate limit exceeded for key ${key.substring(0, 12)}...: ${result.current} requests`,
         );
         return c.json(
           {
@@ -195,7 +245,7 @@ export async function rateLimitMiddleware(
   if (!localResult.allowed) {
     const retryAfterSec = Math.ceil((localResult.retryAfterMs ?? 0) / 1000);
     console.warn(
-      `[RateLimit] Fallback: rate limit exceeded for key ${key.substring(0, 8)}...: ${localResult.current} requests`,
+      `[RateLimit] Fallback: rate limit exceeded for key ${key.substring(0, 12)}...: ${localResult.current} requests`,
     );
     return c.json(
       {
