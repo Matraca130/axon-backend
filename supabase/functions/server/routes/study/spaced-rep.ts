@@ -6,6 +6,7 @@
  *   bkt_states  — Bayesian Knowledge Tracing (subtopic-level)
  *
  * P-2 FIX: Pagination caps added.
+ * M-1 FIX: BKT total_attempts/correct_attempts now INCREMENT instead of replace.
  */
 
 import { Hono } from "npm:hono";
@@ -145,6 +146,38 @@ spacedRepRoutes.post(`${PREFIX}/bkt-states`, async (c: Context) => {
     { key: "last_attempt_at", check: isIsoTs, msg: "must be an ISO timestamp" },
   ]);
   if (valErr) return err(c, valErr, 400);
+
+  // ── M-1 FIX: INCREMENT counters instead of replacing ──────────────
+  // Frontend sends delta values (e.g. total_attempts=1, correct_attempts=0|1).
+  // We read the existing row and add the deltas to get cumulative totals.
+  // This fixes the bug where 50 reviews still showed total_attempts=1.
+  //
+  // Race condition risk: minimal — a single student reviewing the same
+  // subtopic within milliseconds is practically impossible.
+  if (
+    fields.total_attempts !== undefined ||
+    fields.correct_attempts !== undefined
+  ) {
+    const { data: existing } = await db
+      .from("bkt_states")
+      .select("total_attempts, correct_attempts")
+      .eq("student_id", user.id)
+      .eq("subtopic_id", body.subtopic_id)
+      .maybeSingle();
+
+    if (existing) {
+      if (fields.total_attempts !== undefined) {
+        fields.total_attempts =
+          (existing.total_attempts || 0) + (fields.total_attempts as number);
+      }
+      if (fields.correct_attempts !== undefined) {
+        fields.correct_attempts =
+          (existing.correct_attempts || 0) +
+          (fields.correct_attempts as number);
+      }
+    }
+    // If no existing row, the delta IS the initial value (correct).
+  }
 
   const row = { student_id: user.id, subtopic_id: body.subtopic_id, ...fields };
   const { data, error } = await atomicUpsert(db, "bkt_states", "student_id,subtopic_id", row);

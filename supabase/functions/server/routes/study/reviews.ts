@@ -6,6 +6,7 @@
  *   quiz_attempts — student quiz answers
  *
  * U-3 FIX: Pagination added to both LIST endpoints.
+ * M-2 FIX: POST /reviews now persists response_time_ms.
  */
 
 import { Hono } from "npm:hono";
@@ -117,14 +118,28 @@ reviewRoutes.post(`${PREFIX}/reviews`, async (c: Context) => {
   );
   if (ownershipErr) return ownershipErr;
 
+  // Build insert row with required fields
+  const row: Record<string, unknown> = {
+    session_id: body.session_id,
+    item_id: body.item_id,
+    instrument_type: body.instrument_type,
+    grade: body.grade,
+  };
+
+  // M-2 FIX: Persist optional response_time_ms (frontend already sends it).
+  // Validated as non-negative integer. If the column doesn't exist in the
+  // reviews table, Supabase will return an error on insert — add the column
+  // via migration: ALTER TABLE reviews ADD COLUMN response_time_ms integer;
+  if (body.response_time_ms !== undefined) {
+    if (!isNonNegInt(body.response_time_ms)) {
+      return err(c, "response_time_ms must be a non-negative integer", 400);
+    }
+    row.response_time_ms = body.response_time_ms;
+  }
+
   const { data, error } = await db
     .from("reviews")
-    .insert({
-      session_id: body.session_id,
-      item_id: body.item_id,
-      instrument_type: body.instrument_type,
-      grade: body.grade,
-    })
+    .insert(row)
     .select()
     .single();
 
