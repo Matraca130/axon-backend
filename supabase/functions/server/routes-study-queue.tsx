@@ -11,6 +11,9 @@
  * total_in_queue accurately reflects ALL matching cards, not just
  * the LIMIT-ed subset returned.
  *
+ * U-1 FIX: JS fallback now scopes flashcards to the student's
+ * accessible institutions (was fetching ALL flashcards globally).
+ *
  * The algorithm combines three systems:
  *   1. BKT (Bayesian Knowledge Tracing) — concept-level mastery per subtopic
  *   2. FSRS (Free Spaced Repetition Scheduler) — card-level scheduling
@@ -44,6 +47,12 @@ const NEED_CONFIG = {
   noveltyWeight: 0.10,
   graceDays: 1,
 };
+
+// ─── Constants ────────────────────────────────────────────────────
+
+// U-1 FIX: Safety cap on flashcard fetch in JS fallback.
+// Prevents OOM if scoping somehow fails or returns too many results.
+const MAX_FALLBACK_FLASHCARDS = 10_000;
 
 // ─── NeedScore Calculation (fallback only) ────────────────────────
 
@@ -162,6 +171,75 @@ async function resolveSummaryIdsForCourse(
   return new Set(summaries.map((s: { id: string }) => s.id));
 }
 
+// ─── Student → Summary IDs resolution (fallback, no course_id) ──────
+// U-1 FIX: When course_id is null, resolve ALL summary IDs the student
+// has access to via their active memberships → institutions → full
+// content hierarchy. Prevents loading flashcards from other institutions.
+
+async function resolveSummaryIdsForStudent(
+  db: SupabaseClient,
+  userId: string,
+): Promise<Set<string> | null> {
+  // Step 1: Get user's active institution memberships
+  const { data: memberships } = await db
+    .from("memberships")
+    .select("institution_id")
+    .eq("user_id", userId)
+    .eq("is_active", true);
+
+  if (!memberships || memberships.length === 0) return null;
+  const institutionIds = memberships.map(
+    (m: { institution_id: string }) => m.institution_id,
+  );
+
+  // Step 2: Get all active courses for those institutions
+  const { data: courses } = await db
+    .from("courses")
+    .select("id")
+    .in("institution_id", institutionIds)
+    .eq("is_active", true);
+
+  if (!courses || courses.length === 0) return null;
+  const courseIds = courses.map((c: { id: string }) => c.id);
+
+  // Steps 3–6: Same hierarchy traversal as resolveSummaryIdsForCourse
+  const { data: semesters } = await db
+    .from("semesters")
+    .select("id")
+    .in("course_id", courseIds)
+    .is("deleted_at", null);
+
+  if (!semesters || semesters.length === 0) return null;
+  const semesterIds = semesters.map((s: { id: string }) => s.id);
+
+  const { data: sections } = await db
+    .from("sections")
+    .select("id")
+    .in("semester_id", semesterIds)
+    .is("deleted_at", null);
+
+  if (!sections || sections.length === 0) return null;
+  const sectionIds = sections.map((s: { id: string }) => s.id);
+
+  const { data: topics } = await db
+    .from("topics")
+    .select("id")
+    .in("section_id", sectionIds)
+    .is("deleted_at", null);
+
+  if (!topics || topics.length === 0) return null;
+  const topicIds = topics.map((t: { id: string }) => t.id);
+
+  const { data: summaries } = await db
+    .from("summaries")
+    .select("id")
+    .in("topic_id", topicIds)
+    .is("deleted_at", null);
+
+  if (!summaries || summaries.length === 0) return null;
+  return new Set(summaries.map((s: { id: string }) => s.id));
+}
+
 // ─── Primary: SQL-based study queue via RPC ────────────────────────
 
 async function getStudyQueueFromRpc(
@@ -239,19 +317,27 @@ async function getStudyQueueFromJs(
   }
   fsrsQuery = fsrsQuery.order("due_at", { ascending: true });
 
+  // U-1 FIX: Added .limit() safety cap to prevent OOM on large datasets.
+  // The actual scoping is done by allowedSummaryIds below, but this
+  // prevents loading millions of rows if the scoping somehow fails.
   const flashcardsQuery = db
     .from("flashcards")
     .select(
       "id, summary_id, keyword_id, subtopic_id, front, back, front_image_url, back_image_url",
     )
     .is("deleted_at", null)
-    .eq("is_active", true);
+    .eq("is_active", true)
+    .limit(MAX_FALLBACK_FLASHCARDS);
 
   const bktQuery = db
     .from("bkt_states")
     .select("subtopic_id, p_know, total_attempts, correct_attempts, delta")
     .eq("student_id", userId);
 
+  // U-1 FIX: When course_id is null, resolve ALL summary IDs the student
+  // has access to via memberships → institutions → content hierarchy.
+  // Previously this was Promise.resolve(undefined) which meant NO filtering,
+  // causing ALL flashcards from ALL institutions to be loaded.
   const [bktResult, fsrsResult, flashcardsResult, allowedSummaryIds] =
     await Promise.all([
       bktQuery,
@@ -259,14 +345,16 @@ async function getStudyQueueFromJs(
       flashcardsQuery,
       courseId
         ? resolveSummaryIdsForCourse(db, courseId)
-        : Promise.resolve(undefined),
+        : resolveSummaryIdsForStudent(db, userId),
     ]);
 
   if (bktResult.error) throw new Error(`Fetch bkt_states failed: ${bktResult.error.message}`);
   if (fsrsResult.error) throw new Error(`Fetch fsrs_states failed: ${fsrsResult.error.message}`);
   if (flashcardsResult.error) throw new Error(`Fetch flashcards failed: ${flashcardsResult.error.message}`);
 
-  if (courseId && allowedSummaryIds === null) {
+  // U-1 FIX: Return empty queue if student has no accessible summaries.
+  // Previously only checked when courseId was set; now checks always.
+  if (allowedSummaryIds === null) {
     return { queue: [], totalDue: 0, totalNew: 0, totalInQueue: 0 };
   }
 

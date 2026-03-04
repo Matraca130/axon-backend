@@ -4,6 +4,8 @@
  * CREATE-ONLY TABLES (LIST + POST — no update, no delete):
  *   reviews       — O-3 FIX: session ownership verification
  *   quiz_attempts — student quiz answers
+ *
+ * U-3 FIX: Pagination added to both LIST endpoints.
  */
 
 import { Hono } from "npm:hono";
@@ -20,7 +22,12 @@ import type { Context } from "npm:hono";
 
 export const reviewRoutes = new Hono();
 
-// ─── Helper ─────────────────────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────
+
+const MAX_PAGINATION_LIMIT = 500;
+const DEFAULT_PAGINATION_LIMIT = 100;
+
+// ─── Helper ─────────────────────────────────────────────────────
 
 /**
  * O-3 FIX: Verify that a study_session belongs to the authenticated user.
@@ -48,7 +55,18 @@ async function verifySessionOwnership(
   return null;
 }
 
-// ─── Reviews ───────────────────────────────────────────────────────────
+// ─── Pagination Helper ───────────────────────────────────────────
+
+function parsePagination(c: Context): { limit: number; offset: number } {
+  let limit = parseInt(c.req.query("limit") ?? String(DEFAULT_PAGINATION_LIMIT), 10);
+  let offset = parseInt(c.req.query("offset") ?? "0", 10);
+  if (isNaN(limit) || limit < 1) limit = DEFAULT_PAGINATION_LIMIT;
+  if (limit > MAX_PAGINATION_LIMIT) limit = MAX_PAGINATION_LIMIT;
+  if (isNaN(offset) || offset < 0) offset = 0;
+  return { limit, offset };
+}
+
+// ─── Reviews ───────────────────────────────────────────────────
 
 reviewRoutes.get(`${PREFIX}/reviews`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -63,11 +81,15 @@ reviewRoutes.get(`${PREFIX}/reviews`, async (c: Context) => {
   const ownershipErr = await verifySessionOwnership(c, db, sessionId, user.id);
   if (ownershipErr) return ownershipErr;
 
+  // U-3 FIX: Added pagination
+  const { limit, offset } = parsePagination(c);
+
   const { data, error } = await db
     .from("reviews")
     .select("*")
     .eq("session_id", sessionId)
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: true })
+    .range(offset, offset + limit - 1);
 
   if (error) return err(c, `List reviews failed: ${error.message}`, 500);
   return ok(c, data);
@@ -110,7 +132,7 @@ reviewRoutes.post(`${PREFIX}/reviews`, async (c: Context) => {
   return ok(c, data, 201);
 });
 
-// ─── Quiz Attempts ─────────────────────────────────────────────────────
+// ─── Quiz Attempts ─────────────────────────────────────────────
 
 reviewRoutes.get(`${PREFIX}/quiz-attempts`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -129,6 +151,9 @@ reviewRoutes.get(`${PREFIX}/quiz-attempts`, async (c: Context) => {
   if (sessionId && !isUuid(sessionId))
     return err(c, "session_id must be a valid UUID", 400);
 
+  // U-3 FIX: Added pagination
+  const { limit, offset } = parsePagination(c);
+
   let query = db
     .from("quiz_attempts")
     .select("*")
@@ -137,6 +162,8 @@ reviewRoutes.get(`${PREFIX}/quiz-attempts`, async (c: Context) => {
 
   if (questionId) query = query.eq("quiz_question_id", questionId);
   if (sessionId) query = query.eq("session_id", sessionId);
+
+  query = query.range(offset, offset + limit - 1);
 
   const { data, error } = await query;
   if (error)

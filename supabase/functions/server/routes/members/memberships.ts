@@ -6,6 +6,8 @@
  * POST   /memberships         — Add member to institution (admin client)
  * PUT    /memberships/:id     — Update membership (role, plan, is_active)
  * DELETE /memberships/:id     — Deactivate membership (soft)
+ *
+ * U-2 FIX: Pagination added to LIST endpoint.
  */
 
 import { Hono } from "npm:hono";
@@ -16,6 +18,11 @@ export const membershipRoutes = new Hono();
 
 const memBase = `${PREFIX}/memberships`;
 
+// ─── Constants ────────────────────────────────────────────────────
+
+const MAX_PAGINATION_LIMIT = 500;
+const DEFAULT_PAGINATION_LIMIT = 100;
+
 membershipRoutes.get(memBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -24,13 +31,21 @@ membershipRoutes.get(memBase, async (c: Context) => {
   const institutionId = c.req.query("institution_id");
   if (!institutionId) return err(c, "Missing required query param: institution_id", 400);
 
-  const { data, error } = await db
-    .from("memberships").select("*")
+  // U-2 FIX: Pagination (was returning all rows unbounded)
+  let limit = parseInt(c.req.query("limit") ?? String(DEFAULT_PAGINATION_LIMIT), 10);
+  if (isNaN(limit) || limit < 1) limit = DEFAULT_PAGINATION_LIMIT;
+  if (limit > MAX_PAGINATION_LIMIT) limit = MAX_PAGINATION_LIMIT;
+  let offset = parseInt(c.req.query("offset") ?? "0", 10);
+  if (isNaN(offset) || offset < 0) offset = 0;
+
+  const { data, count, error } = await db
+    .from("memberships").select("*", { count: "estimated" })
     .eq("institution_id", institutionId)
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: true })
+    .range(offset, offset + limit - 1);
 
   if (error) return err(c, `List memberships failed: ${error.message}`, 500);
-  return ok(c, data);
+  return ok(c, { items: data, total: count, limit, offset });
 });
 
 membershipRoutes.get(`${memBase}/:id`, async (c: Context) => {
