@@ -8,10 +8,10 @@
  *
  * Pipeline:
  *   1. Resolve institution (from summary or user's memberships)
- *   2. Embed the user's query via Gemini text-embedding-004
+ *   2. Embed the user's query via gemini-embedding-001 (768 dims)
  *   3. Hybrid search: pgvector cosine + full-text via rag_hybrid_search() RPC
  *   4. Fetch student knowledge profile via get_student_knowledge_context() RPC
- *   5. Generate response via Gemini 2.0 Flash with RAG context
+ *   5. Generate response via Gemini 2.5 Flash with RAG context
  *
  * Pre-flight fixes applied:
  *   PF-01 FIX: Changed 'institution_members' → 'memberships' + is_active filter
@@ -19,6 +19,9 @@
  *
  * Live-audit fixes applied:
  *   LA-03 FIX: Message length validation (max 2000 chars) + history truncation
+ *
+ * Coherence fixes applied:
+ *   INC-1 FIX: Corrected stale model names in header comments
  */
 
 import { Hono } from "npm:hono";
