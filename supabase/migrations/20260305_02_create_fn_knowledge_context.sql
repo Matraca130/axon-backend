@@ -7,6 +7,8 @@
 -- PF-07 FIX: ORDER BY moved inside jsonb_agg() and subqueries to guarantee
 -- deterministic ordering within the JSON arrays.
 --
+-- AUDIT FIX: Added kw.is_active = TRUE filter in quiz_fail subquery.
+--
 -- Reads from: mv_student_knowledge_profile (matview), quiz_attempts, quiz_questions
 -- Returns: JSONB with keys: weak, lapsing, quiz_fail, strong
 -- ============================================================================
@@ -87,6 +89,13 @@ BEGIN
           AND c.institution_id = p_institution_id
           AND qa.is_correct = FALSE
           AND qa.created_at > NOW() - INTERVAL '24 hours'
+          AND qq.deleted_at IS NULL AND qq.is_active = TRUE
+          AND kw.deleted_at IS NULL AND kw.is_active = TRUE
+          AND s.deleted_at IS NULL AND s.is_active = TRUE
+          AND t.deleted_at IS NULL AND t.is_active = TRUE
+          AND sec.deleted_at IS NULL AND sec.is_active = TRUE
+          AND sem.deleted_at IS NULL AND sem.is_active = TRUE
+          AND c.deleted_at IS NULL AND c.is_active = TRUE
         ORDER BY qa.created_at DESC
         LIMIT 5
       ) qf

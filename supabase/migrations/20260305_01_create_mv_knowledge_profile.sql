@@ -5,15 +5,18 @@
 --
 -- JOINs verified against:
 --   - crud-factory.ts (parentKey mappings)
+--   - routes/content/crud.ts (keywords + subtopics CRUD configs)
 --   - routes-student.tsx (flashcards, quiz_questions configs)
 --   - Actual FK chain: subtopics.keyword_id → keywords.summary_id →
 --     summaries.topic_id → topics.section_id → sections.semester_id →
 --     semesters.course_id → courses.institution_id
 --
 -- BUG-2 FIX: All content tables filtered by deleted_at IS NULL + is_active.
--- Note: subtopics only have deleted_at (no is_active column) — confirmed
--- from routes-student.tsx where subtopics are used as optional filters
--- but not registered as CRUD with hasIsActive.
+--
+-- AUDIT FIX: keywords AND subtopics both have is_active column.
+--   Evidence: routes/content/crud.ts registers both with softDelete: true
+--   and hasIsActive not set to false (defaults true in crud-factory.ts).
+--   Both have is_active in updateFields. Original comment was incorrect.
 --
 -- Created WITH NO DATA — run REFRESH after creation.
 -- ============================================================================
@@ -46,8 +49,8 @@ JOIN topics t ON t.id = s.topic_id
 JOIN sections sec ON sec.id = t.section_id
 JOIN semesters sem ON sem.id = sec.semester_id
 JOIN courses c ON c.id = sem.course_id
-WHERE sub.deleted_at IS NULL
-  AND kw.deleted_at IS NULL
+WHERE sub.deleted_at IS NULL AND sub.is_active = TRUE
+  AND kw.deleted_at IS NULL AND kw.is_active = TRUE
   AND s.deleted_at IS NULL AND s.is_active = TRUE
   AND t.deleted_at IS NULL AND t.is_active = TRUE
   AND sec.deleted_at IS NULL AND sec.is_active = TRUE
@@ -83,7 +86,7 @@ JOIN sections sec ON sec.id = t.section_id
 JOIN semesters sem ON sem.id = sec.semester_id
 JOIN courses c ON c.id = sem.course_id
 WHERE fc.deleted_at IS NULL AND fc.is_active = TRUE
-  AND kw.deleted_at IS NULL
+  AND kw.deleted_at IS NULL AND kw.is_active = TRUE
   AND s.deleted_at IS NULL AND s.is_active = TRUE
   AND t.deleted_at IS NULL AND t.is_active = TRUE
   AND sec.deleted_at IS NULL AND sec.is_active = TRUE
