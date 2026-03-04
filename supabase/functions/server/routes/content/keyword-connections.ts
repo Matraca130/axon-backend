@@ -9,6 +9,11 @@
  *
  * H-5 FIX: All endpoints now verify caller has membership in the
  * resource's institution via resolve_parent_institution RPC.
+ *
+ * V2: POST now accepts connection_type and source_keyword_id.
+ *     connection_type is validated against a whitelist of 10
+ *     predefined medical relationship types.
+ *     source_keyword_id indicates direction for directional types.
  */
 
 import { Hono } from "npm:hono";
@@ -24,6 +29,20 @@ import type { Context } from "npm:hono";
 export const keywordConnectionRoutes = new Hono();
 
 const connBase = `${PREFIX}/keyword-connections`;
+
+// ── V2: Valid connection types (medical education) ───────────
+const VALID_CONNECTION_TYPES = new Set([
+  "prerequisito",
+  "causa-efecto",
+  "mecanismo",
+  "dx-diferencial",
+  "tratamiento",
+  "manifestacion",
+  "regulacion",
+  "contraste",
+  "componente",
+  "asociacion",
+]);
 
 /**
  * H-5 helper: resolve institution_id from a keyword_id or connection ID.
@@ -102,6 +121,7 @@ keywordConnectionRoutes.get(`${connBase}/:id`, async (c: Context) => {
 });
 
 // CREATE — enforces canonical order (a < b)
+// V2: Now accepts connection_type and source_keyword_id.
 keywordConnectionRoutes.post(connBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -113,12 +133,45 @@ keywordConnectionRoutes.post(connBase, async (c: Context) => {
   const keyword_a_id = body.keyword_a_id;
   const keyword_b_id = body.keyword_b_id;
   const relationship = body.relationship;
+  const connection_type = body.connection_type;           // V2
+  const source_keyword_id = body.source_keyword_id;       // V2
 
   if (typeof keyword_a_id !== "string" || typeof keyword_b_id !== "string") {
     return err(c, "keyword_a_id and keyword_b_id must be strings", 400);
   }
   if (keyword_a_id === keyword_b_id) {
     return err(c, "Cannot connect a keyword to itself", 400);
+  }
+
+  // V2: Validate connection_type if provided
+  if (connection_type != null) {
+    if (
+      typeof connection_type !== "string" ||
+      !VALID_CONNECTION_TYPES.has(connection_type)
+    ) {
+      return err(
+        c,
+        `Invalid connection_type. Must be one of: ${[...VALID_CONNECTION_TYPES].join(", ")}`,
+        400,
+      );
+    }
+  }
+
+  // V2: Validate source_keyword_id if provided
+  if (source_keyword_id != null) {
+    if (typeof source_keyword_id !== "string") {
+      return err(c, "source_keyword_id must be a string (UUID)", 400);
+    }
+    if (
+      source_keyword_id !== String(keyword_a_id) &&
+      source_keyword_id !== String(keyword_b_id)
+    ) {
+      return err(
+        c,
+        "source_keyword_id must be either keyword_a_id or keyword_b_id",
+        400,
+      );
+    }
   }
 
   // H-5 FIX: Verify caller has write access + both keywords are in the same institution
@@ -141,13 +194,23 @@ keywordConnectionRoutes.post(connBase, async (c: Context) => {
       ? [keyword_a_id, keyword_b_id]
       : [keyword_b_id, keyword_a_id];
 
+  // V2: Build insert payload with optional new fields
+  const insertPayload: Record<string, unknown> = {
+    keyword_a_id: a,
+    keyword_b_id: b,
+    relationship: typeof relationship === "string" ? relationship : null,
+  };
+
+  if (connection_type != null) {
+    insertPayload.connection_type = connection_type;
+  }
+  if (source_keyword_id != null) {
+    insertPayload.source_keyword_id = source_keyword_id;
+  }
+
   const { data, error } = await db
     .from("keyword_connections")
-    .insert({
-      keyword_a_id: a,
-      keyword_b_id: b,
-      relationship: typeof relationship === "string" ? relationship : null,
-    })
+    .insert(insertPayload)
     .select()
     .single();
 
