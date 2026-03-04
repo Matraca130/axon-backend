@@ -22,6 +22,7 @@ import { billingRoutes } from "./routes-billing.tsx";
 import { muxRoutes } from "./routes/mux/index.ts";
 import { searchRoutes } from "./routes/search/index.ts";
 import { storageRoutes } from "./routes-storage.tsx";
+import { settingsRoutes } from "./routes/settings/index.ts";
 
 const app = new Hono();
 
@@ -67,6 +68,7 @@ app.route("/", billingRoutes);
 app.route("/", muxRoutes);
 app.route("/", searchRoutes);
 app.route("/", storageRoutes);
+app.route("/", settingsRoutes);
 
 // ─── Catch-all 404 ────────────────────────────────────────────────
 
