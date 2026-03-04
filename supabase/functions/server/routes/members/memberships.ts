@@ -8,10 +8,25 @@
  * DELETE /memberships/:id     — Deactivate membership (soft)
  *
  * U-2 FIX: Pagination added to LIST endpoint.
+ *
+ * H-3 FIX: POST/PUT/DELETE now verify caller authority:
+ *   - POST: requireInstitutionRole(MANAGEMENT_ROLES) + canAssignRole()
+ *   - PUT: resolves target institution, verifies caller role, enforces hierarchy
+ *   - DELETE: resolves target institution, verifies management role
+ *   - GET (list): verifies caller is member of the queried institution
+ *   - GET /:id: resolves institution, verifies membership
  */
 
 import { Hono } from "npm:hono";
 import { authenticate, getAdminClient, ok, err, safeJson, PREFIX } from "../../db.ts";
+import {
+  requireInstitutionRole,
+  resolveMembershipInstitution,
+  isDenied,
+  canAssignRole,
+  ALL_ROLES,
+  MANAGEMENT_ROLES,
+} from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
 
 export const membershipRoutes = new Hono();
@@ -22,14 +37,21 @@ const memBase = `${PREFIX}/memberships`;
 
 const MAX_PAGINATION_LIMIT = 500;
 const DEFAULT_PAGINATION_LIMIT = 100;
+const VALID_ROLES = ["student", "professor", "admin", "owner"];
 
+// ── GET /memberships ─────────────────────────────────────────────
+// H-3 FIX: Verify caller is a member of the queried institution.
 membershipRoutes.get(memBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const institutionId = c.req.query("institution_id");
   if (!institutionId) return err(c, "Missing required query param: institution_id", 400);
+
+  // H-3 FIX: Any active member can list memberships in their institution
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   // U-2 FIX: Pagination (was returning all rows unbounded)
   let limit = parseInt(c.req.query("limit") ?? String(DEFAULT_PAGINATION_LIMIT), 10);
@@ -48,20 +70,33 @@ membershipRoutes.get(memBase, async (c: Context) => {
   return ok(c, { items: data, total: count, limit, offset });
 });
 
+// ── GET /memberships/:id ─────────────────────────────────────────
+// H-3 FIX: Verify caller is a member of the target membership's institution.
 membershipRoutes.get(`${memBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const id = c.req.param("id");
+
+  // H-3 FIX: Resolve target membership's institution, verify caller is a member
+  const institutionId = await resolveMembershipInstitution(db, id);
+  if (!institutionId) return err(c, "Membership not found", 404);
+
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
   const { data, error } = await db.from("memberships").select("*").eq("id", id).single();
   if (error) return err(c, `Get membership ${id} failed: ${error.message}`, 404);
   return ok(c, data);
 });
 
+// ── POST /memberships ────────────────────────────────────────────
+// H-3 FIX: Verify caller has management role + enforce role hierarchy.
 membershipRoutes.post(memBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
+  const { user, db } = auth;
 
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
@@ -70,9 +105,28 @@ membershipRoutes.post(memBase, async (c: Context) => {
   if (typeof user_id !== "string" || typeof institution_id !== "string")
     return err(c, "user_id and institution_id must be strings", 400);
 
-  const validRoles = ["student", "professor", "admin", "owner"];
-  if (typeof role !== "string" || !validRoles.includes(role))
-    return err(c, `role must be one of: ${validRoles.join(", ")}`, 400);
+  if (typeof role !== "string" || !VALID_ROLES.includes(role))
+    return err(c, `role must be one of: ${VALID_ROLES.join(", ")}`, 400);
+
+  // H-3 FIX: Verify caller has management role in the target institution
+  const roleCheck = await requireInstitutionRole(db, user.id, institution_id, MANAGEMENT_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
+  // H-3 FIX: Prevent privilege escalation — caller can't assign a role
+  // higher than their own. Owner(4) can assign all. Admin(3) can't assign owner.
+  if (!canAssignRole(roleCheck.role, role)) {
+    return err(
+      c,
+      `Cannot assign role '${role}' with your current role '${roleCheck.role}'`,
+      403,
+    );
+  }
+
+  // Audit log: track who created the membership and with what authority
+  console.log(
+    `[Axon Audit] Membership created by ${user.id} (${roleCheck.role}): ` +
+    `target_user=${user_id}, institution=${institution_id}, assigned_role=${role}`,
+  );
 
   const admin = getAdminClient();
   const row: Record<string, unknown> = { user_id, institution_id, role };
@@ -83,12 +137,23 @@ membershipRoutes.post(memBase, async (c: Context) => {
   return ok(c, data, 201);
 });
 
+// ── PUT /memberships/:id ─────────────────────────────────────────
+// H-3 FIX: Resolve target institution, verify caller authority,
+// enforce role hierarchy when changing roles.
 membershipRoutes.put(`${memBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const id = c.req.param("id");
+
+  // H-3 FIX: Resolve target membership's institution
+  const institutionId = await resolveMembershipInstitution(db, id);
+  if (!institutionId) return err(c, "Membership not found", 404);
+
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, MANAGEMENT_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
 
@@ -97,8 +162,17 @@ membershipRoutes.put(`${memBase}/:id`, async (c: Context) => {
   for (const f of allowedFields) { if (body[f] !== undefined) patch[f] = body[f]; }
 
   if (typeof patch.role === "string") {
-    const validRoles = ["student", "professor", "admin", "owner"];
-    if (!validRoles.includes(patch.role as string)) return err(c, `role must be one of: ${validRoles.join(", ")}`, 400);
+    if (!VALID_ROLES.includes(patch.role as string))
+      return err(c, `role must be one of: ${VALID_ROLES.join(", ")}`, 400);
+
+    // H-3 FIX: Prevent privilege escalation when changing roles
+    if (!canAssignRole(roleCheck.role, patch.role as string)) {
+      return err(
+        c,
+        `Cannot assign role '${patch.role}' with your current role '${roleCheck.role}'`,
+        403,
+      );
+    }
   }
   if (Object.keys(patch).length === 0) return err(c, "No valid fields to update", 400);
 
@@ -108,12 +182,22 @@ membershipRoutes.put(`${memBase}/:id`, async (c: Context) => {
   return ok(c, data);
 });
 
+// ── DELETE /memberships/:id ──────────────────────────────────────
+// H-3 FIX: Resolve target institution, verify caller has management role.
 membershipRoutes.delete(`${memBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const id = c.req.param("id");
+
+  // H-3 FIX: Resolve target membership's institution, verify authority
+  const institutionId = await resolveMembershipInstitution(db, id);
+  if (!institutionId) return err(c, "Membership not found", 404);
+
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, MANAGEMENT_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
   const { data, error } = await db
     .from("memberships")
     .update({ is_active: false, updated_at: new Date().toISOString() })
