@@ -12,7 +12,11 @@
  *   PF-09 FIX: Uses getAdminClient() for embedding UPDATE to bypass RLS
  *
  * Live-audit fixes applied:
- *   LA-01 FIX: Fallback query now scopes by institution via get_course_summary_ids
+ *   LA-01 FIX: Fallback query now scopes by institution via get_institution_summary_ids
+ *
+ * Coherence fixes applied:
+ *   INC-5 FIX: Changed fallback RPC from get_course_summary_ids (wrong param name)
+ *              to get_institution_summary_ids (correct, takes p_institution_id)
  */
 
 import { Hono } from "npm:hono";
@@ -83,18 +87,24 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
 
   const { data: chunks, error: fetchErr } = await query;
 
-  // ── LA-01 FIX: Scoped fallback using get_course_summary_ids ──
+  // ── LA-01 + INC-5 FIX: Scoped fallback using get_institution_summary_ids ──
   // The nested !inner join can fail with deeply chained PostgREST relations.
   // CRITICAL: The fallback MUST maintain institution scoping to prevent
   // cross-tenant data leakage. We resolve valid summary_ids first, then
   // filter chunks by those IDs.
+  //
+  // INC-5 FIX: Previously called get_course_summary_ids with p_institution_id
+  // parameter, but that function expects p_course_id. The parameter name
+  // mismatch caused PostgreSQL to reject the call. Now uses the correct
+  // get_institution_summary_ids(p_institution_id) RPC.
   let chunksToProcess = chunks;
   if (fetchErr || !chunks) {
     console.warn(`[Ingest] Nested join failed: ${fetchErr?.message}. Using scoped fallback.`);
 
     // Step 1: Get summary_ids belonging to this institution
+    // INC-5 FIX: Use get_institution_summary_ids (correct RPC)
     const { data: summaryRows, error: rpcErr } = await adminDb.rpc(
-      "get_course_summary_ids",
+      "get_institution_summary_ids",
       { p_institution_id: institutionId },
     );
 
@@ -136,7 +146,7 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
   if (!chunksToProcess || chunksToProcess.length === 0)
     return ok(c, { processed: 0, message: "No chunks without embeddings found" });
 
-  // ── Process each chunk ───────────────────────────────────────
+  // ── Process each chunk ───────────────────────────────────
   let processed = 0;
   let failed = 0;
   const errors: string[] = [];
