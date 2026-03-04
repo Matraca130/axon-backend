@@ -1,7 +1,7 @@
 # Axon Backend Map
 
 > Single source of truth for navigating the `axon-backend` repository.
-> Last updated: 2026-03-04 (post AI/RAG documentation)
+> Last updated: 2026-03-04 (post cross-audit INC-4 fix — 26 migrations)
 
 ## Repository Structure
 
@@ -14,6 +14,7 @@ axon-backend/
 |   |-- AI_PIPELINE.md                  <- AI/RAG architecture, models, security, payloads
 |   |-- BACKEND_AUDIT.md                <- Historical audit (Feb 2026, updated Mar 2026)
 |   |-- BACKEND_MAP.md                  <- THIS FILE
+|   |-- RAG_ROADMAP.md                  <- RAG implementation plan (8 phases)
 |   +-- figma-make/                     <- Figma Make context docs (7 files)
 |       |-- 00-contexto-base.md
 |       |-- 01-area-profesor.md
@@ -24,7 +25,7 @@ axon-backend/
 |       |-- 06-ai-rag.md                <- AI/RAG endpoints, payloads, pipeline
 |       +-- README.md
 |-- supabase/
-|   |-- migrations/                     <- All SQL migrations (13 files)
+|   |-- migrations/                     <- All SQL migrations (26 files)
 |   +-- functions/server/               <- Edge Function (Hono + Deno)
 |       |-- index.ts                    <- ENTRYPOINT: mounts all routes + middleware
 |       |-- db.ts                       <- Supabase clients, auth, response helpers
@@ -282,14 +283,14 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 
 ## Migrations Inventory
 
-### `supabase/migrations/` (13 files — single canonical directory)
+### `supabase/migrations/` (26 files — single canonical directory)
 
 | File | Code | Status | Description |
 |---|---|---|---|
 | `20260224_01` | EV-9 | Applied | Mux columns on videos table |
 | `20260224_02` | EV-9 | Applied | video_views table + indexes |
 | `20260227_01` | M-3 | Applied | bulk_reorder() DB function |
-| `20260227_02` | -- | Applied | get_course_summary_ids() helper |
+| `20260227_02` | -- | Applied | get_course_summary_ids() helper (p_course_id overload) |
 | `20260227_03` | N-7 | Applied | upsert_video_view() atomic function |
 | `20260227_04` | N-5 | PENDING | get_content_tree() RPC |
 | `20260227_05` | O-4 | PENDING | Trigram indexes for ILIKE search |
@@ -299,6 +300,23 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | `20260228_03` | -- | Applied | keyword_connections.relationship column |
 | `20260302_01` | -- | PENDING | Composite/partial indexes for high-read tables |
 | `20260303_01` | -- | Applied | summaries.estimated_study_minutes column |
+| `20260303_02` | -- | Applied | Distributed rate limiting (UNLOGGED table + check_rate_limit RPC) |
+| `20260303_03` | S-3 | Applied | get_study_queue() RPC (SQL-based NeedScore) |
+| `20260304_01a` | -- | Applied | algorithm_config table (NeedScore weights) |
+| `20260304_01b` | S-3 | Applied | get_study_queue() v2 with institution scoping |
+| `20260304_02` | -- | Applied | Scoped search + trash RPCs (institution_id filter) |
+| `20260304_03` | -- | Applied | resolve_parent_institution() RPC v1 |
+| `20260304_04` | -- | Applied | resolve_parent_institution() RPC v2 (expanded table support) |
+| `20260304_05` | INC-5 | Applied | get_institution_summary_ids() RPC (p_institution_id overload) |
+| `20260304_06` | INC-7 | Applied | Denormalize institution_id on summaries (Fase 1 RAG Roadmap) |
+| `20260305_01` | -- | Applied | mv_knowledge_profile materialized view |
+| `20260305_02` | -- | Applied | get_student_knowledge_context() RPC |
+| `20260305_03` | LA-04 | Applied | pgvector setup: chunks.embedding + HNSW index + rag_hybrid_search() |
+| `20260305_04` | -- | Applied | pg_cron job: refresh mv_knowledge_profile every 15 min |
+
+> **Note on duplicate `20260304_01` prefix:** Two files share this date prefix
+> (`algorithm_config` and `study_queue_rpc_scoping`). Listed here as `01a` and
+> `01b` for clarity. Both are applied.
 
 ---
 
@@ -359,6 +377,12 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | D-17 | Generation model -> `gemini-2.5-flash` (quota bucket separation) | gemini.ts |
 | D-18 | `_meta.model` uses `GENERATE_MODEL` constant (was hardcoded) | routes/ai/generate.ts |
 
+### INC-series (Cross-audit fixes — 2026-03-04)
+| Code | Fix | File |
+|---|---|---|
+| INC-5 | `get_institution_summary_ids()` RPC for institution-scoped ingest | migration 20260304_05 |
+| INC-7 | Denormalize `institution_id` on summaries + sync trigger (Fase 1) | migration 20260304_06 |
+
 ---
 
 ## Environment Variables
@@ -402,3 +426,12 @@ Run: `deno test supabase/functions/server/tests/`
 ### File Extensions
 - Some flat route files use `.tsx` despite not using JSX (historical artifact)
 - Low priority: rename to `.ts` when convenient
+
+### RAG Roadmap Pending (see `docs/RAG_ROADMAP.md`)
+- Fase 2: tsvector stored columns + GIN indexes
+- Fase 3: Embeddings on summaries (coarse-to-fine search)
+- Fase 4: Query logging + feedback loop
+- Fase 5: Intelligent chunking + auto-ingest trigger
+- Fase 6: Advanced retrieval (Multi-Query + HyDE + Re-ranking)
+- Fase 7: Multi-source ingestion (PDF)
+- Fase 8: Adaptive AI (NeedScore in generate, pre-generation, quality dashboard)
