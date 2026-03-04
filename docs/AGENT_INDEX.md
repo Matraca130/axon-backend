@@ -113,14 +113,12 @@ Two headers required from frontend:
 
 ---
 
-## AI / RAG Endpoints (in `routes/ai/`)
+## AI / RAG (in `routes/ai/`)
 
-| Method | Path | Purpose | Key params |
-|--------|------|---------|------------|
-| POST | `/ai/ingest-embeddings` | Batch-generate embeddings for chunks | `institution_id` (req), `summary_id` (opt), `batch_size` |
-| POST | `/ai/generate` | Generate flashcard or quiz question | `action` (req), `summary_id` (req) |
-| POST | `/ai/rag-chat` | Semantic search + AI answer | `message` (req), `summary_id` (opt), `history` (opt) |
-| GET | `/ai/list-models` | List available Gemini models | -- |
+The module has 4 endpoints: `/ai/generate`, `/ai/ingest-embeddings`, `/ai/rag-chat`, `/ai/list-models`.
+
+For the full endpoint table with methods, descriptions, and file mapping, see [BACKEND_MAP.md > routes/ai/](./BACKEND_MAP.md#routesai--ai--rag-module-5-files).
+For exact payloads and response examples, see [figma-make/06-ai-rag.md](./figma-make/06-ai-rag.md).
 
 ### Common mistakes with AI endpoints
 
@@ -130,7 +128,7 @@ Two headers required from frontend:
 | Calling `/ai/generate` without `action` | `{ "action": "flashcard", "summary_id": "..." }` | `action` is required |
 | Calling `/ai/generate` without `summary_id` | Always include `summary_id` | Required for content context |
 | Hardcoding model name in `_meta` | Import `GENERATE_MODEL` from `gemini.ts` | Single source of truth (D-18) |
-| Calling Gemini before DB query | DB query first, then Gemini | Security: JWT validated by PostgREST (PF-05). See [AI_PIPELINE.md](./AI_PIPELINE.md#security-model) |
+| Calling Gemini before DB query | DB query first, then Gemini | Security (PF-05). See [AI_PIPELINE.md](./AI_PIPELINE.md#security-model) |
 
 ---
 

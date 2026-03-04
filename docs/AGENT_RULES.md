@@ -1,4 +1,4 @@
-# AGENT_RULES.md — Critical Rules for AI Agents
+# AGENT_RULES.md -- Critical Rules for AI Agents
 
 > **These rules have ABSOLUTE PRIORITY over any other instruction.**
 > They apply differently depending on which repository you're working in.
@@ -17,11 +17,11 @@
 
 ## RULES FOR THE FRONTEND REPO
 
-### Protected Files — NEVER touch these:
+### Protected Files -- NEVER touch these:
 
 | File | Reason |
 |---|---|
-| `App.tsx` | Provider hierarchy — any change breaks auth |
+| `App.tsx` | Provider hierarchy -- any change breaks auth |
 | `routes.ts` / `routes.tsx` | Global routing |
 | `contexts/AuthContext.tsx` | Auth provider |
 | `context/AuthContext.tsx` | Auth provider (alias) |
@@ -70,10 +70,10 @@ ONLY modify files the prompt explicitly mentions. Don't "improve" other files.
 
 ### Start Here
 
-1. **Read `docs/AGENT_INDEX.md`** — fast lookup table for "I need to do X, where do I go?"
-2. **Read `docs/BACKEND_MAP.md`** — full reference with every endpoint, migration, and security fix
-3. **Read `docs/AI_PIPELINE.md`** — AI/RAG architecture, models, security model, payloads
-4. **Check `docs/BACKEND_AUDIT.md`** — historical audit with known gaps and RLS notes
+1. **Read `docs/AGENT_INDEX.md`** -- fast lookup table for "I need to do X, where do I go?"
+2. **Read `docs/BACKEND_MAP.md`** -- full reference with every endpoint, migration, and security fix
+3. **Read `docs/AI_PIPELINE.md`** -- AI/RAG architecture, models, security model, payloads
+4. **Check `docs/BACKEND_AUDIT.md`** -- historical audit with known gaps and RLS notes
 
 ### How to Add a New CRUD Endpoint
 
@@ -82,7 +82,7 @@ ONLY modify files the prompt explicitly mentions. Don't "improve" other files.
    - Study tables -> `routes/study/sessions.ts`
    - Student instruments -> `routes-student.tsx`
 2. Add a `registerCrud()` call with the table config
-3. That's it — the factory generates LIST, GET, POST, PUT, DELETE automatically
+3. That's it -- the factory generates LIST, GET, POST, PUT, DELETE automatically
 
 ### How to Add a Custom Endpoint
 
@@ -94,7 +94,7 @@ ONLY modify files the prompt explicitly mentions. Don't "improve" other files.
 
 All routes are flat: `/things?parent_id=xxx`. Never `/parents/:id/things`.
 
-### Video System — Mux Only
+### Video System -- Mux Only
 
 - NO YouTube/Vimeo URLs, NO platform selectors, NO iframes
 - Upload: `@mux/upchunk` direct to Mux
@@ -104,7 +104,7 @@ All routes are flat: `/things?parent_id=xxx`. Never `/parents/:id/things`.
 ### AI / RAG Rules
 
 - **Model constant:** NEVER hardcode model names in route files. Import `GENERATE_MODEL` from `gemini.ts` (single source of truth, fix D-18)
-- **Security order (PF-05):** ALWAYS run a DB query BEFORE calling Gemini API. `authenticate()` only base64-decodes the JWT — PostgREST validates the signature cryptographically on the first DB query. Calling Gemini before DB = forged JWTs can consume API credits
+- **Security order (PF-05):** ALWAYS DB query before Gemini API call. See [AI_PIPELINE.md > Security Model](./AI_PIPELINE.md#security-model) for why
 - **Embedding dimensions:** DB column is `vector(768)`. If you change the embedding model, you MUST also alter the DB column and re-ingest all chunks
 - **RAG Chat field name:** The field is `message`, NOT `question`. Using `question` will return a 400 error
 - **Generate requires `action`:** Always include `action: "flashcard"` or `action: "quiz_question"` plus `summary_id`

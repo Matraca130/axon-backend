@@ -56,19 +56,13 @@ A seguir, o detalhamento das tabelas e rotas mais criticas analisadas.
 
 **Status: IMPLEMENTADO (Marco 2026)**
 
-O modulo AI foi migrado do frontend para o backend principal em `routes/ai/` com 4 endpoints:
-
-| Endpoint | Metodo | Funcao |
-|----------|--------|--------|
-| `/ai/generate` | POST | Gera flashcards/quiz questions adaptativos via Gemini |
-| `/ai/rag-chat` | POST | Chat com busca semantica hibrida (pgvector + full-text) |
-| `/ai/ingest-embeddings` | POST | Gera embeddings batch para chunks |
-| `/ai/list-models` | GET | Diagnostico: lista modelos disponiveis |
+O modulo AI foi migrado do frontend para o backend principal em `routes/ai/` com 4 endpoints.
+Para a tabela completa de endpoints, metodos e payloads, ver [BACKEND_MAP.md > routes/ai/](./BACKEND_MAP.md#routesai--ai--rag-module-5-files) e [figma-make/06-ai-rag.md](./figma-make/06-ai-rag.md).
 
 Modelos: `gemini-2.5-flash` (geracao), `gemini-embedding-001` (embeddings, 768 dims).
-Ver `docs/AI_PIPELINE.md` para detalhes completos.
+Ver `docs/AI_PIPELINE.md` para detalhes completos da arquitetura e seguranca.
 
-As rotas de **auditoria** (`/ai-generations`, `/summary-diagnostics` em `routes/plans/`) continuam separadas — elas registram logs de uso de IA, nao realizam geracao.
+As rotas de **auditoria** (`/ai-generations`, `/summary-diagnostics` em `routes/plans/`) continuam separadas -- elas registram logs de uso de IA, nao realizam geracao.
 
 ## 5. Gaps Criticos e Inconsistencias
 
@@ -87,7 +81,7 @@ As rotas de **auditoria** (`/ai-generations`, `/summary-diagnostics` em `routes/
 - **Correcao Aplicada:** A logica de geracao de conteudo por IA foi migrada do frontend (`sseki-frontend/gemini.tsx`) para o backend principal em `routes/ai/` (4 endpoints) + `gemini.ts` (helpers).
 - **Commits:** Serie de commits D-16 a D-18, PF-01 a PF-09, LA-01 a LA-07
 - **Pipeline completo:** Embeddings (ingest) -> Busca hibrida (RAG) -> Geracao adaptativa (Gemini)
-- **Seguranca:** DB query antes de Gemini call (PF-05), institution scoping (BUG-3), admin client para embeddings (PF-09)
+- **Seguranca:** DB query antes de Gemini call ([PF-05](./AI_PIPELINE.md#security-model)), institution scoping (BUG-3), admin client para embeddings (PF-09)
 - **Detalhes:** Ver `docs/AI_PIPELINE.md`
 
 ## 6. Divida Tecnica e Pontos de Atencao
