@@ -14,6 +14,8 @@
  *     connection_type is validated against a whitelist of 10
  *     predefined medical relationship types.
  *     source_keyword_id indicates direction for directional types.
+ *
+ * V2-AUDIT F1: LIST now joins keyword names for display.
  */
 
 import { Hono } from "npm:hono";
@@ -65,6 +67,8 @@ async function resolveInstitution(
 }
 
 // LIST — get connections for a keyword (either side)
+// V2-AUDIT F1: Joins keyword names so cross-summary connections
+// display actual names instead of truncated UUIDs on the frontend.
 keywordConnectionRoutes.get(connBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -80,16 +84,32 @@ keywordConnectionRoutes.get(connBase, async (c: Context) => {
   const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
+  // F1 FIX: Join keyword names for both sides
   const { data, error } = await db
     .from("keyword_connections")
-    .select("*")
+    .select(
+      `id, keyword_a_id, keyword_b_id, relationship,
+       connection_type, source_keyword_id, created_at,
+       keyword_a:keywords!keyword_a_id(name),
+       keyword_b:keywords!keyword_b_id(name)`,
+    )
     .or(`keyword_a_id.eq.${keywordId},keyword_b_id.eq.${keywordId}`)
     .order("created_at", { ascending: true })
     .limit(200);
 
   if (error)
     return err(c, `List keyword_connections failed: ${error.message}`, 500);
-  return ok(c, data);
+
+  // Flatten the joined keyword names into the response
+  const enriched = (data || []).map((row: any) => ({
+    ...row,
+    keyword_a_name: row.keyword_a?.name || null,
+    keyword_b_name: row.keyword_b?.name || null,
+    keyword_a: undefined, // remove nested object
+    keyword_b: undefined,
+  }));
+
+  return ok(c, enriched);
 });
 
 // GET by ID
