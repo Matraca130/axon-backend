@@ -21,6 +21,9 @@
  *
  * Deploy fixes:
  *   D-18 FIX: Use GENERATE_MODEL constant in _meta (was hardcoded as gemini-2.0-flash)
+ *
+ * Coherence fixes applied:
+ *   INC-6 FIX: Include kw_prof_notes in prompt for better pedagogical quality
  */
 
 import { Hono } from "npm:hono";
@@ -70,7 +73,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
     ? body.wrong_answer : null;
   const related = body.related !== false;
 
-  // ── BUG-3 FIX: Institution scoping ─────────────────────────
+  // ── BUG-3 FIX: Institution scoping ─────────────────────
   // ⚠️ PF-05: This Supabase query MUST happen before the Gemini API call.
   // authenticate() only decodes the JWT locally. The cryptographic signature
   // is validated by PostgREST when this RPC executes. Moving the Gemini call
@@ -86,7 +89,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
   if (isDenied(roleCheck))
     return err(c, roleCheck.message, roleCheck.status);
 
-  // ── Fetch summary ────────────────────────────────────────
+  // ── Fetch summary ──────────────────────────────────────
   const { data: summary } = await db
     .from("summaries")
     .select("id, title, content_markdown, topic_id")
@@ -94,7 +97,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
     .single();
   if (!summary) return err(c, "Summary not found", 404);
 
-  // ── BUG-4 FIX: Resolve keyword_id ─────────────────────────
+  // ── BUG-4 FIX: Resolve keyword_id ─────────────────────
   let keywordId = isUuid(body.keyword_id) ? (body.keyword_id as string) : null;
   if (!keywordId) {
     const { data: kws } = await db
@@ -108,7 +111,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
   if (!keywordId)
     return err(c, "No keywords found for this summary", 400);
 
-  // ── Fetch keyword + subtopic details ─────────────────────
+  // ── Fetch keyword + subtopic details ───────────────────
   const { data: keyword } = await db
     .from("keywords")
     .select("name, definition")
@@ -125,7 +128,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
     subtopicName = sub?.name || null;
   }
 
-  // ── Optional: scope to summary_block ─────────────────────
+  // ── Optional: scope to summary_block ───────────────────
   let blockContext = "";
   if (blockId) {
     const { data: block } = await db
@@ -138,6 +141,20 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
     }
   }
 
+  // ── INC-6 FIX: Fetch professor notes for this keyword ──────
+  // Quick fix from RAG_ROADMAP.md Fase 8C: include kw_prof_notes
+  // in the prompt so generated content reflects professor guidance.
+  const { data: profNotes } = await db
+    .from("kw_prof_notes")
+    .select("note")
+    .eq("keyword_id", keywordId)
+    .limit(3);
+
+  if (profNotes && profNotes.length > 0) {
+    blockContext += "\nNotas del profesor: " +
+      profNotes.map((n: { note: string }) => n.note).join("; ");
+  }
+
   // ── Fetch student profile ────────────────────────────────
   let profileContext = "";
   const { data: profile } = await db.rpc("get_student_knowledge_context", {
@@ -148,7 +165,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
     profileContext = `\nPerfil del alumno: ${JSON.stringify(profile)}`;
   }
 
-  // ── Fetch BKT state for this subtopic ────────────────────
+  // ── Fetch BKT state for this subtopic ──────────────────
   let bktContext = "";
   if (subtopicId) {
     const { data: bkt } = await db
@@ -162,7 +179,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
     }
   }
 
-  // ── Build prompt ─────────────────────────────────────────
+  // ── Build prompt ───────────────────────────────────────
   // LA-07 FIX: Use truncateAtWord instead of raw substring
   const contentSnippet = truncateAtWord(
     summary.content_markdown || "",
@@ -218,7 +235,7 @@ Responde en JSON con este schema exacto:
 }`;
   }
 
-  // ── Call Gemini ──────────────────────────────────────────
+  // ── Call Gemini ────────────────────────────────────────
   try {
     const result = await generateText({
       prompt: userPrompt,
