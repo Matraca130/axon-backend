@@ -3,6 +3,7 @@
 > **READ THIS FIRST.** This is your navigation map for the axon-backend repo.
 > For full details on any section, see [BACKEND_MAP.md](./BACKEND_MAP.md).
 > For critical rules, see [AGENT_RULES.md](./AGENT_RULES.md).
+> For the AI/RAG pipeline, see [AI_PIPELINE.md](./AI_PIPELINE.md).
 
 ---
 
@@ -19,11 +20,17 @@
 | **Add validation** | `validate.ts` | Type guards + `validateFields()` for declarative batch validation |
 | **Find an endpoint** | Search table below or `BACKEND_MAP.md` | All routes are flat: `/things?parent_id=xxx` |
 | **Add a DB migration** | `supabase/migrations/` | Name: `YYYYMMDD_NN_description.sql`. Mark status in BACKEND_MAP.md |
-| **Add a test** | `__tests__/` (Jest-style) or `tests/` (Deno-style) | ⚠️ Two folders exist — see Pending Cleanup |
+| **Add a test** | `__tests__/` (Jest-style) or `tests/` (Deno-style) | Two folders exist — see Pending Cleanup |
 | **Check env vars** | `BACKEND_MAP.md` > Environment Variables | Or grep for `Deno.env.get` |
 | **Understand the Mux video system** | `routes-mux.ts` | Upload via @mux/upchunk, playback via signed JWTs |
 | **Understand Stripe billing** | `routes-billing.tsx` | Checkout, portal, webhooks (timing-safe + idempotent) |
 | **Understand the study algorithm** | `routes-study-queue.tsx` | Custom spaced repetition queue builder |
+| **Use AI generation (flashcards/quiz)** | `routes/ai/generate.ts` | POST `/ai/generate` — needs `action` + `summary_id`. See [AI_PIPELINE.md](./AI_PIPELINE.md) |
+| **Use RAG Chat (semantic search + answer)** | `routes/ai/chat.ts` | POST `/ai/rag-chat` — needs `message` (NOT `question`). See [AI_PIPELINE.md](./AI_PIPELINE.md) |
+| **Ingest embeddings for RAG** | `routes/ai/ingest.ts` | POST `/ai/ingest-embeddings` — needs `institution_id`. Run before RAG Chat works |
+| **Change the AI model** | `gemini.ts` | Edit `GENERATE_MODEL` constant. Single source of truth (D-18 fix) |
+| **Debug AI/embedding issues** | `routes/ai/list-models.ts` | GET `/ai/list-models` — shows available models for current API key |
+| **Understand the RAG pipeline** | [AI_PIPELINE.md](./AI_PIPELINE.md) | Architecture, security model, RPCs, fix history |
 
 ---
 
@@ -37,6 +44,7 @@ supabase/functions/server/
 ├─ validate.ts           ← Type guards + field validation
 ├─ rate-limit.ts         ← 120 req/min sliding window
 ├─ timing-safe.ts        ← Constant-time comparison
+├─ gemini.ts             ← Gemini API helpers (generateText, generateEmbedding, GENERATE_MODEL)
 │
 ├─ routes-content.tsx    ← Content hierarchy (10 CRUD + 4 custom groups) [17KB]
 ├─ routes-study.tsx      ← Study system (3 CRUD + 5 custom groups + topic-progress) [23KB]
@@ -51,6 +59,13 @@ supabase/functions/server/
 ├─ routes-storage.tsx    ← File upload/download/delete
 ├─ routes-student.tsx    ← Flashcards, quizzes, notes, videos
 ├─ routes-study-queue.tsx ← Study queue algorithm
+│
+├─ routes/ai/            ← AI / RAG module
+│  ├─ index.ts           ← AI module combiner (mounts all sub-routes)
+│  ├─ generate.ts        ← POST /ai/generate (flashcards + quiz questions)
+│  ├─ ingest.ts          ← POST /ai/ingest-embeddings (batch embedding generation)
+│  ├─ chat.ts            ← POST /ai/rag-chat (semantic search + Gemini response)
+│  └─ list-models.ts     ← GET /ai/list-models (diagnostic)
 │
 ├─ __tests__/            ← Jest-style tests (3 files)
 │   ├─ rate-limit.test.ts
@@ -103,6 +118,29 @@ Two headers required from frontend:
 
 ---
 
+## AI / RAG Endpoints (in `routes/ai/`)
+
+| Method | Path | Purpose | Key params |
+|--------|------|---------|------------|
+| POST | `/ai/ingest-embeddings` | Batch-generate embeddings for chunks | `institution_id` (req), `summary_id` (opt), `batch_size` |
+| POST | `/ai/generate` | Generate flashcard or quiz question | `action` (req), `summary_id` (req) |
+| POST | `/ai/rag-chat` | Semantic search + AI answer | `message` (req), `summary_id` (opt), `history` (opt) |
+| GET | `/ai/list-models` | List available Gemini models | — |
+
+### Common mistakes with AI endpoints
+
+| WRONG | RIGHT | Why |
+|---|---|---|
+| `{ "question": "..." }` in rag-chat | `{ "message": "..." }` | Field is `message`, not `question` |
+| Calling `/ai/generate` without `action` | `{ "action": "flashcard", "summary_id": "..." }` | `action` is required |
+| Calling `/ai/generate` without `summary_id` | Always include `summary_id` | Required for content context |
+| Hardcoding model name in `_meta` | Import `GENERATE_MODEL` from `gemini.ts` | Single source of truth (D-18) |
+| Calling Gemini before DB query | DB query first, then Gemini | Security: JWT validated by PostgREST (PF-05) |
+
+> Full reference: [AI_PIPELINE.md](./AI_PIPELINE.md) and [figma-make/06-ai-rag.md](./figma-make/06-ai-rag.md)
+
+---
+
 ## Quick Endpoint Finder
 
 ### Content Hierarchy (CRUD factory — in `routes-content.tsx`)
@@ -130,8 +168,11 @@ Two headers required from frontend:
 ### Video (Mux)
 `/mux/create-upload`, `/mux/playback-token`, `/mux/track-view`, `/mux/video-stats`, `/mux/asset/:video_id`, `/webhooks/mux`
 
-### Plans & AI
+### Plans & AI Logs
 `platform-plans`, `institution-plans`, `plan-access-rules`, `institution-subscriptions`, `/ai-generations`, `/summary-diagnostics`, `/content-access`, `/usage-today`
+
+### AI / RAG (in `routes/ai/`)
+`/ai/generate`, `/ai/rag-chat`, `/ai/ingest-embeddings`, `/ai/list-models`
 
 ### Search
 `/search?q=&type=`, `/trash?type=`, `/restore/:table/:id`
