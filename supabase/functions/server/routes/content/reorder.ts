@@ -5,19 +5,24 @@
  *
  * M-3 FIX: Uses bulk_reorder() DB function (single query) with graceful
  * fallback to N individual UPDATE queries if the function doesn't exist.
+ *
+ * H-5 FIX: Now verifies caller has CONTENT_WRITE_ROLES in the institution
+ * that the first item belongs to.
  */
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import {
+  requireInstitutionRole,
+  isDenied,
+  CONTENT_WRITE_ROLES,
+} from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
 
 export const reorderRoutes = new Hono();
 
-// ─── Helpers ──────────────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────
 
-/**
- * Run async tasks in batches to avoid overwhelming the connection pool.
- */
 async function parallelBatch<T>(
   tasks: (() => Promise<T>)[],
   batchSize = 20,
@@ -31,7 +36,7 @@ async function parallelBatch<T>(
   return results;
 }
 
-// ─── Configuration ────────────────────────────────────────────────────
+// ─── Configuration ──────────────────────────────────────────────
 
 const MAX_REORDER_ITEMS = 200;
 
@@ -50,7 +55,6 @@ const allowedReorderTables = [
   "study_plan_tasks",
 ];
 
-// Tables that have updated_at (only needed for fallback path)
 const tablesWithUpdatedAt = new Set([
   "courses",
   "semesters",
@@ -62,12 +66,12 @@ const tablesWithUpdatedAt = new Set([
   "model_3d_pins",
 ]);
 
-// ─── Endpoint ─────────────────────────────────────────────────────────
+// ─── Endpoint ───────────────────────────────────────────────────
 
 reorderRoutes.put(`${PREFIX}/reorder`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
@@ -95,7 +99,6 @@ reorderRoutes.put(`${PREFIX}/reorder`, async (c: Context) => {
     );
   }
 
-  // Validate every item's shape and types upfront
   const invalid = items.filter((i: unknown) => {
     if (!i || typeof i !== "object") return true;
     const item = i as Record<string, unknown>;
@@ -115,6 +118,29 @@ reorderRoutes.put(`${PREFIX}/reorder`, async (c: Context) => {
 
   const typedItems = items as Array<{ id: string; order_index: number }>;
 
+  // H-5 FIX: Resolve institution from the first item, verify caller has write access.
+  // All items in a reorder batch should belong to the same parent (and thus institution).
+  try {
+    const { data: institutionId, error: resolveErr } = await db.rpc(
+      "resolve_parent_institution",
+      { p_table: table, p_id: typedItems[0].id },
+    );
+
+    if (resolveErr || !institutionId) {
+      return err(c, "Cannot resolve institution for reorder items", 404);
+    }
+
+    const roleCheck = await requireInstitutionRole(
+      db,
+      user.id,
+      institutionId as string,
+      CONTENT_WRITE_ROLES,
+    );
+    if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+  } catch {
+    return err(c, "Institution resolution failed", 500);
+  }
+
   // ── Primary path: single DB function call (M-3) ──
   const { data: rpcData, error: rpcError } = await db.rpc("bulk_reorder", {
     p_table: table,
@@ -126,7 +152,7 @@ reorderRoutes.put(`${PREFIX}/reorder`, async (c: Context) => {
     return ok(c, { reordered, method: "rpc" });
   }
 
-  // ── Fallback: N individual queries (if DB function not yet deployed) ──
+  // ── Fallback: N individual queries ──
   console.warn(
     `[reorder] bulk_reorder RPC failed, falling back to N queries: ${rpcError.message}`,
   );

@@ -3,25 +3,60 @@
  *
  * LIST, GET, CREATE/UPSERT, DELETE for kw_prof_notes table.
  * One note per professor per keyword (UNIQUE constraint → upsert).
+ *
+ * H-5 FIX: All endpoints now verify caller has membership in the
+ * keyword's institution via resolve_parent_institution RPC.
  */
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import {
+  requireInstitutionRole,
+  isDenied,
+  ALL_ROLES,
+  CONTENT_WRITE_ROLES,
+} from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
 
 export const profNotesRoutes = new Hono();
 
 const profNotesBase = `${PREFIX}/kw-prof-notes`;
 
+/**
+ * H-5 helper: resolve institution_id from a keyword or prof-note ID.
+ */
+async function resolveInstitution(
+  db: any,
+  table: string,
+  id: string,
+): Promise<string | null> {
+  try {
+    const { data, error } = await db.rpc("resolve_parent_institution", {
+      p_table: table,
+      p_id: id,
+    });
+    if (error || !data) return null;
+    return data as string;
+  } catch {
+    return null;
+  }
+}
+
 // LIST — notes for a keyword (all professors' notes visible)
 profNotesRoutes.get(profNotesBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const keywordId = c.req.query("keyword_id");
   if (!keywordId)
     return err(c, "Missing required query param: keyword_id", 400);
+
+  // H-5 FIX: Verify caller is a member of the keyword's institution
+  const institutionId = await resolveInstitution(db, "keywords", keywordId);
+  if (!institutionId) return err(c, "Keyword not found", 404);
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   const { data, error } = await db
     .from("kw_prof_notes")
@@ -38,9 +73,16 @@ profNotesRoutes.get(profNotesBase, async (c: Context) => {
 profNotesRoutes.get(`${profNotesBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const id = c.req.param("id");
+
+  // H-5 FIX: Verify caller is a member of the note's institution
+  const institutionId = await resolveInstitution(db, "kw_prof_notes", id);
+  if (!institutionId) return err(c, "Note not found", 404);
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
   const { data, error } = await db
     .from("kw_prof_notes")
     .select("*")
@@ -67,6 +109,12 @@ profNotesRoutes.post(profNotesBase, async (c: Context) => {
     return err(c, "keyword_id and note must be non-empty strings", 400);
   }
 
+  // H-5 FIX: Verify caller has write access in the keyword's institution
+  const institutionId = await resolveInstitution(db, "keywords", keyword_id);
+  if (!institutionId) return err(c, "Keyword not found", 404);
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, CONTENT_WRITE_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
   const { data, error } = await db
     .from("kw_prof_notes")
     .upsert(
@@ -90,9 +138,16 @@ profNotesRoutes.post(profNotesBase, async (c: Context) => {
 profNotesRoutes.delete(`${profNotesBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const id = c.req.param("id");
+
+  // H-5 FIX: Verify caller has write access in the note's institution
+  const institutionId = await resolveInstitution(db, "kw_prof_notes", id);
+  if (!institutionId) return err(c, "Note not found", 404);
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, CONTENT_WRITE_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
   const { error } = await db.from("kw_prof_notes").delete().eq("id", id);
   if (error)
     return err(

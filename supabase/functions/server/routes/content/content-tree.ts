@@ -4,24 +4,22 @@
  * GET /content-tree?institution_id=xxx
  * Returns: courses -> semesters -> sections -> topics (lightweight, no summaries)
  *
- * Phase 3 backlog: replace with a single RPC call to a PostgreSQL function
- * that builds the filtered tree via jsonb_agg, eliminating the bandwidth tax
- * of fetching inactive nodes just to discard them in JS.
+ * H-5 FIX: Now verifies caller is a member of the requested institution.
  */
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import {
+  requireInstitutionRole,
+  isDenied,
+  ALL_ROLES,
+} from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
 
 export const contentTreeRoutes = new Hono();
 
-// ━━━ Helper ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ━━━ Helper ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/**
- * Recursively filter inactive nodes from the content tree.
- * PostgREST's `.eq("is_active", true)` only filters the top-level table;
- * nested embeds return ALL children regardless. This fixes that in JS.
- */
 function filterActiveTree(courses: Record<string, unknown>[]): Record<string, unknown>[] {
   if (!courses) return [];
   return courses
@@ -50,16 +48,20 @@ function filterActiveTree(courses: Record<string, unknown>[]): Record<string, un
     }));
 }
 
-// ━━━ Endpoint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ━━━ Endpoint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 contentTreeRoutes.get(`${PREFIX}/content-tree`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const institutionId = c.req.query("institution_id");
   if (!institutionId)
     return err(c, "Missing required query param: institution_id", 400);
+
+  // H-5 FIX: Verify caller is a member of this institution
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   const { data, error } = await db
     .from("courses")
