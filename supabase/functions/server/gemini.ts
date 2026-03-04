@@ -3,23 +3,20 @@
  *
  * Two functions:
  *   generateText()      — Gemini 2.0 Flash for text/JSON generation
- *   generateEmbedding() — text-embedding-004 for vector embeddings (768d)
+ *   generateEmbedding() — text-embedding-005 for vector embeddings (768d)
  *
  * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
  *
  * Rate limits (free tier):
  *   - gemini-2.0-flash: 15 RPM, 1M tokens/min, 1500 RPD
- *   - text-embedding-004: 1500 RPM, 100 RPD (batch)
+ *   - text-embedding-005: 1500 RPM, 100 RPD (batch)
  *
  * LA-02 FIX: Added AbortController timeout (15s generate, 10s embed)
  * LA-06 FIX: Added retry with exponential backoff for 429/503
- * D-16 FIX: text-embedding-004 requires v1 (not v1beta)
+ * D-16 FIX: Switched to text-embedding-005 (004 deprecated/404)
  */
 
-// gemini-2.0-flash works on v1beta
-const GEMINI_BASE_GENERATE = "https://generativelanguage.googleapis.com/v1beta/models";
-// text-embedding-004 requires v1 (returns 404 on v1beta)
-const GEMINI_BASE_EMBED = "https://generativelanguage.googleapis.com/v1/models";
+const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
 function getApiKey(): string {
   const key = Deno.env.get("GEMINI_API_KEY");
@@ -95,7 +92,7 @@ export async function generateText(
 ): Promise<GeminiGenerateResult> {
   const key = getApiKey();
   const model = "gemini-2.0-flash";
-  const url = `${GEMINI_BASE_GENERATE}/${model}:generateContent?key=${key}`;
+  const url = `${GEMINI_BASE}/${model}:generateContent?key=${key}`;
 
   const body: Record<string, unknown> = {
     contents: [{ parts: [{ text: opts.prompt }] }],
@@ -150,9 +147,9 @@ export async function generateEmbedding(
   taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY" = "RETRIEVAL_QUERY",
 ): Promise<number[]> {
   const key = getApiKey();
-  const model = "text-embedding-004";
-  // D-16 FIX: Use v1 endpoint (v1beta returns 404 for this model)
-  const url = `${GEMINI_BASE_EMBED}/${model}:embedContent?key=${key}`;
+  // D-16 FIX: text-embedding-004 was deprecated/404, use 005
+  const model = "text-embedding-005";
+  const url = `${GEMINI_BASE}/${model}:embedContent?key=${key}`;
 
   // LA-02 FIX: 10s timeout for embeddings
   const res = await fetchWithRetry(
