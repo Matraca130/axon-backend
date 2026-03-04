@@ -6,10 +6,23 @@
  * GET    /institutions/:id    — Get institution by ID
  * PUT    /institutions/:id    — Update institution
  * DELETE /institutions/:id    — Deactivate institution (soft)
+ *
+ * H-2 FIX: PUT/DELETE/GET-by-id now require institution membership.
+ *   - GET /:id → any active member (ALL_ROLES)
+ *   - PUT → owner or admin (MANAGEMENT_ROLES)
+ *     - Admins can update name/logo_url/settings
+ *     - Only owners can change slug and is_active (destructive)
+ *   - DELETE → owner only
  */
 
 import { Hono } from "npm:hono";
 import { authenticate, getAdminClient, ok, err, safeJson, PREFIX } from "../../db.ts";
+import {
+  requireInstitutionRole,
+  isDenied,
+  ALL_ROLES,
+  MANAGEMENT_ROLES,
+} from "../../auth-helpers.ts";
 import { isNonEmpty } from "../../validate.ts";
 import type { Context } from "npm:hono";
 
@@ -18,6 +31,8 @@ export const institutionRoutes = new Hono();
 const instBase = `${PREFIX}/institutions`;
 
 // ── POST /institutions ────────────────────────────────────────────────
+// Creates institution + owner membership. Self-scoped (owner_id = caller).
+// No authorization check needed beyond authentication.
 institutionRoutes.post(instBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -63,6 +78,7 @@ institutionRoutes.post(instBase, async (c: Context) => {
 });
 
 // ── GET /institutions ─────────────────────────────────────────────────
+// Already scoped: queries memberships WHERE user_id = caller. No change needed.
 institutionRoutes.get(instBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -94,30 +110,52 @@ institutionRoutes.get(instBase, async (c: Context) => {
 });
 
 // ── GET /institutions/:id ─────────────────────────────────────────────
+// H-2 FIX: Verify caller is a member of this institution.
 institutionRoutes.get(`${instBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const id = c.req.param("id");
+
+  // H-2 FIX: Any active member can read their institution's details
+  const roleCheck = await requireInstitutionRole(db, user.id, id, ALL_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
   const { data, error } = await db.from("institutions").select("*").eq("id", id).single();
   if (error) return err(c, `Get institution ${id} failed: ${error.message}`, 404);
   return ok(c, data);
 });
 
 // ── PUT /institutions/:id ─────────────────────────────────────────────
+// H-2 FIX: Requires owner or admin. Admins cannot change slug or is_active.
 institutionRoutes.put(`${instBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const id = c.req.param("id");
+
+  // H-2 FIX: Verify caller is owner or admin of this institution
+  const roleCheck = await requireInstitutionRole(db, user.id, id, MANAGEMENT_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
 
+  // H-2 FIX: Owner-only fields — admins cannot change slug or deactivate
+  const ownerOnlyFields = ["slug", "is_active"];
   const allowedFields = ["name", "slug", "logo_url", "settings", "is_active"];
   const patch: Record<string, unknown> = {};
-  for (const f of allowedFields) { if (body[f] !== undefined) patch[f] = body[f]; }
+
+  for (const f of allowedFields) {
+    if (body[f] !== undefined) {
+      if (ownerOnlyFields.includes(f) && roleCheck.role !== "owner") {
+        return err(c, `Field '${f}' can only be changed by the institution owner`, 403);
+      }
+      patch[f] = body[f];
+    }
+  }
   if (Object.keys(patch).length === 0) return err(c, "No valid fields to update", 400);
 
   if (typeof patch.slug === "string" && !/^[a-z0-9][a-z0-9-]{1,48}[a-z0-9]$/.test(patch.slug as string)) {
@@ -131,12 +169,18 @@ institutionRoutes.put(`${instBase}/:id`, async (c: Context) => {
 });
 
 // ── DELETE /institutions/:id ──────────────────────────────────────────
+// H-2 FIX: Only owners can deactivate an institution.
 institutionRoutes.delete(`${instBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const id = c.req.param("id");
+
+  // H-2 FIX: Only institution owners can deactivate
+  const roleCheck = await requireInstitutionRole(db, user.id, id, ["owner"]);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
   const { data, error } = await db
     .from("institutions")
     .update({ is_active: false, updated_at: new Date().toISOString() })
