@@ -3,13 +3,14 @@
  *
  * Two functions:
  *   generateText()      — Gemini 2.0 Flash for text/JSON generation
- *   generateEmbedding() — embedding model for vector embeddings (768d)
+ *   generateEmbedding() — gemini-embedding-001 for vector embeddings
  *
  * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
  *
  * LA-02 FIX: Added AbortController timeout (15s generate, 10s embed)
  * LA-06 FIX: Added retry with exponential backoff for 429/503
- * D-16 FIX: Trying embedding-001 (004/005 return 404)
+ * D-16 FIX: Use gemini-embedding-001 (correct model name per 2026 docs)
+ *           + truncate to 768 dims to match DB vector column
  */
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -138,13 +139,16 @@ export async function generateText(
 
 // ─── Embeddings ─────────────────────────────────────────────────
 
+// DB vector column is 768 dimensions; gemini-embedding-001 outputs 3072 by default
+const EMBEDDING_DIMENSIONS = 768;
+
 export async function generateEmbedding(
   text: string,
   taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY" = "RETRIEVAL_QUERY",
 ): Promise<number[]> {
   const key = getApiKey();
-  // D-16 FIX: Try embedding-001 (text-embedding-004/005 return 404)
-  const model = "embedding-001";
+  // D-16 FIX: Correct model name per Google's 2026 docs
+  const model = "gemini-embedding-001";
   const url = `${GEMINI_BASE}/${model}:embedContent?key=${key}`;
 
   const res = await fetchWithRetry(
@@ -156,6 +160,7 @@ export async function generateEmbedding(
         model: `models/${model}`,
         content: { parts: [{ text }] },
         taskType,
+        outputDimensionality: EMBEDDING_DIMENSIONS,
       }),
     },
     10_000,
@@ -171,7 +176,6 @@ export async function generateEmbedding(
   if (!values || !Array.isArray(values)) {
     throw new Error(`No embedding values returned`);
   }
-  // embedding-001 returns 768 dimensions, but accept any valid array
   if (values.length === 0) {
     throw new Error(`Empty embedding vector returned`);
   }
