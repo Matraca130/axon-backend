@@ -9,6 +9,8 @@
  *
  * H-5 FIX: All endpoints now verify caller has membership in the
  * resource's institution via resolve_parent_institution RPC.
+ *
+ * KC-V2: POST now accepts connection_type and source_keyword_id.
  */
 
 import { Hono } from "npm:hono";
@@ -19,6 +21,7 @@ import {
   ALL_ROLES,
   CONTENT_WRITE_ROLES,
 } from "../../auth-helpers.ts";
+import { isUuid } from "../../validate.ts";
 import type { Context } from "npm:hono";
 
 export const keywordConnectionRoutes = new Hono();
@@ -102,6 +105,7 @@ keywordConnectionRoutes.get(`${connBase}/:id`, async (c: Context) => {
 });
 
 // CREATE — enforces canonical order (a < b)
+// KC-V2: Now accepts connection_type and source_keyword_id
 keywordConnectionRoutes.post(connBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -120,6 +124,14 @@ keywordConnectionRoutes.post(connBase, async (c: Context) => {
   if (keyword_a_id === keyword_b_id) {
     return err(c, "Cannot connect a keyword to itself", 400);
   }
+
+  // KC-V2: Extract new optional fields BEFORE canonical swap
+  const connection_type = typeof body.connection_type === "string"
+    ? body.connection_type.trim() || null
+    : null;
+  const source_keyword_id = isUuid(body.source_keyword_id)
+    ? (body.source_keyword_id as string)
+    : null;
 
   // H-5 FIX: Verify caller has write access + both keywords are in the same institution
   const instA = await resolveInstitution(db, "keywords", keyword_a_id);
@@ -147,6 +159,9 @@ keywordConnectionRoutes.post(connBase, async (c: Context) => {
       keyword_a_id: a,
       keyword_b_id: b,
       relationship: typeof relationship === "string" ? relationship : null,
+      // KC-V2: New optional fields
+      connection_type,
+      source_keyword_id,
     })
     .select()
     .single();

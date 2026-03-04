@@ -7,6 +7,7 @@
  * Sub-modules:
  *   crud.ts               — 10 registerCrud calls (courses→subtopics)
  *   keyword-connections.ts — manual CRUD for keyword_connections
+ *   keyword-search.ts      — KC-V2: cross-summary keyword search
  *   prof-notes.ts          — manual CRUD for kw_prof_notes
  *   reorder.ts             — PUT /reorder (bulk reorder)
  *   content-tree.ts        — GET /content-tree (nested hierarchy)
@@ -15,6 +16,7 @@
 import { Hono } from "npm:hono";
 import { contentCrudRoutes } from "./crud.ts";
 import { keywordConnectionRoutes } from "./keyword-connections.ts";
+import { keywordSearchRoutes } from "./keyword-search.ts";
 import { profNotesRoutes } from "./prof-notes.ts";
 import { reorderRoutes } from "./reorder.ts";
 import { contentTreeRoutes } from "./content-tree.ts";
@@ -23,6 +25,7 @@ const content = new Hono();
 
 content.route("/", contentCrudRoutes);
 content.route("/", keywordConnectionRoutes);
+content.route("/", keywordSearchRoutes);
 content.route("/", profNotesRoutes);
 content.route("/", reorderRoutes);
 content.route("/", contentTreeRoutes);
