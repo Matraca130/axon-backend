@@ -5,7 +5,8 @@
 > `chunking-strategies.md`, `hybrid-retrieval.ts`, `adaptive-ia-study.md`),
 > adaptado a Gemini como provider inicial.
 >
-> **Auditoria v3:** 2026-03-04 — 3 errores corregidos, 12 gaps de investigacion integrados.
+> **Auditoria v4:** 2026-03-04 — Appendix A con helper functions completas.
+> v3: 3 errores corregidos, 12 gaps de investigacion integrados.
 
 ---
 
@@ -121,17 +122,9 @@ CREATE TRIGGER trg_summary_institution_sync
   EXECUTE FUNCTION sync_summary_institution_id();
 ```
 
-### Actualizar `rag_hybrid_search()` RPC
+### RPC actualizado completo (Fase 1 + Fase 2 combinadas)
 
-```sql
--- DESPUES: 2-table JOIN (chunks + summaries) en vez de 6
-FROM chunks ch
-  JOIN summaries s ON s.id = ch.summary_id
-WHERE ch.embedding IS NOT NULL
-  AND s.institution_id = p_institution_id
-  AND s.deleted_at IS NULL AND s.is_active = TRUE
-  AND (p_summary_id IS NULL OR s.id = p_summary_id)
-```
+Ver [Appendix A > rag_hybrid_search v2](#a3-rag_hybrid_search-v2-despues-de-fase-1--fase-2) para la funcion completa.
 
 ---
 
@@ -190,6 +183,22 @@ CREATE INDEX IF NOT EXISTS idx_summaries_embedding_hnsw
   WITH (m = 16, ef_construction = 64) WHERE embedding IS NOT NULL;
 ```
 
+### Cambio en `routes/ai/ingest.ts`
+
+```typescript
+// Despues de procesar chunks, generar embedding del summary completo
+const summaryText = truncateAtWord(
+  `${summary.title}. ${summary.content_markdown}`,
+  8000 // Gemini embedding soporta hasta ~10k tokens
+);
+const summaryEmbedding = await generateEmbedding(summaryText, "RETRIEVAL_DOCUMENT");
+
+await adminClient
+  .from("summaries")
+  .update({ embedding: JSON.stringify(summaryEmbedding) })
+  .eq("id", summaryId);
+```
+
 ### Nuevo RPC: `rag_coarse_to_fine_search()`
 
 ```sql
@@ -235,6 +244,19 @@ BEGIN
   ORDER BY (0.3 * rc.s_sim + 0.7 * rc.c_sim) DESC;
 END;
 $$;
+```
+
+### Integracion en `chat.ts`
+
+```typescript
+// Decidir que RPC usar:
+if (summaryId) {
+  // Con summary_id especifico -> hybrid search (ya scoped)
+  results = await db.rpc("rag_hybrid_search", { ... });
+} else {
+  // Sin summary_id -> coarse-to-fine (busca el mejor summary primero)
+  results = await db.rpc("rag_coarse_to_fine_search", { ... });
+}
 ```
 
 ---
@@ -307,108 +329,24 @@ CREATE POLICY rag_log_institution ON rag_query_log FOR SELECT USING (
 **Implementar Recursive Character como default** (gratis, rapido, buen baseline),
 con **upgrade a Semantic** para summaries largos (>2000 tokens).
 
-Razon: los resumenes de Axon son contenido educativo con headers markdown claros.
-Recursive Character respeta esos headers. Semantic Chunking solo agrega valor
-cuando un summary mezcla multiples temas sin headers claros.
+### Implementacion completa: `chunker.ts`
 
-### Implementacion: Recursive Character (default)
+Ver [Appendix A > chunkMarkdown()](#a1-chunkertsimplementacion-completa) para el codigo completo.
 
-```typescript
-// supabase/functions/server/chunker.ts
+### Semantic Chunking (upgrade opcional)
 
-export interface ChunkResult {
-  content: string;
-  order_index: number;
-  metadata: {
-    header_path: string;      // "Cap 2 > Sec 2.1"
-    char_start: number;
-    char_end: number;
-    token_estimate: number;
-    has_overlap: boolean;
-  };
-}
-
-// Recursive character splitting with overlap
-function recursiveSplit(
-  text: string,
-  chunkSize: number = 512,    // ~400 tokens
-  overlap: number = 128,      // ~50 tokens
-  separators: string[] = ['\n\n', '\n', '. ', ' ']
-): string[] {
-  if (text.length <= chunkSize) return [text];
-
-  const separator = separators[0] || '';
-  const parts = text.split(separator);
-  const result: string[] = [];
-  let currentChunk = '';
-
-  for (const part of parts) {
-    const candidate = currentChunk
-      ? currentChunk + separator + part
-      : part;
-
-    if (candidate.length > chunkSize && currentChunk) {
-      result.push(currentChunk.trim());
-      // Overlap: include tail of previous chunk
-      const overlapText = currentChunk.slice(-overlap);
-      currentChunk = overlapText + separator + part;
-    } else {
-      currentChunk = candidate;
-    }
-  }
-
-  if (currentChunk.trim()) result.push(currentChunk.trim());
-
-  // If any chunk is still too large, recurse with next separator
-  if (separators.length > 1) {
-    return result.flatMap(chunk =>
-      chunk.length > chunkSize
-        ? recursiveSplit(chunk, chunkSize, overlap, separators.slice(1))
-        : [chunk]
-    );
-  }
-
-  return result;
-}
-
-export function chunkMarkdown(markdown: string, opts?: {
-  targetChars?: number;     // default 512 chars (~400 tokens)
-  overlapChars?: number;    // default 128 chars (~50 tokens)
-}): ChunkResult[] {
-  const targetChars = opts?.targetChars ?? 512;
-  const overlapChars = opts?.overlapChars ?? 128;
-
-  // 1. Split by headers first (## and ###)
-  const headerRegex = /^(#{1,3})\s+(.+)$/gm;
-  const sections: { headerPath: string; content: string; start: number }[] = [];
-  // ... parse headers, build sections with header_path
-
-  // 2. Within each section, apply recursive splitting
-  // 3. Build ChunkResult[] with metadata
-  // 4. Preserve lists and tables (don't split mid-list)
-}
-```
-
-### Implementacion: Semantic Chunking (upgrade opcional)
+Usa `cosineSimilarity()` de [Appendix A](#a2-helper-functions) para detectar cambios de tema:
 
 ```typescript
-// Solo para summaries donde recursive produce chunks incoherentes
-// Usa embeddings para detectar cambios de tema
-
 async function semanticChunk(
   text: string,
   similarityThreshold: number = 0.75
 ): Promise<string[]> {
-  // 1. Split text into sentences
   const sentences = text.split(/(?<=[.!?])\s+/);
-
-  // 2. Embed each sentence
   const embeddings = await Promise.all(
     sentences.map(s => generateEmbedding(s, "RETRIEVAL_DOCUMENT"))
   );
 
-  // 3. Compare consecutive sentence embeddings
-  // When cosine similarity drops below threshold, start new chunk
   const chunks: string[] = [];
   let currentChunk = sentences[0];
 
@@ -422,15 +360,9 @@ async function semanticChunk(
     }
   }
   if (currentChunk) chunks.push(currentChunk);
-
   return chunks;
 }
 ```
-
-> **Costo:** Semantic chunking requiere 1 embedding por oracion.
-> Un summary de 20 oraciones = 20 embeddings. En free tier de Gemini
-> esto es viable (1500 RPM), pero para ingesta masiva considerar
-> el rate limiting.
 
 ### Auto-ingest: POST `/ai/rechunk-summary`
 
@@ -475,11 +407,9 @@ CREATE TRIGGER trg_summary_content_changed
 
 ### 6A. Multi-Query Retrieval (+25% recall)
 
-Genera multiples reformulaciones de la query para capturar diferentes angulos semanticos.
+Genera multiples reformulaciones de la query. Usa `rrfFusion()` de [Appendix A](#a2-helper-functions).
 
 ```typescript
-// En chat.ts, ANTES de generar el embedding:
-
 async function expandQuery(message: string): Promise<string[]> {
   const result = await generateText({
     prompt: `Genera 3 reformulaciones de esta pregunta educativa.
@@ -492,10 +422,10 @@ Responde en JSON: ["reformulacion 1", "reformulacion 2", "reformulacion 3"]`,
     maxTokens: 200,
   });
   const reformulations = parseGeminiJson<string[]>(result.text);
-  return [message, ...reformulations]; // original + 3 reformulaciones
+  return [message, ...reformulations];
 }
 
-// Embed each query, search each, merge results with RRF
+// Embed each query, search each, merge with RRF
 const queries = await expandQuery(message);
 const allResults = await Promise.all(
   queries.map(async (q) => {
@@ -506,27 +436,19 @@ const allResults = await Promise.all(
       p_institution_id: institutionId,
       p_summary_id: summaryId,
       p_match_count: 10,
-      p_similarity_threshold: 0.25,  // lower threshold for more recall
+      p_similarity_threshold: 0.25,
     });
     return data || [];
   })
 );
 
-// RRF fusion: merge and re-rank by reciprocal rank
-const merged = rrfFusion(allResults, k=60);
+const merged = rrfFusion(allResults, 60);  // k=60 standard
 const topChunks = merged.slice(0, 5);
 ```
 
-**Costo:** +1 Gemini generate call + 3 extra embeddings por query.
-**Cuando usarlo:** Queries multi-faceta ("compara fotosintesis con respiracion").
-
-### 6B. HyDE — Hypothetical Document Embeddings (+20% recall en queries abstractas)
-
-Genera un documento hipotetico que responderia la query, luego busca similares a ESE.
+### 6B. HyDE — Hypothetical Document Embeddings (+20% recall)
 
 ```typescript
-// En chat.ts, ANTES de generar el embedding:
-
 async function hydeExpand(message: string): Promise<string> {
   const result = await generateText({
     prompt: `Escribe un parrafo educativo de ~100 palabras que responda
@@ -538,14 +460,9 @@ Escribe como si fuera parte de un resumen academico.`,
   return result.text;
 }
 
-// Embed the hypothetical answer (closer to documents in embedding space)
 const hypothetical = await hydeExpand(message);
 const hydeEmbedding = await generateEmbedding(hypothetical, "RETRIEVAL_DOCUMENT");
-// Search with hyde embedding — finds documents similar to a "good answer"
 ```
-
-**Costo:** +1 Gemini generate call + 1 embedding por query.
-**Cuando usarlo:** Queries abstractas ("por que es importante X?", "que relacion tiene Y con Z?").
 
 ### 6C. Re-ranking con Gemini (JSON scores)
 
@@ -571,38 +488,21 @@ const reranked = scores.sort((a, b) => b.score - a.score)
   .slice(0, 5).map(s => chunks[s.index]).filter(Boolean);
 ```
 
-**Costo:** +1 Gemini generate call por query.
-**Cuando usarlo:** Siempre (si el presupuesto lo permite) o solo cuando top_similarity < 0.5.
-
 ### 6D. Seleccion dinamica de estrategia
 
-Decision tree de `hybrid-retrieval.ts`, adaptado a Gemini:
-
 ```typescript
-// En chat.ts, decidir estrategia basada en la query:
-
-function selectStrategy(message: string, historyLength: number): 'standard' | 'multi_query' | 'hyde' {
-  // Queries abstractas o conceptuales -> HyDE
+function selectStrategy(message: string): 'standard' | 'multi_query' | 'hyde' {
   const abstractKeywords = ['por que', 'cual es la importancia', 'que relacion',
     'compara', 'diferencia entre', 'como se relaciona'];
   if (abstractKeywords.some(k => message.toLowerCase().includes(k))) {
     return 'hyde';
   }
-
-  // Queries con multiples aspectos -> Multi-Query
   if (message.includes(' y ') || message.includes(' vs ') || message.split(',').length > 1) {
     return 'multi_query';
   }
-
-  // Default: standard hybrid search
   return 'standard';
 }
 ```
-
-> **Nota de costo:** En free tier de Gemini, Multi-Query y HyDE agregan
-> 1-4 llamadas extra. Con 15 RPM generate, esto limita a ~4 queries RAG/minuto
-> si se usan estrategias avanzadas. Considerar activarlas solo cuando
-> `top_similarity < 0.5` (resultados pobres con standard).
 
 ### Metricas de impacto esperadas
 
@@ -613,6 +513,9 @@ function selectStrategy(message: string, historyLength: number): 'standard' | 'm
 | + HyDE | +20% | +15% | ~300ms | 1 embed + 1 gen |
 | + Re-ranking | +5% | +40% | ~200ms | 1 gen |
 | Todo combinado | +35% | +50% | ~900ms | 5 embeds + 3 gen |
+
+> **Nota de costo free tier:** Con 15 RPM generate, Multi-Query + HyDE limita
+> a ~4 queries RAG/minuto. Considerar activar solo cuando `top_similarity < 0.5`.
 
 ---
 
@@ -634,11 +537,17 @@ POST /ai/ingest-document
   -> Generar embeddings via ingest-embeddings
 ```
 
-### Limitaciones en Deno/Edge Functions
+### Gemini multimodal para PDF
 
-- `pdf-parse` no funciona en Deno
-- Opcion pragmatica: Gemini 2.5 Flash soporta input multimodal (PDF como base64)
-- Opcion robusta: servicio externo (Unstructured.io) como pre-procesador
+```typescript
+// Gemini 2.5 Flash soporta input multimodal
+// El PDF se envia como inline_data en base64
+const result = await generateText({
+  prompt: "Convierte este PDF a markdown limpio. Preserva headers (##), listas y tablas.",
+  // Nota: generateText() necesita extension para soportar inline_data
+  // Ver: https://ai.google.dev/gemini-api/docs/document-processing
+});
+```
 
 ---
 
@@ -648,8 +557,6 @@ POST /ai/ingest-document
 **Riesgo:** MEDIO — varios cambios en generate.ts + nuevos endpoints.
 **Impacto:** Generacion mas inteligente + mecanismos de calidad.
 
-> **Fuente:** `adaptive-ia-study.md` describe 6 features que faltan en el roadmap.
-
 ### 8A. NeedScore integration con `/ai/generate`
 
 El `NeedScore` ya existe en `routes-study-queue.tsx`:
@@ -657,49 +564,39 @@ El `NeedScore` ya existe en `routes-study-queue.tsx`:
 NeedScore = 0.40*overdue + 0.30*(1-p_know) + 0.20*fragility + 0.10*novelty
 ```
 
-Pero `/ai/generate` no lo usa. El endpoint genera para el keyword/subtopic que
-el frontend pide, sin considerar que seria MAS util estudiar.
-
 **Nuevo endpoint: POST `/ai/generate-smart`**
 
 ```typescript
-// POST /ai/generate-smart
 // Body: { summary_id: UUID, action: "flashcard" | "quiz_question" }
 // NO requiere keyword_id ni subtopic_id — los elige automaticamente
 //
 // Pipeline:
-//   1. Fetch all subtopics for this summary
+//   1. Fetch all subtopics for this summary (via keywords -> subtopics)
 //   2. Fetch BKT states for each subtopic (this student)
-//   3. Calculate NeedScore for each
-//   4. Pick the subtopic with highest NeedScore
-//   5. Generate flashcard/quiz for THAT subtopic
-//   6. Return { ...generated, _meta: { chosen_subtopic, need_score } }
+//   3. Fetch FSRS states for related flashcards (lapses, due dates)
+//   4. Calculate NeedScore for each subtopic:
+//      overdue  = fsrs.due_at ? 1 - Math.exp(-daysOverdue / 3) : 1.0
+//      mastery  = 1 - bkt.p_know
+//      fragility = fsrs.lapses / (fsrs.reps + fsrs.lapses + 1)
+//      novelty  = fsrs.state === 'new' ? 1.0 : 0.0
+//      NeedScore = 0.40*overdue + 0.30*mastery + 0.20*fragility + 0.10*novelty
+//   5. Pick the subtopic with highest NeedScore
+//   6. Generate flashcard/quiz for THAT subtopic (reuse existing generate logic)
+//   7. Return { ...generated, _meta: { chosen_subtopic, need_score, reason } }
 ```
 
-Esto permite al frontend simplemente decir "genera algo util" sin decidir que keyword.
-
 ### 8B. Pre-generacion en background
-
-Cuando un alumno inicia una sesion de estudio, pre-generar 2-3 preguntas
-en background para los subtopics con mayor NeedScore.
 
 ```typescript
 // POST /ai/pre-generate
 // Body: { institution_id: UUID, count: 3 }
 // Pipeline:
-//   1. Get student's top 3 NeedScore subtopics
+//   1. Get student's top N NeedScore subtopics
 //   2. For each, generate a quiz_question (fire-and-forget)
-//   3. Return { queued: 3, subtopics: [...] }
-//
-// Frontend: llamar al iniciar study session, mostrar preguntas pre-generadas primero
+//   3. Return { queued: N, subtopics: [...] }
 ```
 
-### 8C. Professor notes en prompt de generate.ts
-
-El archivo `adaptive-ia-study.md` (lineas 302-312) muestra que las notas
-del profesor (`kw_prof_notes`) deben incluirse como contexto.
-
-**El codigo actual en `generate.ts` NO las fetch.** Falta agregar:
+### 8C. Professor notes en prompt de generate.ts (QUICK FIX)
 
 ```typescript
 // En generate.ts, despues de fetch keyword:
@@ -715,21 +612,16 @@ if (profNotes?.length) {
 }
 ```
 
-Esto es un quick fix — se puede hacer antes de la Fase 8 completa.
-
 ### 8D. Rate limit especifico para AI
-
-El rate limiter actual es global (120 req/min para todo).
-`adaptive-ia-study.md` recomienda: "max 20 generaciones por alumno por hora".
 
 ```typescript
 // En routes/ai/index.ts (combiner), agregar middleware:
 const AI_RATE_LIMIT = 20; // per user per hour
 
 aiRoutes.use('*', async (c, next) => {
-  const userId = c.get('userId'); // from authenticate()
+  const userId = c.get('userId');
   const key = `ai:${userId}`;
-  // Check rate limit (reuse rate-limit.ts or distributed via DB)
+  // Check distributed rate limit (DB-based, migration 20260303_02)
   // If exceeded: return err(c, "AI rate limit: max 20/hour", 429);
   await next();
 });
@@ -738,7 +630,6 @@ aiRoutes.use('*', async (c, next) => {
 ### 8E. Report question / Flag AI content
 
 ```sql
--- Agregar a quiz_questions y flashcards:
 ALTER TABLE quiz_questions ADD COLUMN IF NOT EXISTS reported_at TIMESTAMPTZ;
 ALTER TABLE quiz_questions ADD COLUMN IF NOT EXISTS reported_by UUID REFERENCES auth.users(id);
 ALTER TABLE quiz_questions ADD COLUMN IF NOT EXISTS report_reason TEXT;
@@ -751,17 +642,13 @@ ALTER TABLE flashcards ADD COLUMN IF NOT EXISTS report_reason TEXT;
 ```typescript
 // POST /ai/report
 // Body: { type: "quiz_question" | "flashcard", id: UUID, reason: string }
-// Sets reported_at, reported_by, report_reason
 ```
 
-### 8F. Quality dashboard (endpoint para profesor)
+### 8F. Quality dashboard
 
 ```typescript
 // GET /ai/flagged-content?institution_id=xxx
-// Retorna quiz_questions y flashcards donde:
-//   - source = 'ai' AND reported_at IS NOT NULL
-//   - Agrupados por summary
-//   - Con info del report (reason, who, when)
+// Returns quiz_questions + flashcards where source='ai' AND reported_at IS NOT NULL
 ```
 
 ---
@@ -792,12 +679,6 @@ Fase 7: Ingestion PDF                 [3 dias] [nuevo modulo]   [feature nueva]
 
 **Total estimado: ~15 dias de trabajo** (+ 20 min quick fixes)
 
-> **Notas de orden:**
-> - Fase 4 antes de Fase 5 para medir impacto del chunking.
-> - Fase 8 antes de Fase 6 porque impacta mas la experiencia del alumno.
-> - Fase 6 es la mas "research-heavy" — requiere experimentar con thresholds.
-> - Quick fixes (prof notes + stale comments) se pueden hacer en cualquier momento.
-
 ---
 
 ## Housekeeping: Quick fixes
@@ -805,24 +686,23 @@ Fase 7: Ingestion PDF                 [3 dias] [nuevo modulo]   [feature nueva]
 ### chat.ts — Comentarios stale en header
 
 ```
-// DICE: gemini-embedding-004   → DEBE SER: gemini-embedding-001 (fix D-16)
-// DICE: Gemini 2.0 Flash       → DEBE SER: gemini-2.5-flash (fix D-17)
+// DICE: gemini-embedding-004   -> DEBE SER: gemini-embedding-001 (fix D-16)
+// DICE: Gemini 2.0 Flash       -> DEBE SER: gemini-2.5-flash (fix D-17)
 ```
 
 ### generate.ts — Professor notes faltantes
 
-Agregar fetch de `kw_prof_notes` al prompt (ver Fase 8C).
-Este es un quick fix independiente de la Fase 8 completa.
+Ver Fase 8C. Quick fix independiente.
 
 ### Migracion de dimensiones: checklist completa
 
-Si en el futuro se cambian dimensiones de embedding:
-1. `ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(NEW_DIM)`
-2. `ALTER TABLE summaries ALTER COLUMN embedding TYPE vector(NEW_DIM)` (si Fase 3)
-3. **Function signature:** `p_query_embedding vector(768)` en `rag_hybrid_search()`
-4. **Function signature:** `p_query_embedding vector(768)` en `rag_coarse_to_fine_search()`
-5. Re-ingest ALL chunks y summaries
-6. Recrear indices HNSW
+1. `EMBEDDING_DIMENSIONS` en `gemini.ts`
+2. `ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(NEW_DIM)`
+3. `ALTER TABLE summaries ALTER COLUMN embedding TYPE vector(NEW_DIM)` (si Fase 3)
+4. Function signature: `p_query_embedding vector(768)` en `rag_hybrid_search()`
+5. Function signature: `p_query_embedding vector(768)` en `rag_coarse_to_fine_search()`
+6. Re-ingest ALL chunks y summaries
+7. Recrear indices HNSW
 
 ---
 
@@ -841,11 +721,341 @@ Si en el futuro se cambian dimensiones de embedding:
 | PDF extraction | pdf-parse | Gemini multimodal (PDF como input) |
 | Max input embed | 8191 tokens | ~10k tokens |
 
-### Migracion futura a OpenAI (si necesario)
+---
+
+## Appendix A — Helper Functions (implementacion completa)
+
+Estas funciones son referenciadas por las fases pero necesitan implementacion.
+Colocar en los archivos indicados.
+
+### A.1 `chunker.ts` — Implementacion completa
+
+```typescript
+// supabase/functions/server/chunker.ts
+
+export interface ChunkResult {
+  content: string;
+  order_index: number;
+  metadata: {
+    header_path: string;
+    char_start: number;
+    char_end: number;
+    token_estimate: number;
+    has_overlap: boolean;
+  };
+}
+
+// Approximate token count (~1 token per 4 chars for Spanish)
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+// Recursive character splitting with overlap
+function recursiveSplit(
+  text: string,
+  chunkSize: number = 512,
+  overlap: number = 128,
+  separators: string[] = ['\n\n', '\n', '. ', ' ']
+): string[] {
+  if (text.length <= chunkSize) return [text];
+
+  const separator = separators[0] || '';
+  const parts = separator ? text.split(separator) : [text];
+  const result: string[] = [];
+  let currentChunk = '';
+
+  for (const part of parts) {
+    const candidate = currentChunk
+      ? currentChunk + separator + part
+      : part;
+
+    if (candidate.length > chunkSize && currentChunk) {
+      result.push(currentChunk.trim());
+      const overlapText = currentChunk.slice(-overlap);
+      currentChunk = overlapText + separator + part;
+    } else {
+      currentChunk = candidate;
+    }
+  }
+
+  if (currentChunk.trim()) result.push(currentChunk.trim());
+
+  // If chunks are still too large, recurse with next separator
+  if (separators.length > 1) {
+    return result.flatMap(chunk =>
+      chunk.length > chunkSize
+        ? recursiveSplit(chunk, chunkSize, overlap, separators.slice(1))
+        : [chunk]
+    );
+  }
+
+  return result;
+}
+
+// Detect if a line is inside a markdown list or table
+function isListOrTable(line: string): boolean {
+  return /^\s*[-*+]\s/.test(line)    // unordered list
+    || /^\s*\d+\.\s/.test(line)       // ordered list
+    || /^\|/.test(line)               // table row
+    || /^\s*>/.test(line);            // blockquote
+}
+
+// Find the end of a list/table block starting at lineIndex
+function findBlockEnd(lines: string[], startIdx: number): number {
+  let i = startIdx;
+  while (i < lines.length && isListOrTable(lines[i])) {
+    i++;
+  }
+  return i;
+}
+
+export function chunkMarkdown(markdown: string, opts?: {
+  targetChars?: number;
+  overlapChars?: number;
+}): ChunkResult[] {
+  const targetChars = opts?.targetChars ?? 512;
+  const overlapChars = opts?.overlapChars ?? 128;
+
+  // 1. Parse headers to build sections with header paths
+  interface Section {
+    headerPath: string;
+    content: string;
+    charStart: number;
+  }
+
+  const lines = markdown.split('\n');
+  const sections: Section[] = [];
+  const headerStack: string[] = [];
+  let currentContent = '';
+  let currentStart = 0;
+  let charPos = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const headerMatch = line.match(/^(#{1,3})\s+(.+)$/);
+
+    if (headerMatch) {
+      // Save previous section
+      if (currentContent.trim()) {
+        sections.push({
+          headerPath: headerStack.join(' > ') || 'Root',
+          content: currentContent.trim(),
+          charStart: currentStart,
+        });
+      }
+
+      // Update header stack
+      const level = headerMatch[1].length;
+      const title = headerMatch[2].trim();
+      // Pop headers of same or deeper level
+      while (headerStack.length >= level) {
+        headerStack.pop();
+      }
+      headerStack.push(title);
+
+      currentContent = '';
+      currentStart = charPos + line.length + 1; // +1 for \n
+    } else {
+      // Check if this line starts a list/table block
+      if (isListOrTable(line)) {
+        const blockEnd = findBlockEnd(lines, i);
+        const blockContent = lines.slice(i, blockEnd).join('\n');
+        currentContent += blockContent + '\n\n';
+        charPos += blockContent.length + 2;
+        i = blockEnd - 1; // -1 because loop will i++
+        continue;
+      }
+      currentContent += line + '\n';
+    }
+    charPos += line.length + 1;
+  }
+
+  // Save last section
+  if (currentContent.trim()) {
+    sections.push({
+      headerPath: headerStack.join(' > ') || 'Root',
+      content: currentContent.trim(),
+      charStart: currentStart,
+    });
+  }
+
+  // 2. Within each section, apply recursive splitting
+  const chunks: ChunkResult[] = [];
+  let orderIndex = 0;
+
+  for (const section of sections) {
+    const splitChunks = recursiveSplit(
+      section.content, targetChars, overlapChars
+    );
+
+    let sectionCharPos = section.charStart;
+
+    for (let i = 0; i < splitChunks.length; i++) {
+      const chunkText = splitChunks[i];
+      chunks.push({
+        content: chunkText,
+        order_index: orderIndex++,
+        metadata: {
+          header_path: section.headerPath,
+          char_start: sectionCharPos,
+          char_end: sectionCharPos + chunkText.length,
+          token_estimate: estimateTokens(chunkText),
+          has_overlap: i > 0,
+        },
+      });
+      // Advance position (subtract overlap for next chunk)
+      sectionCharPos += chunkText.length - (i < splitChunks.length - 1 ? overlapChars : 0);
+    }
+  }
+
+  return chunks;
+}
+```
+
+### A.2 Helper functions
+
+```typescript
+// supabase/functions/server/rag-helpers.ts
+
+/**
+ * Cosine similarity between two vectors.
+ * Used by semantic chunking (Fase 5) to detect topic boundaries.
+ */
+export function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) throw new Error('Vector dimension mismatch');
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+  return denominator === 0 ? 0 : dotProduct / denominator;
+}
+
+/**
+ * Reciprocal Rank Fusion (RRF)
+ * Merges multiple ranked result lists into one.
+ * k=60 is the standard constant (from the original RRF paper).
+ *
+ * Used by Multi-Query Retrieval (Fase 6A) to merge results
+ * from different query reformulations.
+ *
+ * Algorithm:
+ *   For each document d across all result lists:
+ *     RRF_score(d) = SUM(1 / (k + rank_i(d)))  for each list i
+ *   Where rank_i(d) is the 1-based position of d in list i.
+ *   If d doesn't appear in list i, it's ignored for that list.
+ *
+ * @param resultLists - Array of result arrays from different queries
+ * @param k - RRF constant (default 60, higher = more weight to lower-ranked results)
+ * @returns Merged and re-ranked results, deduplicated by chunk_id
+ */
+export function rrfFusion<T extends { chunk_id: string }>(
+  resultLists: T[][],
+  k: number = 60
+): T[] {
+  const scoreMap = new Map<string, { score: number; item: T }>();
+
+  for (const results of resultLists) {
+    for (let rank = 0; rank < results.length; rank++) {
+      const item = results[rank];
+      const id = item.chunk_id;
+      const rrfScore = 1 / (k + rank + 1); // rank is 0-based, RRF uses 1-based
+
+      const existing = scoreMap.get(id);
+      if (existing) {
+        existing.score += rrfScore;
+      } else {
+        scoreMap.set(id, { score: rrfScore, item });
+      }
+    }
+  }
+
+  // Sort by accumulated RRF score descending
+  return Array.from(scoreMap.values())
+    .sort((a, b) => b.score - a.score)
+    .map(entry => entry.item);
+}
+```
+
+### A.3 `rag_hybrid_search` v2 (despues de Fase 1 + Fase 2)
+
+```sql
+-- Reemplaza la funcion actual en migration YYYYMMDD_XX_rag_hybrid_search_v2.sql
+-- Cambios vs v1:
+--   1. Solo 2 JOINs (chunks + summaries) en vez de 6 (Fase 1: institution_id denormalizado)
+--   2. Usa ch.fts stored column en vez de to_tsvector() inline (Fase 2: tsvector column)
+--   3. Mantiene CTE de LA-05 (compute cosine once)
+
+CREATE OR REPLACE FUNCTION rag_hybrid_search(
+  p_query_embedding vector(768),
+  p_query_text TEXT,
+  p_institution_id UUID,
+  p_summary_id UUID DEFAULT NULL,
+  p_match_count INT DEFAULT 5,
+  p_similarity_threshold FLOAT DEFAULT 0.3
+)
+RETURNS TABLE (
+  chunk_id UUID,
+  summary_id UUID,
+  summary_title TEXT,
+  content TEXT,
+  similarity FLOAT,
+  text_rank FLOAT,
+  combined_score FLOAT
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  RETURN QUERY
+  WITH scored AS (
+    SELECT
+      ch.id,
+      s.id AS s_id,
+      s.title AS s_title,
+      ch.content AS c_content,
+      -- Compute cosine similarity ONCE (LA-05)
+      (1 - (ch.embedding <=> p_query_embedding))::FLOAT AS sim,
+      -- Fase 2: use stored tsvector column instead of inline to_tsvector()
+      ts_rank(
+        ch.fts,
+        plainto_tsquery('spanish', p_query_text)
+      )::FLOAT AS trank
+    FROM chunks ch
+    -- Fase 1: only 1 JOIN needed (institution_id is on summaries now)
+    JOIN summaries s ON s.id = ch.summary_id
+    WHERE ch.embedding IS NOT NULL
+      AND s.institution_id = p_institution_id   -- Fase 1: direct filter
+      AND s.deleted_at IS NULL AND s.is_active = TRUE
+      AND (p_summary_id IS NULL OR s.id = p_summary_id)
+  )
+  SELECT
+    scored.id AS chunk_id,
+    scored.s_id AS summary_id,
+    scored.s_title AS summary_title,
+    scored.c_content AS content,
+    scored.sim AS similarity,
+    scored.trank AS text_rank,
+    (0.7 * scored.sim + 0.3 * scored.trank)::FLOAT AS combined_score
+  FROM scored
+  WHERE scored.sim > p_similarity_threshold
+  ORDER BY (0.7 * scored.sim + 0.3 * scored.trank) DESC
+  LIMIT p_match_count;
+END;
+$$;
+```
+
+---
+
+## Migracion futura a OpenAI
 
 1. Editar `generateEmbedding()` en `gemini.ts`
 2. Cambiar `EMBEDDING_DIMENSIONS` de 768 a 1536
-3. Migrations: ALTER columns + function signatures
+3. Migrations: ALTER columns + function signatures (ver checklist arriba)
 4. Re-ingest ALL chunks y summaries
 5. Recrear indices HNSW
 
