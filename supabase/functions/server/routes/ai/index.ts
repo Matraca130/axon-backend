@@ -8,16 +8,75 @@
  *   ingest.ts       — POST /ai/ingest-embeddings
  *   chat.ts         — POST /ai/rag-chat
  *   list-models.ts  — GET  /ai/list-models (diagnostic)
+ *
+ * INC-3 FIX: Added AI-specific rate limit middleware (20 req/hour).
+ * Uses the distributed check_rate_limit() RPC from migration 20260303_02.
  */
 
 import { Hono } from "npm:hono";
+import type { Context, Next } from "npm:hono";
 import { aiGenerateRoutes } from "./generate.ts";
 import { aiIngestRoutes } from "./ingest.ts";
 import { aiChatRoutes } from "./chat.ts";
 import { aiListModelsRoutes } from "./list-models.ts";
+import { authenticate, err, getAdminClient, PREFIX } from "../../db.ts";
 
 const aiRoutes = new Hono();
 
+// ── INC-3 FIX: AI-specific rate limit middleware ─────────────────
+// 20 AI requests per hour per user.
+// Uses the distributed check_rate_limit() RPC (migration 20260303_02)
+// which works correctly across multiple Deno isolates.
+//
+// Only applies to POST routes (generate, ingest, rag-chat).
+// GET /ai/list-models is excluded (diagnostic, no API cost).
+const AI_RATE_LIMIT = 20;          // max requests per window
+const AI_RATE_WINDOW_MS = 3600000; // 1 hour in milliseconds
+
+async function aiRateLimitMiddleware(c: Context, next: Next) {
+  // Only rate-limit POST requests (the ones that call Gemini)
+  if (c.req.method !== "POST") return next();
+
+  try {
+    // Extract user ID from JWT (lightweight decode, no DB call)
+    const auth = await authenticate(c);
+    if (auth instanceof Response) return auth;
+    const userId = auth.user.id;
+
+    // Check rate limit via distributed RPC
+    const adminDb = getAdminClient();
+    const { data, error } = await adminDb.rpc("check_rate_limit", {
+      p_key: `ai:${userId}`,
+      p_max_requests: AI_RATE_LIMIT,
+      p_window_ms: AI_RATE_WINDOW_MS,
+    });
+
+    if (error) {
+      // If rate limit check fails, log but don't block
+      console.warn(`[AI RateLimit] RPC failed: ${error.message}. Allowing request.`);
+      return next();
+    }
+
+    if (data && !data.allowed) {
+      return err(
+        c,
+        `AI rate limit exceeded: max ${AI_RATE_LIMIT} requests per hour. ` +
+        `Try again in ${Math.ceil((data.retry_after_ms || 0) / 1000)}s.`,
+        429,
+      );
+    }
+  } catch (e) {
+    // Graceful degradation: if anything fails, allow the request
+    console.warn(`[AI RateLimit] Exception: ${(e as Error).message}. Allowing request.`);
+  }
+
+  return next();
+}
+
+// Apply rate limit middleware to all AI routes
+aiRoutes.use(`${PREFIX}/ai/*`, aiRateLimitMiddleware);
+
+// Mount sub-modules
 aiRoutes.route("/", aiGenerateRoutes);
 aiRoutes.route("/", aiIngestRoutes);
 aiRoutes.route("/", aiChatRoutes);
