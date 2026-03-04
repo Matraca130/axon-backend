@@ -1,7 +1,10 @@
 /**
- * Tests for rate-limit.ts — In-memory (fallback) rate limiter.
+ * Tests for rate-limit.ts — In-memory (fallback) rate limiter + key extraction.
  *
- * These tests cover the local/in-memory rate limiting logic.
+ * These tests cover:
+ *   1. Local/in-memory rate limiting logic (checkRateLimitLocal)
+ *   2. Key extraction from JWT tokens (extractKey) — C-1 FIX
+ *
  * The distributed PostgreSQL-backed rate limiter is tested via
  * integration tests against a running Supabase instance.
  *
@@ -10,6 +13,7 @@
 
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  extractKey,
   checkRateLimitLocal,
   cleanupExpired,
   rateLimitMap,
@@ -17,10 +21,111 @@ import {
   RATE_LIMIT_WINDOW_MS,
 } from "../rate-limit.ts";
 
-// Helper: reset state between tests
+// ─── Helpers ──────────────────────────────────────────────────────
+
 function resetRateLimit() {
   rateLimitMap.clear();
 }
+
+/**
+ * Build a fake JWT with the given payload claims.
+ * NOT cryptographically valid — only used for extractKey() tests.
+ */
+function buildFakeJwt(
+  payload: Record<string, unknown>,
+  signatureSuffix = "defaultSig",
+): string {
+  const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  const body = btoa(JSON.stringify(payload))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  // Fake signature (not cryptographically valid, just unique per call)
+  const sig = btoa(signatureSuffix + "_padding_to_make_it_long_enough")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  return `${header}.${body}.${sig}`;
+}
+
+// ═════════════════════════════════════════════════════════════════
+// C-1 FIX: extractKey() tests
+// ═════════════════════════════════════════════════════════════════
+
+Deno.test("extractKey: valid JWT with sub → uid:<uuid>", () => {
+  const token = buildFakeJwt({ sub: "550e8400-e29b-41d4-a716-446655440000" });
+  const key = extractKey(token);
+  assertEquals(key, "uid:550e8400-e29b-41d4-a716-446655440000");
+});
+
+Deno.test("extractKey: same user, different signatures → same key", () => {
+  const userId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const token1 = buildFakeJwt({ sub: userId }, "signature_v1");
+  const token2 = buildFakeJwt({ sub: userId }, "signature_v2");
+  assertEquals(extractKey(token1), extractKey(token2));
+  assertEquals(extractKey(token1), `uid:${userId}`);
+});
+
+Deno.test("extractKey: different users → different keys", () => {
+  const token1 = buildFakeJwt({ sub: "user-aaa" }, "same-sig");
+  const token2 = buildFakeJwt({ sub: "user-bbb" }, "same-sig");
+  const key1 = extractKey(token1);
+  const key2 = extractKey(token2);
+  assertEquals(key1.startsWith("uid:"), true);
+  assertEquals(key2.startsWith("uid:"), true);
+  assertEquals(key1 !== key2, true);
+});
+
+Deno.test("extractKey: JWT without sub → fallback to sig:", () => {
+  const token = buildFakeJwt({ email: "no-sub@test.com" });
+  const key = extractKey(token);
+  assertEquals(key.startsWith("sig:"), true);
+});
+
+Deno.test("extractKey: JWT with empty sub → fallback to sig:", () => {
+  const token = buildFakeJwt({ sub: "" });
+  const key = extractKey(token);
+  assertEquals(key.startsWith("sig:"), true);
+});
+
+Deno.test("extractKey: completely malformed token (no dots) → raw:", () => {
+  const key = extractKey("this-is-not-a-jwt");
+  assertEquals(key.startsWith("raw:"), true);
+});
+
+Deno.test("extractKey: token with dots but invalid base64 → sig:", () => {
+  const key = extractKey("header.!!!invalid-base64!!!.signature-part");
+  assertEquals(key.startsWith("sig:"), true);
+});
+
+Deno.test("extractKey: empty token → raw:", () => {
+  const key = extractKey("");
+  assertEquals(key.startsWith("raw:"), true);
+});
+
+Deno.test("extractKey: two tokens with same HS256 header get DIFFERENT keys", () => {
+  // This is the actual bug scenario: both tokens share the same header
+  // but have different subs → should produce different keys
+  const token1 = buildFakeJwt({ sub: "user-111" });
+  const token2 = buildFakeJwt({ sub: "user-222" });
+
+  // Verify both tokens DO share the same first 32 chars (proving the old bug)
+  assertEquals(token1.substring(0, 32), token2.substring(0, 32));
+
+  // But extractKey produces DIFFERENT keys (the fix)
+  const key1 = extractKey(token1);
+  const key2 = extractKey(token2);
+  assertEquals(key1 !== key2, true);
+  assertEquals(key1, "uid:user-111");
+  assertEquals(key2, "uid:user-222");
+});
+
+// ═════════════════════════════════════════════════════════════════
+// Original tests: checkRateLimitLocal (unchanged)
+// ═════════════════════════════════════════════════════════════════
 
 Deno.test("checkRateLimitLocal: first request creates new window", () => {
   resetRateLimit();
