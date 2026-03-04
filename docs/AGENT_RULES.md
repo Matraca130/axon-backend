@@ -36,12 +36,12 @@
 ### Provider Hierarchy (App.tsx)
 
 ```
-<AuthProvider>        ← ALWAYS outermost
-  <RouterProvider />  ← ALWAYS inside AuthProvider
+<AuthProvider>        <- ALWAYS outermost
+  <RouterProvider />  <- ALWAYS inside AuthProvider
 </AuthProvider>
 ```
 
-If ANY component ends up outside `AuthProvider` → **CRASH**: `"useAuth must be used within an AuthProvider"`
+If ANY component ends up outside `AuthProvider` -> **CRASH**: `"useAuth must be used within an AuthProvider"`
 
 ### REST Route Convention (CRITICAL)
 
@@ -72,14 +72,15 @@ ONLY modify files the prompt explicitly mentions. Don't "improve" other files.
 
 1. **Read `docs/AGENT_INDEX.md`** — fast lookup table for "I need to do X, where do I go?"
 2. **Read `docs/BACKEND_MAP.md`** — full reference with every endpoint, migration, and security fix
-3. **Check `docs/BACKEND_AUDIT.md`** — historical audit with known gaps and RLS notes
+3. **Read `docs/AI_PIPELINE.md`** — AI/RAG architecture, models, security model, payloads
+4. **Check `docs/BACKEND_AUDIT.md`** — historical audit with known gaps and RLS notes
 
 ### How to Add a New CRUD Endpoint
 
 1. Pick the right file based on domain:
-   - Content hierarchy → `routes/content/crud.ts`
-   - Study tables → `routes/study/sessions.ts`
-   - Student instruments → `routes-student.tsx`
+   - Content hierarchy -> `routes/content/crud.ts`
+   - Study tables -> `routes/study/sessions.ts`
+   - Student instruments -> `routes-student.tsx`
 2. Add a `registerCrud()` call with the table config
 3. That's it — the factory generates LIST, GET, POST, PUT, DELETE automatically
 
@@ -99,6 +100,15 @@ All routes are flat: `/things?parent_id=xxx`. Never `/parents/:id/things`.
 - Upload: `@mux/upchunk` direct to Mux
 - Playback: `@mux/mux-player-react` with signed JWTs
 - Anti-patterns: `<input placeholder="URL del video">`, `platform: "youtube"`, `detectPlatform()`
+
+### AI / RAG Rules
+
+- **Model constant:** NEVER hardcode model names in route files. Import `GENERATE_MODEL` from `gemini.ts` (single source of truth, fix D-18)
+- **Security order (PF-05):** ALWAYS run a DB query BEFORE calling Gemini API. `authenticate()` only base64-decodes the JWT — PostgREST validates the signature cryptographically on the first DB query. Calling Gemini before DB = forged JWTs can consume API credits
+- **Embedding dimensions:** DB column is `vector(768)`. If you change the embedding model, you MUST also alter the DB column and re-ingest all chunks
+- **RAG Chat field name:** The field is `message`, NOT `question`. Using `question` will return a 400 error
+- **Generate requires `action`:** Always include `action: "flashcard"` or `action: "quiz_question"` plus `summary_id`
+- **Admin client for embeddings:** Ingest uses `getAdminClient()` to bypass RLS for embedding UPDATEs (fix PF-09)
 
 ### Production URL
 
@@ -123,3 +133,6 @@ Run this checklist before every response:
 | 5 | Did I add YouTube/Vimeo video code? | REMOVE, use Mux |
 | 6 | Did I use a Figma Make URL in production code? | Fix to production URL |
 | 7 | Did I mount new routes in index.ts? | Verify |
+| 8 | Did I hardcode a model name instead of using `GENERATE_MODEL`? | Import from `gemini.ts` |
+| 9 | Did I call Gemini API before validating JWT via DB query? | Reorder: DB first, then Gemini |
+| 10 | Did I use `question` instead of `message` for RAG Chat? | Fix to `message` |

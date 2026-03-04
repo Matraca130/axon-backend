@@ -1,78 +1,97 @@
 # Axon Backend Map
 
 > Single source of truth for navigating the `axon-backend` repository.
-> Last updated: 2026-03-03 (post organize-backend-v3 merge)
+> Last updated: 2026-03-04 (post AI/RAG documentation)
 
 ## Repository Structure
 
 ```
 axon-backend/
-├── .github/workflows/deploy.yml       ← GitHub Actions: deploy to Supabase on push to main
-├── docs/
-│   ├── AGENT_INDEX.md                  ← Quick lookup for agents (start here)
-│   ├── AGENT_RULES.md                  ← Critical rules for AI agents
-│   ├── BACKEND_AUDIT.md                ← Historical audit (Feb 2026)
-│   ├── BACKEND_MAP.md                  ← THIS FILE
-│   └── figma-make/                     ← Figma Make context docs (6 files)
-├── supabase/
-│   ├── migrations/                     ← All SQL migrations (13 files)
-│   └── functions/server/               ← Edge Function (Hono + Deno)
-│       ├── index.ts                    ← ENTRYPOINT: mounts all routes + middleware
-│       ├── db.ts                       ← Supabase clients, auth, response helpers
-│       ├── crud-factory.ts             ← Generic CRUD route generator
-│       ├── validate.ts                 ← Type guards + declarative field validator
-│       ├── rate-limit.ts               ← In-memory sliding window rate limiter
-│       ├── timing-safe.ts              ← Constant-time string comparison
-│       │
-│       ├── routes/                     ← SPLIT MODULES (6 domains)
-│       │   ├── content/                ← Content hierarchy (6 files)
-│       │   │   ├── index.ts            ← Module combiner
-│       │   │   ├── crud.ts             ← 9 registerCrud (courses→subtopics)
-│       │   │   ├── keyword-connections.ts  ← Manual CRUD
-│       │   │   ├── prof-notes.ts       ← kw_prof_notes upsert
-│       │   │   ├── reorder.ts          ← Bulk reorder (M-3 RPC + fallback)
-│       │   │   └── content-tree.ts     ← Nested hierarchy GET
-│       │   ├── study/                  ← Study system (5 files)
-│       │   │   ├── index.ts            ← Module combiner
-│       │   │   ├── sessions.ts         ← 3 registerCrud (sessions, plans, tasks)
-│       │   │   ├── reviews.ts          ← Reviews + quiz-attempts (O-3 ownership)
-│       │   │   ├── progress.ts         ← topic-progress, topics-overview, reading-states, daily-activities, student-stats
-│       │   │   └── spaced-rep.ts       ← FSRS + BKT states
-│       │   ├── members/                ← Institutions + memberships (4 files)
-│       │   │   ├── index.ts
-│       │   │   ├── institutions.ts
-│       │   │   ├── memberships.ts
-│       │   │   └── admin-scopes.ts
-│       │   ├── mux/                    ← Mux video integration (5 files)
-│       │   │   ├── index.ts
-│       │   │   ├── api.ts              ← create-upload, playback-token, asset
-│       │   │   ├── helpers.ts          ← Mux client, JWT signing
-│       │   │   ├── tracking.ts         ← track-view, video-stats
-│       │   │   └── webhook.ts          ← /webhooks/mux
-│       │   ├── plans/                  ← Plans + AI + access control (5 files)
-│       │   │   ├── index.ts
-│       │   │   ├── crud.ts             ← 4 registerCrud (platform/institution plans, rules, subscriptions)
-│       │   │   ├── ai-generations.ts   ← AI generation tracking + usage-today
-│       │   │   ├── diagnostics.ts      ← Summary diagnostics
-│       │   │   └── access.ts           ← /content-access check
-│       │   └── search/                 ← Global search + trash (4 files)
-│       │       ├── index.ts
-│       │       ├── search.ts           ← GET /search (N-1: parallel queries)
-│       │       ├── trash-restore.ts    ← GET /trash, POST /restore/:table/:id
-│       │       └── helpers.ts          ← escapeLike, path resolution
-│       │
-│       ├── routes-auth.tsx             ← Auth & profiles (6KB)
-│       ├── routes-billing.tsx          ← Stripe integration (15KB) — pending split
-│       ├── routes-models.tsx           ← 3D models, pins, notes (2KB) — small, no split needed
-│       ├── routes-storage.tsx          ← File upload/download/delete (9KB)
-│       ├── routes-student.tsx          ← Student instruments & notes (6KB)
-│       ├── routes-study-queue.tsx      ← Study queue algorithm (15KB) — single complex function
-│       │
-│       └── tests/                      ← Deno-native tests (3 files)
-│           ├── rate_limit_test.ts
-│           ├── validate_test.ts
-│           └── timing_safe_test.ts
-└── README.md
+|-- .github/workflows/deploy.yml       <- GitHub Actions: deploy to Supabase on push to main
+|-- docs/
+|   |-- AGENT_INDEX.md                  <- Quick lookup for agents (start here)
+|   |-- AGENT_RULES.md                  <- Critical rules for AI agents
+|   |-- AI_PIPELINE.md                  <- AI/RAG architecture, models, security, payloads
+|   |-- BACKEND_AUDIT.md                <- Historical audit (Feb 2026, updated Mar 2026)
+|   |-- BACKEND_MAP.md                  <- THIS FILE
+|   +-- figma-make/                     <- Figma Make context docs (7 files)
+|       |-- 00-contexto-base.md
+|       |-- 01-area-profesor.md
+|       |-- 02-area-alumno.md
+|       |-- 03-area-admin.md
+|       |-- 04-foco-resumenes.md
+|       |-- 05-foco-estudio.md
+|       |-- 06-ai-rag.md                <- AI/RAG endpoints, payloads, pipeline
+|       +-- README.md
+|-- supabase/
+|   |-- migrations/                     <- All SQL migrations (13 files)
+|   +-- functions/server/               <- Edge Function (Hono + Deno)
+|       |-- index.ts                    <- ENTRYPOINT: mounts all routes + middleware
+|       |-- db.ts                       <- Supabase clients, auth, response helpers
+|       |-- crud-factory.ts             <- Generic CRUD route generator
+|       |-- validate.ts                 <- Type guards + declarative field validator
+|       |-- auth-helpers.ts             <- Role-based access control (requireInstitutionRole)
+|       |-- rate-limit.ts               <- In-memory sliding window rate limiter
+|       |-- timing-safe.ts              <- Constant-time string comparison
+|       |-- gemini.ts                   <- Gemini API helpers + GENERATE_MODEL constant
+|       |
+|       |-- routes/                     <- SPLIT MODULES (7 domains)
+|       |   |-- content/                <- Content hierarchy (6 files)
+|       |   |   |-- index.ts            <- Module combiner
+|       |   |   |-- crud.ts             <- 9 registerCrud (courses->subtopics)
+|       |   |   |-- keyword-connections.ts  <- Manual CRUD
+|       |   |   |-- prof-notes.ts       <- kw_prof_notes upsert
+|       |   |   |-- reorder.ts          <- Bulk reorder (M-3 RPC + fallback)
+|       |   |   +-- content-tree.ts     <- Nested hierarchy GET
+|       |   |-- study/                  <- Study system (5 files)
+|       |   |   |-- index.ts            <- Module combiner
+|       |   |   |-- sessions.ts         <- 3 registerCrud (sessions, plans, tasks)
+|       |   |   |-- reviews.ts          <- Reviews + quiz-attempts (O-3 ownership)
+|       |   |   |-- progress.ts         <- topic-progress, topics-overview, reading-states, daily-activities, student-stats
+|       |   |   +-- spaced-rep.ts       <- FSRS + BKT states
+|       |   |-- ai/                     <- AI / RAG module (5 files)
+|       |   |   |-- index.ts            <- AI module combiner
+|       |   |   |-- generate.ts         <- POST /ai/generate (flashcards + quiz)
+|       |   |   |-- ingest.ts           <- POST /ai/ingest-embeddings (batch embeddings)
+|       |   |   |-- chat.ts             <- POST /ai/rag-chat (semantic search + Gemini)
+|       |   |   +-- list-models.ts      <- GET /ai/list-models (diagnostic)
+|       |   |-- members/                <- Institutions + memberships (4 files)
+|       |   |   |-- index.ts
+|       |   |   |-- institutions.ts
+|       |   |   |-- memberships.ts
+|       |   |   +-- admin-scopes.ts
+|       |   |-- mux/                    <- Mux video integration (5 files)
+|       |   |   |-- index.ts
+|       |   |   |-- api.ts              <- create-upload, playback-token, asset
+|       |   |   |-- helpers.ts          <- Mux client, JWT signing
+|       |   |   |-- tracking.ts         <- track-view, video-stats
+|       |   |   +-- webhook.ts          <- /webhooks/mux
+|       |   |-- plans/                  <- Plans + AI + access control (5 files)
+|       |   |   |-- index.ts
+|       |   |   |-- crud.ts             <- 4 registerCrud
+|       |   |   |-- ai-generations.ts   <- AI generation tracking + usage-today
+|       |   |   |-- diagnostics.ts      <- Summary diagnostics
+|       |   |   +-- access.ts           <- /content-access check
+|       |   |-- search/                 <- Global search + trash (4 files)
+|       |   |   |-- index.ts
+|       |   |   |-- search.ts
+|       |   |   |-- trash-restore.ts
+|       |   |   +-- helpers.ts
+|       |   +-- settings/               <- Institution settings
+|       |       +-- index.ts
+|       |
+|       |-- routes-auth.tsx             <- Auth & profiles (6KB)
+|       |-- routes-billing.tsx          <- Stripe integration (15KB)
+|       |-- routes-models.tsx           <- 3D models, pins, notes (2KB)
+|       |-- routes-storage.tsx          <- File upload/download/delete (9KB)
+|       |-- routes-student.tsx          <- Student instruments & notes (6KB)
+|       |-- routes-study-queue.tsx       <- Study queue algorithm (15KB)
+|       |
+|       +-- tests/                      <- Deno-native tests (3 files)
+|           |-- rate_limit_test.ts
+|           |-- validate_test.ts
+|           +-- timing_safe_test.ts
++-- README.md
 ```
 
 ---
@@ -87,6 +106,8 @@ import { memberRoutes }  from "./routes/members/index.ts";
 import { muxRoutes }     from "./routes/mux/index.ts";
 import { planRoutes }    from "./routes/plans/index.ts";
 import { searchRoutes }  from "./routes/search/index.ts";
+import { settingsRoutes } from "./routes/settings/index.ts";
+import { aiRoutes }      from "./routes/ai/index.ts";
 
 // Flat route files (small enough or single-purpose)
 import { authRoutes }        from "./routes-auth.tsx";
@@ -125,6 +146,25 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 **Numeric ranges:** `inRange(v, min, max)`, `isNonNeg`, `isNonNegInt`, `isProbability`
 **Enum validator:** `isOneOf(v, values)`
 **Declarative batch:** `validateFields(body, rules)`
+
+### `auth-helpers.ts` — Role-Based Access Control
+
+| Export | Description |
+|---|---|
+| `requireInstitutionRole(db, userId, instId, allowedRoles)` | Verifies user has one of the allowed roles in the institution |
+| `isDenied(result)` | Type guard: returns true if role check failed |
+| `ALL_ROLES` | All roles: owner, admin, professor, student |
+| `CONTENT_WRITE_ROLES` | Roles that can write content: owner, admin, professor |
+
+### `gemini.ts` — Gemini API Helpers
+
+| Export | Description |
+|---|---|
+| `GENERATE_MODEL` | Current generation model name (`"gemini-2.5-flash"`). Single source of truth |
+| `generateText(opts)` | Call Gemini for text/JSON generation. Includes timeout + retry |
+| `generateEmbedding(text, taskType)` | Generate 768-dim embedding vector. Includes timeout + retry |
+| `parseGeminiJson(text)` | Safely parse JSON from Gemini output (strips markdown fences) |
+| `getApiKey()` | Get GEMINI_API_KEY from Deno.env (throws if missing) |
 
 ### `rate-limit.ts` — 120 req/min sliding window
 ### `timing-safe.ts` — Constant-time comparison for webhook signatures
@@ -182,6 +222,17 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | GET | `/bkt-states?subtopic_id=` | spaced-rep.ts | List (capped 500) |
 | POST | `/bkt-states` | spaced-rep.ts | Upsert |
 
+### `routes/ai/` — AI / RAG Module (5 files)
+
+| Method | Path | File | Description |
+|---|---|---|---|
+| POST | `/ai/generate` | generate.ts | Generate flashcard or quiz question (adaptive, uses student profile + BKT) |
+| POST | `/ai/ingest-embeddings` | ingest.ts | Batch-generate embeddings for chunks without vectors |
+| POST | `/ai/rag-chat` | chat.ts | Semantic search (hybrid: pgvector + full-text) + Gemini response |
+| GET | `/ai/list-models` | list-models.ts | Diagnostic: list all available Gemini models for current API key |
+
+> Full documentation: [`docs/AI_PIPELINE.md`](AI_PIPELINE.md) and [`docs/figma-make/06-ai-rag.md`](figma-make/06-ai-rag.md)
+
 ### `routes/members/` — Institutions & Memberships (4 files)
 
 | File | Endpoints |
@@ -238,16 +289,16 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | `20260224_01` | EV-9 | Applied | Mux columns on videos table |
 | `20260224_02` | EV-9 | Applied | video_views table + indexes |
 | `20260227_01` | M-3 | Applied | bulk_reorder() DB function |
-| `20260227_02` | — | Applied | get_course_summary_ids() helper |
+| `20260227_02` | -- | Applied | get_course_summary_ids() helper |
 | `20260227_03` | N-7 | Applied | upsert_video_view() atomic function |
 | `20260227_04` | N-5 | PENDING | get_content_tree() RPC |
 | `20260227_05` | O-4 | PENDING | Trigram indexes for ILIKE search |
 | `20260227_06` | O-7 | PENDING | processed_webhook_events table |
-| `20260228_01` | — | Applied | Dashboard aggregation triggers + backfill |
-| `20260228_02` | — | Applied | summary_blocks table |
-| `20260228_03` | — | Applied | keyword_connections.relationship column |
-| `20260302_01` | — | PENDING | Composite/partial indexes for high-read tables |
-| `20260303_01` | — | Applied | summaries.estimated_study_minutes column |
+| `20260228_01` | -- | Applied | Dashboard aggregation triggers + backfill |
+| `20260228_02` | -- | Applied | summary_blocks table |
+| `20260228_03` | -- | Applied | keyword_connections.relationship column |
+| `20260302_01` | -- | PENDING | Composite/partial indexes for high-read tables |
+| `20260303_01` | -- | Applied | summaries.estimated_study_minutes column |
 
 ---
 
@@ -263,8 +314,8 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | N-7 | Atomic upsert_video_view (no race condition) | routes/mux/tracking.ts |
 | N-8 | escapeLike() sanitizes SQL wildcards | routes/search/helpers.ts |
 | N-10 | Timing-safe Stripe signature verification | routes-billing.tsx |
-| NEW | topic-progress unified endpoint (N+1→1) | routes/study/progress.ts |
-| NEW | topics-overview batch endpoint (N+1→1) | routes/study/progress.ts |
+| NEW | topic-progress unified endpoint (N+1->1) | routes/study/progress.ts |
+| NEW | topics-overview batch endpoint (N+1->1) | routes/study/progress.ts |
 
 ### O-series (Security/Safety)
 | Code | Fix | File |
@@ -289,6 +340,25 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | P-7 | Signed URL batch capped at 100 paths | routes-storage.tsx |
 | P-8 | usage-today uses proper tomorrow boundary | routes/plans/ai-generations.ts |
 
+### AI-series (AI/RAG fixes)
+| Code | Fix | File |
+|---|---|---|
+| PF-01 | `memberships` table name fix (was `institution_members`) | routes/ai/chat.ts |
+| PF-02 | Ingest requires `institution_id` + role check | routes/ai/ingest.ts |
+| PF-05 | DB queries before Gemini calls (JWT validation security) | routes/ai/*.ts |
+| PF-09 | Ingest uses admin client for embedding UPDATE (bypass RLS) | routes/ai/ingest.ts |
+| BUG-1 | `created_by: user.id` in AI-generated inserts | routes/ai/generate.ts |
+| BUG-3 | Institution scoping via `resolve_parent_institution` | routes/ai/generate.ts |
+| BUG-4 | `keyword_id` fallback from summary's first keyword | routes/ai/generate.ts |
+| LA-01 | Scoped fallback query in ingest (cross-tenant prevention) | routes/ai/ingest.ts |
+| LA-02 | AbortController timeout on Gemini fetch (15s/10s) | gemini.ts |
+| LA-03 | Message length validation (2000 chars) + history truncation (6 entries) | routes/ai/chat.ts |
+| LA-06 | Retry with exponential backoff for 429/503 | gemini.ts |
+| LA-07 | `truncateAtWord()` respects word boundaries | routes/ai/generate.ts |
+| D-16 | Embedding model -> `gemini-embedding-001` + `outputDimensionality: 768` | gemini.ts |
+| D-17 | Generation model -> `gemini-2.5-flash` (quota bucket separation) | gemini.ts |
+| D-18 | `_meta.model` uses `GENERATE_MODEL` constant (was hardcoded) | routes/ai/generate.ts |
+
 ---
 
 ## Environment Variables
@@ -298,6 +368,7 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | `SUPABASE_URL` | Yes | db.ts |
 | `SUPABASE_ANON_KEY` | Yes | db.ts |
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes | db.ts |
+| `GEMINI_API_KEY` | For AI | gemini.ts |
 | `STRIPE_SECRET_KEY` | For billing | routes-billing.tsx |
 | `STRIPE_WEBHOOK_SECRET` | For billing | routes-billing.tsx |
 | `MUX_TOKEN_ID` | For video | routes/mux/helpers.ts |

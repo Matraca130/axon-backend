@@ -19,8 +19,10 @@ This directory contains **copy-paste blocks** for Figma Make sessions. Each file
 | `03-area-admin.md` | Admin/Owner | 41 | Institutions, memberships, plans, subscriptions, AI logs |
 | `04-foco-resumenes.md` | Focus: Summaries | 70 | Summary viewer/editor with ALL children: chunks, keywords, subtopics, flashcards, quizzes, videos, notes |
 | `05-foco-estudio.md` | Focus: Study | 30 | Study sessions, FSRS, BKT, daily activities, stats |
+| `06-ai-rag.md` | AI / RAG | 4 | AI generation (flashcards, quiz), RAG chat, embeddings ingestion, model diagnostics |
 
 > **Note:** Blocks 01-05 already include the context from block 00, so you don't need to paste both. Just paste the one you need.
+> **Note:** Block 06 (AI/RAG) is standalone — paste `00-contexto-base.md` first, then `06-ai-rag.md`.
 
 ## Important behaviors documented in Context block
 

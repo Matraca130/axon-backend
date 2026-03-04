@@ -2,102 +2,115 @@
 
 **Data da Auditoria:** 23 de Fevereiro de 2026
 **Autor:** Manus AI
+**Ultima atualizacao:** 4 de Marco de 2026
 
-## 1. Introdução
+## 1. Introducao
 
-Este documento consolida todas as descobertas da auditoria realizada no backend do projeto Axon (repositório `Matraca130/axon-backend`) e no banco de dados Supabase associado. O objetivo é fornecer uma fonte única e definitiva sobre o estado real da arquitetura, schemas, rotas e fluxos de dados, além de identificar gaps críticos entre a implementação atual e os requisitos dos Eventos de Verificação (EVs).
+Este documento consolida todas as descobertas da auditoria realizada no backend do projeto Axon (repositorio `Matraca130/axon-backend`) e no banco de dados Supabase associado. O objetivo eh fornecer uma fonte unica e definitiva sobre o estado real da arquitetura, schemas, rotas e fluxos de dados, alem de identificar gaps criticos entre a implementacao atual e os requisitos dos Eventos de Verificacao (EVs).
 
-## 2. Arquitetura e Padrões
+## 2. Arquitetura e Padroes
 
-O backend é uma aplicação **Hono** rodando em **Supabase Edge Functions**, servindo como uma API REST para o frontend. A arquitetura é modular e segue padrões consistentes.
+O backend eh uma aplicacao **Hono** rodando em **Supabase Edge Functions**, servindo como uma API REST para o frontend. A arquitetura eh modular e segue padroes consistentes.
 
-- **Ponto de Entrada:** `supabase/functions/server/index.tsx` monta todos os módulos de rotas.
-- **Fábrica de CRUD:** O arquivo `crud-factory.ts` é o coração do backend. Ele gera dinamicamente rotas `GET` (lista e por ID), `POST`, `PUT` e `DELETE` para as tabelas do banco de dados, o que reduz drasticamente o código repetitivo.
-- **Módulos de Rotas:** A lógica é dividida em 7 arquivos de rotas temáticos (ex: `routes-content.tsx`, `routes-student.tsx`, `routes-study.tsx`), cada um responsável por um conjunto de endpoints.
-- **Autenticação:** Centralizada no arquivo `db.ts`.
+- **Ponto de Entrada:** `supabase/functions/server/index.ts` monta todos os modulos de rotas.
+- **Fabrica de CRUD:** O arquivo `crud-factory.ts` eh o coracao do backend. Ele gera dinamicamente rotas `GET` (lista e por ID), `POST`, `PUT` e `DELETE` para as tabelas do banco de dados, o que reduz drasticamente o codigo repetitivo.
+- **Modulos de Rotas:** A logica eh dividida em modulos tematicos em `routes/` (split) e arquivos flat `routes-*.tsx` (small domains), cada um responsavel por um conjunto de endpoints.
+- **Autenticacao:** Centralizada no arquivo `db.ts`.
 
-## 3. Autenticação: O Mecanismo de "Duplo Token"
+## 3. Autenticacao: O Mecanismo de "Duplo Token"
 
-O sistema de autenticação é robusto e seguro, utilizando uma convenção de dois tokens em headers diferentes:
+O sistema de autenticacao eh robusto e seguro, utilizando uma convencao de dois tokens em headers diferentes:
 
-1.  **`Authorization: Bearer <ANON_KEY>`**: Este header é **sempre** enviado e contém a chave anônima pública da Supabase. Sua função é unicamente para passar pela gateway da API da Supabase e permitir a execução da Edge Function.
+1.  **`Authorization: Bearer <ANON_KEY>`**: Este header eh **sempre** enviado e contem a chave anonima publica da Supabase. Sua funcao eh unicamente para passar pela gateway da API da Supabase e permitir a execucao da Edge Function.
 
-2.  **`X-Access-Token: <USER_JWT>`**: Quando um usuário está logado, seu JSON Web Token (obtido via `supabase.auth`) é enviado neste header. É este token que o backend Hono utiliza para identificar o usuário e aplicar as políticas de RLS (Row-Level Security) no banco de dados.
+2.  **`X-Access-Token: <USER_JWT>`**: Quando um usuario esta logado, seu JSON Web Token (obtido via `supabase.auth`) eh enviado neste header. Eh este token que o backend Hono utiliza para identificar o usuario e aplicar as politicas de RLS (Row-Level Security) no banco de dados.
 
-Este padrão garante que as chamadas à API sejam autenticadas tanto na camada de infraestrutura da Supabase quanto na camada de aplicação.
+Este padrao garante que as chamadas a API sejam autenticadas tanto na camada de infraestrutura da Supabase quanto na camada de aplicacao.
 
-## 4. Análise de Schemas e Rotas
+## 4. Analise de Schemas e Rotas
 
-A seguir, o detalhamento das tabelas e rotas mais críticas analisadas.
+A seguir, o detalhamento das tabelas e rotas mais criticas analisadas.
 
-### 4.1. Usuários e Permissões (`profiles` e `memberships`)
+### 4.1. Usuarios e Permissoes (`profiles` e `memberships`)
 
-- **`profiles`**: Tabela central que armazena dados básicos do usuário (nome, email, avatar). O campo `platform_role` distingue `user` de `platform_admin`.
-- **`memberships`**: Tabela de junção que define o papel de um usuário em uma instituição. É aqui que se define se um usuário é `owner`, `admin`, `professor` ou `student`.
-- **`admin_scopes`**: Tabela que define escopos granulares para administradores e professores (ex: acesso a um curso específico).
+- **`profiles`**: Tabela central que armazena dados basicos do usuario (nome, email, avatar). O campo `platform_role` distingue `user` de `platform_admin`.
+- **`memberships`**: Tabela de juncao que define o papel de um usuario em uma instituicao. Eh aqui que se define se um usuario eh `owner`, `admin`, `professor` ou `student`.
+- **`admin_scopes`**: Tabela que define escopos granulares para administradores e professores (ex: acesso a um curso especifico).
 
-### 4.2. Conteúdo e Instrumentos de Avaliação
+### 4.2. Conteudo e Instrumentos de Avaliacao
 
-| Tabela | Rota CRUD | `createFields` (Campos Aceitos no POST) | Gaps Notáveis |
+| Tabela | Rota CRUD | `createFields` (Campos Aceitos no POST) | Gaps Notaveis |
 | :--- | :--- | :--- | :--- |
-| `flashcards` | ✅ `/flashcards` | `keyword_id`, `front`, `back`, `source` | **`subtopic_id` ausente** |
-| `quiz_questions` | ✅ `/quiz-questions` | `keyword_id`, `question_type`, `question`, `options`, `correct_answer`, `explanation`, `difficulty`, `source` | **`subtopic_id` e `quiz_id` ausentes** |
-| `quizzes` | ❌ **NÃO EXISTE** | N/A | Tabela existe no DB, mas sem rota CRUD. |
+| `flashcards` | OK `/flashcards` | `keyword_id`, `front`, `back`, `source`, `subtopic_id` | Corrigido (GAP 1) |
+| `quiz_questions` | OK `/quiz-questions` | `keyword_id`, `question_type`, `question`, `options`, `correct_answer`, `explanation`, `difficulty`, `source`, `subtopic_id`, `quiz_id` | Corrigido (GAP 1) |
+| `quizzes` | OK `/quizzes` | Registrada via crud-factory | Corrigido (GAP 2) |
 
 ### 4.3. Fluxo de Estudo e Algoritmos
 
-- **`study_plans` / `study_plan_tasks`**: Possuem rotas CRUD completas e estão **100% integrados** com a `ScheduleView` do frontend.
-- **`reviews`**: Tabela de log central. **Não possui** a coluna `response_time_ms`. Schema real: `id`, `session_id`, `item_id`, `instrument_type`, `grade`, `created_at`.
-- **`bkt_states`**: Tabela para o algoritmo Bayesian Knowledge Tracing. Possui rotas `GET` e `POST` manuais. Está corretamente vinculada a `student_id` e `subtopic_id`.
-- **`fsrs_states`**: Tabela para o algoritmo de Spaced Repetition (FSRS). Possui rotas `GET` e `POST` manuais. Está corretamente vinculada a `student_id` e `flashcard_id`.
+- **`study_plans` / `study_plan_tasks`**: Possuem rotas CRUD completas e estao **100% integrados** com a `ScheduleView` do frontend.
+- **`reviews`**: Tabela de log central. **Nao possui** a coluna `response_time_ms`. Schema real: `id`, `session_id`, `item_id`, `instrument_type`, `grade`, `created_at`.
+- **`bkt_states`**: Tabela para o algoritmo Bayesian Knowledge Tracing. Possui rotas `GET` e `POST` manuais. Esta corretamente vinculada a `student_id` e `subtopic_id`.
+- **`fsrs_states`**: Tabela para o algoritmo de Spaced Repetition (FSRS). Possui rotas `GET` e `POST` manuais. Esta corretamente vinculada a `student_id` e `flashcard_id`.
 
-### 4.4. Rotas de Inteligência Artificial (IA)
+### 4.4. Rotas de Inteligencia Artificial (IA)
 
-Há uma divergência crítica entre o backend real e o de prototipagem:
+**Status: IMPLEMENTADO (Marco 2026)**
 
-- **Backend Real (`axon-backend`):** As rotas existentes (`/ai-generations`, `/summary-diagnostics`) são apenas para **auditoria e log**. Elas registram que uma geração de IA ocorreu, mas não realizam a geração em si.
-- **Backend de Prototipagem (`sseki-frontend`):** O frontend contém seu próprio mini-backend (`/supabase/functions/server/gemini.tsx`) que implementa as rotas de geração (`/ai/chat`, `/ai/flashcards`, etc.), provavelmente chamando um serviço como o Gemini diretamente.
+O modulo AI foi migrado do frontend para o backend principal em `routes/ai/` com 4 endpoints:
 
-## 5. Gaps Críticos e Inconsistências (Status: CORRIGIDOS)
+| Endpoint | Metodo | Funcao |
+|----------|--------|--------|
+| `/ai/generate` | POST | Gera flashcards/quiz questions adaptativos via Gemini |
+| `/ai/rag-chat` | POST | Chat com busca semantica hibrida (pgvector + full-text) |
+| `/ai/ingest-embeddings` | POST | Gera embeddings batch para chunks |
+| `/ai/list-models` | GET | Diagnostico: lista modelos disponiveis |
 
-**Data da Correção:** 23 de Fevereiro de 2026
-**Commit da Correção:** `b5fc7f5`
+Modelos: `gemini-2.5-flash` (geracao), `gemini-embedding-001` (embeddings, 768 dims).
+Ver `docs/AI_PIPELINE.md` para detalhes completos.
 
-Os 3 gaps identificados foram corrigidos. A seguir, o resumo do que foi feito:
+As rotas de **auditoria** (`/ai-generations`, `/summary-diagnostics` em `routes/plans/`) continuam separadas — elas registram logs de uso de IA, nao realizam geracao.
 
-### ✅ GAP 1 CORRIGIDO: `subtopic_id` e `quiz_id` Ignorados pela API
+## 5. Gaps Criticos e Inconsistencias
 
-- **Correção Aplicada:** `subtopic_id` e `quiz_id` foram adicionados aos `createFields`, `updateFields` e `optionalFilters` de `flashcards` e `quiz_questions` no arquivo `routes-student.tsx`.
-- **Impacto:** O EV-5 (BKT) e o agrupamento de quizzes agora são possíveis via API.
+### OK GAP 1 CORRIGIDO: `subtopic_id` e `quiz_id` Ignorados pela API
 
-### ✅ GAP 2 CORRIGIDO: Tabela `quizzes` Inacessível via API
+- **Correcao Aplicada:** `subtopic_id` e `quiz_id` foram adicionados aos `createFields`, `updateFields` e `optionalFilters` de `flashcards` e `quiz_questions` no arquivo `routes-student.tsx`.
+- **Commit:** `b5fc7f5`
 
-- **Correção Aplicada:** Uma nova rota CRUD para `/quizzes` foi registrada em `routes-student.tsx` usando a `crud-factory`.
-- **Impacto:** O fluxo completo de criar um quiz e adicionar perguntas a ele (EV-3) está desbloqueado.
+### OK GAP 2 CORRIGIDO: Tabela `quizzes` Inacessivel via API
 
-### 🔴 GAP 3 PENDENTE: Rotas de Geração de IA Descentralizadas
+- **Correcao Aplicada:** Uma nova rota CRUD para `/quizzes` foi registrada em `routes-student.tsx` usando a `crud-factory`.
+- **Commit:** `b5fc7f5`
 
-- **Problema:** A lógica de geração de conteúdo por IA (chat, flashcards, etc.) não reside no backend principal, mas sim em um backend de prototipagem dentro do próprio repositório do frontend.
-- **Impacto:** O EV-6 (IA) não pode ser implementado de forma escalável e segura. A arquitetura atual cria uma dependência indesejada e dificulta a gestão de chaves de API e o monitoramento.
-- **Correção:** Migrar a lógica de `gemini.tsx` (do `sseki-frontend`) para um novo módulo de rotas (ex: `routes-ai.tsx`) dentro do backend principal (`axon-backend`).
+### OK GAP 3 CORRIGIDO: Rotas de Geracao de IA Migradas para Backend
 
-## 6. Dívida Técnica e Pontos de Atenção
+- **Correcao Aplicada:** A logica de geracao de conteudo por IA foi migrada do frontend (`sseki-frontend/gemini.tsx`) para o backend principal em `routes/ai/` (4 endpoints) + `gemini.ts` (helpers).
+- **Commits:** Serie de commits D-16 a D-18, PF-01 a PF-09, LA-01 a LA-07
+- **Pipeline completo:** Embeddings (ingest) -> Busca hibrida (RAG) -> Geracao adaptativa (Gemini)
+- **Seguranca:** DB query antes de Gemini call (PF-05), institution scoping (BUG-3), admin client para embeddings (PF-09)
+- **Detalhes:** Ver `docs/AI_PIPELINE.md`
+
+## 6. Divida Tecnica e Pontos de Atencao
 
 ### 6.1. URL da Edge Function
 
-- **URL Correta:** `https://xdnciktarvxyhkrokbng.supabase.co/functions/v1/server`
-- **Contexto:** O prefixo `/make-server-6569f786` é específico do ambiente de desenvolvimento do Figma Make e **não deve** ser usado para o backend principal. O nome da Edge Function é `server` e o `PREFIX` no código é vazio, resultando na URL correta acima.
+- **URL Correta (producao):** `https://xdnciktarvxyhkrokbng.supabase.co/functions/v1/server`
+- **URL Figma Make (prototipagem):** `https://xdnciktarvxyhkrokbng.supabase.co/functions/v1/make-server-6569f786`
+- **Contexto:** O prefixo `/make-server-*` eh especifico do ambiente de desenvolvimento do Figma Make e **nao deve** ser usado para o backend principal.
 
 ### 6.2. Row-Level Security (RLS)
 
-- **Estado Atual:** As tabelas `flashcards`, `quiz_questions` e `quizzes` têm RLS **desabilitado** (`relrowsecurity = false`).
-- **Afirmação Incorreta Corrigida:** A análise anterior sugeriu que `flashcards` e `quiz_questions` funcionavam por terem policies de RLS. A verificação direta no banco de dados provou que isso estava incorreto; elas funcionam porque RLS está desativado para elas.
-- **Dívida Técnica:** Com RLS desabilitado, a segurança depende exclusivamente da lógica do backend. Embora o `getUserClient` atual funcione, isso significa que um usuário mal-intencionado com a `anon_key` poderia, teoricamente, acessar ou modificar dados de outros usuários se encontrasse uma falha na lógica do backend. Para um ambiente de produção, o ideal é **habilitar RLS** em todas as tabelas e criar `policies` explícitas que restrinjam o acesso (ex: `USING (created_by = auth.uid())`).
+- **Estado Atual:** As tabelas `flashcards`, `quiz_questions` e `quizzes` tem RLS **desabilitado** (`relrowsecurity = false`).
+- **Divida Tecnica:** Com RLS desabilitado, a seguranca depende exclusivamente da logica do backend. Para um ambiente de producao, o ideal eh **habilitar RLS** em todas as tabelas e criar `policies` explicitas.
 
 ---
 
-## 7. Conclusão Geral
+## 7. Conclusao Geral
 
-O backend do Axon é bem estruturado, maduro e consistente, com um uso inteligente da fábrica de CRUD para acelerar o desenvolvimento. A maioria das funcionalidades está implementada e alinhada com as necessidades do frontend.
+O backend do Axon eh bem estruturado, maduro e consistente, com um uso inteligente da fabrica de CRUD para acelerar o desenvolvimento. Todos os 3 gaps criticos identificados na auditoria original foram corrigidos:
 
-Os gaps identificados, embora críticos para os EVs específicos, são cirúrgicos e relativamente simples de corrigir, exigindo apenas pequenas adições de configuração nos arquivos de rotas existentes. A correção desses pontos desbloqueará o progresso dos EVS e solidificará a arquitetura para futuras expansões.
+1. OK `subtopic_id` e `quiz_id` disponiveis na API
+2. OK Tabela `quizzes` acessivel via CRUD
+3. OK Rotas de geracao de IA migradas para o backend com pipeline RAG completo
+
+A principal divida tecnica restante eh habilitar RLS nas tabelas que ainda nao o tem.
