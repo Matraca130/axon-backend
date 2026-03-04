@@ -15,6 +15,9 @@
  *   BUG-3 FIX: explicit institution scoping via resolve_parent_institution()
  *   BUG-4 FIX: keyword_id fallback from summary's first keyword
  *   PF-05 FIX: Security comment about DB query before Gemini call
+ *
+ * Live-audit fixes applied:
+ *   LA-07 FIX: truncateAtWord() respects word boundaries
  */
 
 import { Hono } from "npm:hono";
@@ -31,6 +34,17 @@ import { generateText, parseGeminiJson } from "../../gemini.ts";
 export const aiGenerateRoutes = new Hono();
 
 const ACTIONS = ["quiz_question", "flashcard"] as const;
+
+// ── LA-07 FIX: Truncate respecting word boundaries ────────────
+function truncateAtWord(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  const truncated = text.substring(0, maxLen);
+  const lastSpace = truncated.lastIndexOf(" ");
+  // Only break at word boundary if it's not too far back (> 80% of maxLen)
+  return lastSpace > maxLen * 0.8
+    ? truncated.substring(0, lastSpace) + "..."
+    : truncated + "...";
+}
 
 aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -146,8 +160,11 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
   }
 
   // ── Build prompt ─────────────────────────────────────────
-  const contentSnippet = (summary.content_markdown || "")
-    .substring(0, 1500);
+  // LA-07 FIX: Use truncateAtWord instead of raw substring
+  const contentSnippet = truncateAtWord(
+    summary.content_markdown || "",
+    1500,
+  );
 
   const systemPrompt = `Eres un tutor educativo. Genera contenido adaptado al nivel del alumno.
 Responde SOLO con JSON valido, sin explicaciones adicionales.`;

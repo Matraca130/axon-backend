@@ -10,6 +10,9 @@
  * Rate limits (free tier):
  *   - gemini-2.0-flash: 15 RPM, 1M tokens/min, 1500 RPD
  *   - text-embedding-004: 1500 RPM, 100 RPD (batch)
+ *
+ * LA-02 FIX: Added AbortController timeout (15s generate, 10s embed)
+ * LA-06 FIX: Added retry with exponential backoff for 429/503
  */
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -18,6 +21,54 @@ function getApiKey(): string {
   const key = Deno.env.get("GEMINI_API_KEY");
   if (!key) throw new Error("[Axon Fatal] GEMINI_API_KEY not configured in secrets");
   return key;
+}
+
+// ─── LA-02 + LA-06 FIX: Fetch with timeout + retry ─────────────
+
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  maxRetries = 3,
+): Promise<Response> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...init, signal: controller.signal });
+      clearTimeout(timer);
+
+      // Retry on transient errors (429 rate-limited, 503 unavailable)
+      if ((res.status === 429 || res.status === 503) && attempt < maxRetries) {
+        const delay = Math.min(1000 * 2 ** attempt, 8000);
+        console.warn(
+          `[Gemini] ${res.status}, retry ${attempt + 1}/${maxRetries} in ${delay}ms`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+
+      return res;
+    } catch (e) {
+      clearTimeout(timer);
+      if (e instanceof DOMException && e.name === "AbortError") {
+        throw new Error(
+          `Gemini API timeout after ${timeoutMs}ms (attempt ${attempt + 1})`,
+        );
+      }
+      // Retry on network errors
+      if (attempt < maxRetries) {
+        const delay = Math.min(1000 * 2 ** attempt, 8000);
+        console.warn(
+          `[Gemini] Network error, retry ${attempt + 1}/${maxRetries} in ${delay}ms: ${(e as Error).message}`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw new Error("Gemini: max retries exceeded");
 }
 
 // ─── Text Generation ────────────────────────────────────────────
@@ -57,11 +108,16 @@ export async function generateText(
     };
   }
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  // LA-02 FIX: 15s timeout for text generation
+  const res = await fetchWithRetry(
+    url,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    15_000,
+  );
 
   if (!res.ok) {
     const errBody = await res.text();
@@ -93,15 +149,20 @@ export async function generateEmbedding(
   const model = "text-embedding-004";
   const url = `${GEMINI_BASE}/${model}:embedContent?key=${key}`;
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: `models/${model}`,
-      content: { parts: [{ text }] },
-      taskType,
-    }),
-  });
+  // LA-02 FIX: 10s timeout for embeddings
+  const res = await fetchWithRetry(
+    url,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: `models/${model}`,
+        content: { parts: [{ text }] },
+        taskType,
+      }),
+    },
+    10_000,
+  );
 
   if (!res.ok) {
     const errBody = await res.text();

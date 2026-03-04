@@ -10,6 +10,9 @@
  *   PF-02 FIX: Added institution scoping + requireInstitutionRole(CONTENT_WRITE_ROLES)
  *   PF-05 FIX: DB query happens before Gemini call (JWT validation)
  *   PF-09 FIX: Uses getAdminClient() for embedding UPDATE to bypass RLS
+ *
+ * Live-audit fixes applied:
+ *   LA-01 FIX: Fallback query now scopes by institution via get_course_summary_ids
  */
 
 import { Hono } from "npm:hono";
@@ -52,21 +55,10 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
   if (batchSize > 100) batchSize = 100;
 
   // ── Fetch chunks without embeddings, scoped to institution ───
-  // We need to join through the hierarchy to scope by institution.
-  // Using admin client for the read since we already verified role above.
   const adminDb = getAdminClient();
 
   // Build query: chunks → summaries → topics → sections → semesters → courses
   // Filter: institution_id match + no embedding yet
-  let rpcParams: Record<string, unknown> = {
-    p_institution_id: institutionId,
-    p_batch_size: batchSize,
-  };
-  if (summaryId && isUuid(summaryId)) {
-    rpcParams.p_summary_id = summaryId;
-  }
-
-  // Fetch chunks via a direct query (simpler than RPC for this use case)
   let query = adminDb
     .from("chunks")
     .select(`
@@ -91,18 +83,47 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
 
   const { data: chunks, error: fetchErr } = await query;
 
-  // Fallback: if nested join doesn't work, try simpler approach
+  // ── LA-01 FIX: Scoped fallback using get_course_summary_ids ──
+  // The nested !inner join can fail with deeply chained PostgREST relations.
+  // CRITICAL: The fallback MUST maintain institution scoping to prevent
+  // cross-tenant data leakage. We resolve valid summary_ids first, then
+  // filter chunks by those IDs.
   let chunksToProcess = chunks;
   if (fetchErr || !chunks) {
-    console.warn(`[Ingest] Nested join failed: ${fetchErr?.message}. Using simple query.`);
-    // Simpler fallback: just get chunks without embedding
+    console.warn(`[Ingest] Nested join failed: ${fetchErr?.message}. Using scoped fallback.`);
+
+    // Step 1: Get summary_ids belonging to this institution
+    const { data: summaryRows, error: rpcErr } = await adminDb.rpc(
+      "get_course_summary_ids",
+      { p_institution_id: institutionId },
+    );
+
+    if (rpcErr || !summaryRows || summaryRows.length === 0) {
+      return ok(c, {
+        processed: 0,
+        message: rpcErr
+          ? `Failed to resolve institution summaries: ${rpcErr.message}`
+          : "No summaries found for this institution",
+      });
+    }
+
+    const validSummaryIds = summaryRows.map(
+      (r: { summary_id: string }) => r.summary_id,
+    );
+
+    // Step 2: Fetch chunks scoped to those summary_ids
     let fallbackQuery = adminDb
       .from("chunks")
       .select("id, content, summary_id")
       .is("embedding", null)
+      .in("summary_id", validSummaryIds)
       .limit(batchSize);
 
     if (summaryId && isUuid(summaryId)) {
+      // Extra guard: verify the requested summary belongs to the institution
+      if (!validSummaryIds.includes(summaryId)) {
+        return err(c, "summary_id does not belong to this institution", 403);
+      }
       fallbackQuery = fallbackQuery.eq("summary_id", summaryId);
     }
 

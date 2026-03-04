@@ -2,7 +2,7 @@
  * routes/ai/chat.ts — RAG Chat with adaptive context
  *
  * POST /ai/rag-chat
- *   message: string (required)
+ *   message: string (required, max 2000 chars)
  *   summary_id: UUID (optional, scope search to one summary)
  *   history: Array<{role, content}> (optional, conversation history, max 6)
  *
@@ -16,6 +16,9 @@
  * Pre-flight fixes applied:
  *   PF-01 FIX: Changed 'institution_members' → 'memberships' + is_active filter
  *   PF-05 FIX: DB queries happen before Gemini calls (JWT validation)
+ *
+ * Live-audit fixes applied:
+ *   LA-03 FIX: Message length validation (max 2000 chars) + history truncation
  */
 
 import { Hono } from "npm:hono";
@@ -40,9 +43,22 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   if (!body?.message || typeof body.message !== "string")
     return err(c, "message is required (string)", 400);
 
-  const message = body.message as string;
+  // ── LA-03 FIX: Validate message length ──────────────────────
+  const message = (body.message as string).trim();
+  if (message.length === 0)
+    return err(c, "message cannot be empty", 400);
+  if (message.length > 2000)
+    return err(c, "message too long (max 2000 characters)", 400);
+
   const summaryId = isUuid(body.summary_id) ? (body.summary_id as string) : null;
-  const history = Array.isArray(body.history) ? body.history.slice(-6) : [];
+
+  // ── LA-03 FIX: Truncate each history entry to 500 chars ─────
+  const history = Array.isArray(body.history)
+    ? body.history.slice(-6).map((h: Record<string, string>) => ({
+        role: h.role,
+        content: typeof h.content === "string" ? h.content.slice(0, 500) : "",
+      }))
+    : [];
 
   // ── Resolve institution ──────────────────────────────────
   // ⚠️ PF-05: These DB queries validate the JWT cryptographically.
