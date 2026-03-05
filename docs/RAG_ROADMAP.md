@@ -5,7 +5,8 @@
 > `chunking-strategies.md`, `hybrid-retrieval.ts`, `adaptive-ia-study.md`),
 > adaptado a Gemini como provider inicial.
 >
-> **Auditoria v6:** 2026-03-04 — Todos los quick fixes aplicados (INC-1/3/6).
+> **Auditoria v7:** 2026-03-05 — T-01 (denorm institution_id + RPC) y T-02 (tsvector + GIN) completados.
+> v6: Todos los quick fixes aplicados (INC-1/3/6).
 > v5: Cross-audit con codigo fuente real.
 > v4: Appendix A con helper functions completas.
 > v3: 3 errores corregidos, 12 gaps de investigacion integrados.
@@ -19,9 +20,9 @@
 | 1 | pgvector extension habilitada | **DONE** | blueprint |
 | 2 | Columna `embedding` en `chunks` | **DONE** | blueprint |
 | 3 | Columna `embedding` en `summaries` | **PENDIENTE** | blueprint |
-| 4 | Columnas `fts TSVECTOR` generadas + GIN | **PARCIAL** | blueprint |
+| 4 | Columnas `fts TSVECTOR` generadas + GIN | **DONE** | blueprint → T-02 (PR #25) |
 | 5 | Indices HNSW para vectores en chunks | **DONE** | blueprint (LA-04) |
-| 6 | `rag_hybrid_search()` RPC | **DONE** | blueprint (LA-05) |
+| 6 | `rag_hybrid_search()` RPC | **DONE** | blueprint (LA-05) → optimizado T-01 + T-02 |
 | 7 | `rag_query_log` tabla | **PENDIENTE** | blueprint |
 | 8 | Ruta de ingesta de embeddings | **DONE** | blueprint |
 | 9 | Ruta de busqueda semantica + respuesta | **DONE** | blueprint |
@@ -31,7 +32,7 @@
 | 13 | Ingestion multi-fuente (PDF, API) | **PENDIENTE** | blueprint |
 | 14 | Auth + institution scoping | **DONE** | blueprint |
 | 15 | Retry con backoff exponencial | **DONE** | blueprint |
-| 16 | Denormalizacion institution_id | **DONE** | auditoria v2 → migration `20260304_06` |
+| 16 | Denormalizacion institution_id | **DONE** | auditoria v2 → T-01 (PR #24) |
 | 17 | Feedback loop (thumbs up/down) en RAG chat | **PENDIENTE** | auditoria v2 |
 | 18 | Monitoring de cobertura de embeddings | **PENDIENTE** | auditoria v2 |
 | 19 | Auto-ingest trigger | **PENDIENTE** | auditoria v2 |
@@ -48,7 +49,7 @@
 | 30 | Quality dashboard para preguntas AI flaggeadas | **PENDIENTE** | adaptive-ia-study |
 | 31 | chat.ts comentarios stale en header | **DONE** | auditoria v2 → `routes/ai/chat.ts` (INC-1) |
 
-**Resumen: 13/31 completados, 1 parcial, 17 pendientes.**
+**Resumen: 14/31 completados, 17 pendientes.**
 
 ---
 
@@ -83,17 +84,17 @@
 
 ---
 
-## Fase 1 — Performance: Denormalizar `institution_id` en summaries
+## Fase 1 — Performance: Denormalizar `institution_id` en summaries — DONE
 
-**Prioridad:** ALTA — el RPC `rag_hybrid_search()` hace un JOIN de 6 tablas en cada query.
+**Prioridad:** ALTA — el RPC `rag_hybrid_search()` hacia un JOIN de 6 tablas en cada query.
 **Riesgo:** MEDIO — requiere migration + trigger + actualizar el RPC.
 **Impacto:** Elimina 4 JOINs por query (chunks->summaries->topics->sections->semesters->courses).
-**Estado:** **DONE** — migration `20260304_06_denorm_institution_id.sql`
+**Estado:** **DONE** — T-01 (PR #24). Migration `20260304_06` + RPC actualizado en SQL Editor.
 
 ### Problema actual
 
 ```sql
--- Cada query RAG ejecuta este JOIN chain:
+-- Cada query RAG ejecutaba este JOIN chain:
 FROM chunks ch
   JOIN summaries s ON s.id = ch.summary_id
   JOIN topics t ON t.id = s.topic_id
@@ -150,22 +151,19 @@ CREATE TRIGGER trg_summary_institution_sync
 
 Ver [Appendix A > rag_hybrid_search v2](#a3-rag_hybrid_search-v2-despues-de-fase-1--fase-2) para la funcion completa.
 
-> **Siguiente paso:** Actualizar el RPC `rag_hybrid_search()` para usar
-> `s.institution_id` directamente en vez del JOIN chain de 6 tablas.
-> La columna ya existe y esta sincronizada; solo falta el CREATE OR REPLACE.
-
 ---
 
-## Fase 2 — Columnas tsvector generadas + GIN index
+## Fase 2 — Columnas tsvector generadas + GIN index — DONE
 
 **Prioridad:** MEDIA — mejora performance de FTS sin cambiar logica.
 **Riesgo:** BAJO — columnas generated son transparentes.
 **Impacto:** Ahorra CPU de `to_tsvector()` inline por fila + habilita pre-filtro GIN.
+**Estado:** **DONE** — T-02 (PR #25). Migration `20260306_03` aplicada en SQL Editor.
 
 ### Migration SQL
 
 ```sql
--- Archivo: supabase/migrations/YYYYMMDD_02_fts_columns.sql
+-- Archivo: supabase/migrations/20260306_03_tsvector_gin_columns.sql (APPLIED)
 
 ALTER TABLE chunks
   ADD COLUMN IF NOT EXISTS fts tsvector
@@ -187,6 +185,7 @@ CREATE INDEX IF NOT EXISTS idx_summaries_fts ON summaries USING gin (fts);
 ```sql
 -- ANTES: ts_rank(to_tsvector('spanish', ch.content), ...)
 -- DESPUES: ts_rank(ch.fts, ...)  -- stored column, pre-computado
+-- Aplicado en el mismo migration file (CREATE OR REPLACE)
 ```
 
 ---
@@ -435,15 +434,9 @@ Aplicado en `routes/ai/index.ts`:
 ## Orden de implementacion recomendado
 
 ```
-Fase 1: Denormalizar institution_id   [DONE]   [migration 20260304_06]
+Fase 1: Denormalizar institution_id   [DONE]   [T-01, PR #24]   [migration aplicada en SQL Editor]
   |
-  +-- Siguiente: actualizar RPC rag_hybrid_search para usar s.institution_id
-  |
-  +-- Quick fix: prof notes en generate.ts  [DONE]  [INC-6]
-  +-- Quick fix: chat.ts stale comments     [DONE]  [INC-1]
-  +-- Quick fix: AI rate limit middleware   [DONE]  [INC-3]
-  |
-Fase 2: Columnas tsvector + GIN      [1 dia]  [SQL + RPC]      [mejora FTS performance]
+Fase 2: Columnas tsvector + GIN      [DONE]   [T-02, PR #25]   [migration aplicada en SQL Editor]
   |
 Fase 4: Query log + feedback          [1 dia]  [SQL + chat.ts]  [analytics para iterar]
   |
@@ -459,7 +452,7 @@ Fase 6: Retrieval avanzado            [2 dias] [chat.ts]        [Multi-Query + H
 Fase 7: Ingestion PDF                 [3 dias] [nuevo modulo]   [feature nueva]
 ```
 
-**Total estimado: ~13 dias restantes** (todos los quick fixes completados)
+**Total estimado: ~11 dias restantes**
 
 ---
 
