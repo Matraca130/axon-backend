@@ -11,6 +11,8 @@
  *   student_stats     — aggregated stats per student
  *
  * P-2 FIX: Pagination caps added to daily-activities.
+ * F3 FIX: topics-overview now filters by status = 'published'
+ *         (consistency with topic-progress which already did).
  */
 
 import { Hono } from "npm:hono";
@@ -158,6 +160,9 @@ progressRoutes.get(`${PREFIX}/topic-progress`, async (c: Context) => {
 // Now: 1 request → GET /topics-overview?topic_ids=uuid1,uuid2,...
 //   Server does 2 parallel queries internally.
 //
+// F3 FIX: Now filters by status = 'published' for consistency
+// with topic-progress endpoint (which already did this).
+//
 // Max 50 topic_ids per call (safety cap).
 // ═════════════════════════════════════════════════════════════════
 
@@ -186,11 +191,13 @@ progressRoutes.get(`${PREFIX}/topics-overview`, async (c: Context) => {
   }
 
   try {
-    // Step 1: Get all active summaries for all requested topics
+    // Step 1: Get all published, active summaries for all requested topics
+    // F3 FIX: Added .eq("status", "published") for consistency with topic-progress
     const { data: allSummaries, error: sumErr } = await db
       .from("summaries")
       .select("*")
       .in("topic_id", topicIds)
+      .eq("status", "published")
       .eq("is_active", true)
       .is("deleted_at", null)
       .order("order_index", { ascending: true });
