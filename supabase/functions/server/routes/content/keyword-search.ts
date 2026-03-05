@@ -1,13 +1,11 @@
 /**
  * routes/content/keyword-search.ts — Cross-summary keyword search
  *
- * NEW endpoint for Keyword Connections v2.
- * Allows professors to search keywords across all summaries in the
- * same institution (optionally filtered by course) for creating
- * cross-summary connections.
+ * Keyword Connections v2: search keywords across all summaries in
+ * the caller's institution (optionally filtered by course).
  *
  * Endpoint:
- *   GET /keywords/search?q=xxx&exclude_summary_id=yyy&course_id=zzz
+ *   GET /keyword-search?q=xxx&exclude_summary_id=yyy&course_id=zzz&limit=15
  *
  * Returns: { data: SearchResult[] }
  *   Each result: { id, name, summary_id, definition, summary_title }
@@ -15,10 +13,12 @@
  * Security: H-5 compliant — resolves institution from caller's
  * active membership. Only returns keywords from that institution.
  *
- * Performance: 5 indexed queries through the content hierarchy.
- * At Axon's current scale (<10K keywords/institution) this completes
- * in <50ms. Future optimization: replace with a single RPC that
- * does the join in SQL.
+ * Performance: Single RPC call `search_keywords_by_institution` (~5ms).
+ * Replaces the previous 7-query cascade (~35ms).
+ *
+ * Route naming: Uses flat `/keyword-search` instead of nested
+ * `/keywords/search` to follow Axon convention and avoid collision
+ * with the CRUD factory's `GET /keywords/:id`.
  *
  * Safety: limit capped at 30, query min 2 chars.
  */
@@ -34,10 +34,10 @@ import type { Context } from "npm:hono";
 
 export const keywordSearchRoutes = new Hono();
 
-const searchBase = `${PREFIX}/keywords/search`;
+const searchBase = `${PREFIX}/keyword-search`;
 
 /**
- * GET /keywords/search?q=xxx&exclude_summary_id=yyy&course_id=zzz&limit=15
+ * GET /keyword-search?q=xxx&exclude_summary_id=yyy&course_id=zzz&limit=15
  *
  * Query params:
  *   q                  (required) search term, min 2 chars
@@ -56,8 +56,8 @@ keywordSearchRoutes.get(searchBase, async (c: Context) => {
     return err(c, "Query param 'q' required, min 2 characters", 400);
   }
 
-  const excludeSummaryId = c.req.query("exclude_summary_id");
-  const courseId = c.req.query("course_id");
+  const excludeSummaryId = c.req.query("exclude_summary_id") || null;
+  const courseId = c.req.query("course_id") || null;
   let limit = parseInt(c.req.query("limit") ?? "15", 10);
   if (isNaN(limit) || limit < 1) limit = 15;
   if (limit > 30) limit = 30;
@@ -83,96 +83,24 @@ keywordSearchRoutes.get(searchBase, async (c: Context) => {
   );
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
-  // ── Step 2: Traverse hierarchy → collect summary IDs ──────
-  // courses → semesters → sections → topics → summaries
-  // Each query is indexed on its FK, ~3-5ms each.
-
-  // 2a. Courses in this institution
-  let courseQuery = db
-    .from("courses")
-    .select("id")
-    .eq("institution_id", institutionId)
-    .is("deleted_at", null);
-
-  if (courseId) {
-    courseQuery = courseQuery.eq("id", courseId);
-  }
-
-  const { data: courses, error: courseErr } = await courseQuery;
-  if (courseErr) return err(c, `Courses fetch failed: ${courseErr.message}`, 500);
-  if (!courses || courses.length === 0) return ok(c, []);
-
-  const courseIds = courses.map((r: any) => r.id);
-
-  // 2b. Semesters
-  const { data: semesters } = await db
-    .from("semesters")
-    .select("id")
-    .in("course_id", courseIds)
-    .is("deleted_at", null);
-
-  if (!semesters || semesters.length === 0) return ok(c, []);
-  const semesterIds = semesters.map((r: any) => r.id);
-
-  // 2c. Sections
-  const { data: sections } = await db
-    .from("sections")
-    .select("id")
-    .in("semester_id", semesterIds)
-    .is("deleted_at", null);
-
-  if (!sections || sections.length === 0) return ok(c, []);
-  const sectionIds = sections.map((r: any) => r.id);
-
-  // 2d. Topics
-  const { data: topics } = await db
-    .from("topics")
-    .select("id")
-    .in("section_id", sectionIds)
-    .is("deleted_at", null);
-
-  if (!topics || topics.length === 0) return ok(c, []);
-  const topicIds = topics.map((r: any) => r.id);
-
-  // 2e. Summaries (also fetch title for enrichment)
-  const { data: summaries } = await db
-    .from("summaries")
-    .select("id, title")
-    .in("topic_id", topicIds)
-    .is("deleted_at", null);
-
-  if (!summaries || summaries.length === 0) return ok(c, []);
-
-  const summaryIds = summaries.map((r: any) => r.id);
-  const titleMap = new Map<string, string>(
-    summaries.map((r: any) => [r.id, r.title]),
+  // ── Step 2: Search via RPC (single SQL JOIN, ~5ms) ────────
+  // Uses the `search_keywords_by_institution` function created by
+  // migration-search-rpc.sql. Replaces the previous 7-query cascade.
+  const { data: results, error: rpcError } = await db.rpc(
+    "search_keywords_by_institution",
+    {
+      p_institution_id: institutionId,
+      p_query: q,
+      p_exclude_summary_id: excludeSummaryId,
+      p_course_id: courseId,
+      p_limit: limit,
+    },
   );
 
-  // ── Step 3: Search keywords by name ───────────────────────
-  let kwQuery = db
-    .from("keywords")
-    .select("id, name, summary_id, definition")
-    .ilike("name", `%${q}%`)
-    .in("summary_id", summaryIds)
-    .is("deleted_at", null)
-    .order("name", { ascending: true })
-    .limit(limit);
-
-  if (excludeSummaryId) {
-    kwQuery = kwQuery.neq("summary_id", excludeSummaryId);
+  if (rpcError) {
+    console.error("[keyword-search] RPC error:", rpcError);
+    return err(c, `Keyword search failed: ${rpcError.message}`, 500);
   }
 
-  const { data: keywords, error: kwErr } = await kwQuery;
-  if (kwErr) return err(c, `Keyword search failed: ${kwErr.message}`, 500);
-
-  // ── Step 4: Enrich with summary title ─────────────────────
-  const results = (keywords || []).map((kw: any) => ({
-    id: kw.id,
-    name: kw.name,
-    summary_id: kw.summary_id,
-    definition: kw.definition,
-    summary_title: titleMap.get(kw.summary_id) || null,
-  }));
-
-  return ok(c, results);
+  return ok(c, results || []);
 });
