@@ -20,6 +20,9 @@
  * back to get_institution_summary_ids + PostgREST ILIKE query.
  * Slower (~20ms) but functional without the migration.
  *
+ * F3 FIX: Both RPC and fallback now filter by status = 'published'.
+ * Only keywords from published summaries are returned.
+ *
  * Route naming: Uses flat `/keyword-search` instead of nested
  * `/keywords/search` to follow Axon convention and avoid collision
  * with the CRUD factory's `GET /keywords/:id`.
@@ -88,6 +91,8 @@ keywordSearchRoutes.get(searchBase, async (c: Context) => {
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   // ── Step 2: Search via RPC (single SQL JOIN, ~5ms) ────────
+  // F3 FIX: RPC now includes s.status = 'published' filter
+  // (applied in migration 20260306_02).
   const { data: results, error: rpcError } = await db.rpc(
     "search_keywords_by_institution",
     {
@@ -123,6 +128,17 @@ keywordSearchRoutes.get(searchBase, async (c: Context) => {
       let summaryIds: string[] = summaryRows.map(
         (r: { summary_id: string }) => r.summary_id,
       );
+
+      // F3 FIX: Filter to only published summaries
+      // get_institution_summary_ids returns ALL summaries (including drafts)
+      // so we must filter by status here for student safety.
+      const { data: publishedRows } = await db
+        .from("summaries")
+        .select("id")
+        .in("id", summaryIds)
+        .eq("status", "published")
+        .eq("is_active", true);
+      summaryIds = (publishedRows || []).map((s: { id: string }) => s.id);
 
       // Optional: filter by course_id
       if (courseId) {

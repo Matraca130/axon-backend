@@ -22,6 +22,11 @@
  *     summary_id is required for cross-summary navigation links.
  *     definition is used for tooltip previews in KeywordPopup.
  *     This makes frontend Phases 2 & 3 (fallback fetches) no-ops.
+ *
+ * F3 FIX: LIST now post-filters for students — only returns connections
+ *     where BOTH keywords belong to published summaries. Professors
+ *     see all connections (they manage connections to drafts).
+ *     Cost: +1 indexed query (~2-3ms) only for student callers.
  */
 
 import { Hono } from "npm:hono";
@@ -89,6 +94,7 @@ async function resolveInstitution(
 
 // LIST — get connections for a keyword (either side)
 // F1 FIX: Now joins keyword names to avoid N+1 on the frontend.
+// F3 FIX: Students only see connections where BOTH sides are published.
 keywordConnectionRoutes.get(connBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -113,6 +119,47 @@ keywordConnectionRoutes.get(connBase, async (c: Context) => {
 
   if (error)
     return err(c, `List keyword_connections failed: ${error.message}`, 500);
+
+  // ── F3 FIX: Post-filter for students ───────────────────────
+  // Students must not see connections to keywords in draft summaries.
+  // Professors/admins see everything (they manage connections to drafts).
+  // When a draft is published, connections become visible automatically.
+  if (roleCheck.role === "student") {
+    // Step 1: Collect unique summary_ids from both sides of all connections
+    const summaryIds = new Set<string>();
+    for (const conn of (data as any[])) {
+      if (conn.keyword_a?.summary_id) summaryIds.add(conn.keyword_a.summary_id);
+      if (conn.keyword_b?.summary_id) summaryIds.add(conn.keyword_b.summary_id);
+    }
+
+    if (summaryIds.size === 0) return ok(c, data);
+
+    // Step 2: Query which summaries are published (single indexed query, ~2ms)
+    const { data: pubSummaries } = await db
+      .from("summaries")
+      .select("id")
+      .in("id", [...summaryIds])
+      .eq("status", "published")
+      .eq("is_active", true)
+      .is("deleted_at", null);
+
+    const pubIds = new Set((pubSummaries || []).map((s: any) => s.id));
+
+    // Step 3: Keep only connections where BOTH sides are published
+    // Fail-closed: if summary_id is null/missing, connection is hidden
+    const filtered = (data as any[]).filter((conn: any) => {
+      const aPub = conn.keyword_a?.summary_id
+        ? pubIds.has(conn.keyword_a.summary_id)
+        : false;
+      const bPub = conn.keyword_b?.summary_id
+        ? pubIds.has(conn.keyword_b.summary_id)
+        : false;
+      return aPub && bPub;
+    });
+
+    return ok(c, filtered);
+  }
+
   return ok(c, data);
 });
 
