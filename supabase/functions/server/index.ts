@@ -3,6 +3,7 @@
  *
  * O-8 FIX: Rate limiting middleware added (120 req/min/user).
  * RAG FIX: AI routes mounted (generate, ingest, chat).
+ * BUG-004 FIX: CORS restricted to specific origins (was wildcard "*").
  */
 
 import { Hono } from "npm:hono";
@@ -32,10 +33,16 @@ const app = new Hono();
 
 app.use("*", logger(console.log));
 
+// BUG-004 FIX: Restrict CORS to known origins (was "*")
 app.use(
   "/*",
   cors({
-    origin: "*",
+    origin: [
+      "https://axon-platform.vercel.app",
+      "https://axon-app.vercel.app",
+      "http://localhost:5173",
+      "http://localhost:3000",
+    ],
     allowHeaders: ["Content-Type", "Authorization", "X-Access-Token"],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     exposeHeaders: ["Content-Length"],
