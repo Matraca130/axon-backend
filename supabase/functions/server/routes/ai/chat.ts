@@ -12,6 +12,7 @@
  *   3. Hybrid search: pgvector cosine + full-text via rag_hybrid_search() RPC
  *   4. Fetch student knowledge profile via get_student_knowledge_context() RPC
  *   5. Generate response via Gemini 2.5 Flash with RAG context
+ *   6. Log query metrics to rag_query_log (fire-and-forget)
  *
  * Pre-flight fixes applied:
  *   PF-01 FIX: Changed 'institution_members' → 'memberships' + is_active filter
@@ -22,11 +23,14 @@
  *
  * Coherence fixes applied:
  *   INC-1 FIX: Corrected stale model names in header comments
+ *
+ * Fase 4 additions:
+ *   T-03: Query logging with latency, similarity metrics, and log_id for feedback
  */
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
-import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { authenticate, ok, err, safeJson, PREFIX, getAdminClient } from "../../db.ts";
 import { isUuid } from "../../validate.ts";
 import {
   requireInstitutionRole,
@@ -96,6 +100,9 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   if (isDenied(roleCheck))
     return err(c, roleCheck.message, roleCheck.status);
 
+  // ── T-03: Start latency timer ────────────────────────────
+  const t0 = Date.now();
+
   // ── RAG: embed query and search ──────────────────────────
   let ragContext = "";
   let sourcesUsed: Array<{ chunk_id: string; summary_title: string; similarity: number }> = [];
@@ -164,11 +171,40 @@ Responde en espanol.${profileContext}`;
       maxTokens: 1500,
     });
 
+    // ── T-03: Compute metrics and log query ──────────────────
+    const latencyMs = Date.now() - t0;
+    const sims = sourcesUsed.map((s) => s.similarity);
+    const logId = crypto.randomUUID();
+
+    // Fire-and-forget: INSERT via adminClient (bypass RLS).
+    // Non-blocking — if it fails, the user still gets their response.
+    getAdminClient()
+      .from("rag_query_log")
+      .insert({
+        id: logId,
+        user_id: user.id,
+        institution_id: institutionId,
+        query_text: message,
+        summary_id: summaryId,
+        results_count: sourcesUsed.length,
+        top_similarity: sims.length ? Math.max(...sims) : null,
+        avg_similarity: sims.length
+          ? Math.round((sims.reduce((a, b) => a + b, 0) / sims.length) * 1000) / 1000
+          : null,
+        latency_ms: latencyMs,
+        search_type: "hybrid",
+        model_used: "gemini-2.5-flash",
+      })
+      .then(({ error }) => {
+        if (error) console.warn("[RAG Log] Insert failed:", error.message);
+      });
+
     return ok(c, {
       response: result.text,
       sources: sourcesUsed,
       tokens: result.tokensUsed,
       profile_used: !!profileContext,
+      log_id: logId,  // T-03: frontend uses this to send feedback
     });
   } catch (e) {
     console.error("[RAG Chat] Gemini error:", e);
