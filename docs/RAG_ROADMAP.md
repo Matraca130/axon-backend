@@ -5,7 +5,8 @@
 > `chunking-strategies.md`, `hybrid-retrieval.ts`, `adaptive-ia-study.md`),
 > adaptado a Gemini como provider inicial.
 >
-> **Auditoria v7:** 2026-03-05 — T-01 (denorm institution_id + RPC) y T-02 (tsvector + GIN) completados.
+> **Auditoria v8:** 2026-03-05 — T-03 (query log + feedback loop) completado (PR #27, migration aplicada).
+> v7: T-01 (denorm institution_id + RPC) y T-02 (tsvector + GIN) completados.
 > v6: Todos los quick fixes aplicados (INC-1/3/6).
 > v5: Cross-audit con codigo fuente real.
 > v4: Appendix A con helper functions completas.
@@ -23,7 +24,7 @@
 | 4 | Columnas `fts TSVECTOR` generadas + GIN | **DONE** | blueprint → T-02 (PR #25) |
 | 5 | Indices HNSW para vectores en chunks | **DONE** | blueprint (LA-04) |
 | 6 | `rag_hybrid_search()` RPC | **DONE** | blueprint (LA-05) → optimizado T-01 + T-02 |
-| 7 | `rag_query_log` tabla | **PENDIENTE** | blueprint |
+| 7 | `rag_query_log` tabla | **DONE** | blueprint → T-03 (PR #27) |
 | 8 | Ruta de ingesta de embeddings | **DONE** | blueprint |
 | 9 | Ruta de busqueda semantica + respuesta | **DONE** | blueprint |
 | 10 | Generacion adaptativa (flashcards/quiz) | **DONE** | blueprint |
@@ -33,8 +34,8 @@
 | 14 | Auth + institution scoping | **DONE** | blueprint |
 | 15 | Retry con backoff exponencial | **DONE** | blueprint |
 | 16 | Denormalizacion institution_id | **DONE** | auditoria v2 → T-01 (PR #24) |
-| 17 | Feedback loop (thumbs up/down) en RAG chat | **PENDIENTE** | auditoria v2 |
-| 18 | Monitoring de cobertura de embeddings | **PENDIENTE** | auditoria v2 |
+| 17 | Feedback loop (thumbs up/down) en RAG chat | **DONE** | auditoria v2 → T-03 (PR #27) |
+| 18 | Monitoring de cobertura de embeddings | **DONE** | auditoria v2 → T-03 (PR #27) |
 | 19 | Auto-ingest trigger | **PENDIENTE** | auditoria v2 |
 | 20 | Multi-Query Retrieval (+25% recall) | **PENDIENTE** | hybrid-retrieval.ts |
 | 21 | HyDE — Hypothetical Document Embeddings | **PENDIENTE** | hybrid-retrieval.ts |
@@ -49,7 +50,7 @@
 | 30 | Quality dashboard para preguntas AI flaggeadas | **PENDIENTE** | adaptive-ia-study |
 | 31 | chat.ts comentarios stale en header | **DONE** | auditoria v2 → `routes/ai/chat.ts` (INC-1) |
 
-**Resumen: 14/31 completados, 17 pendientes.**
+**Resumen: 17/31 completados, 14 pendientes.**
 
 ---
 
@@ -288,15 +289,18 @@ if (summaryId) {
 
 ---
 
-## Fase 4 — Query logging + Feedback loop
+## Fase 4 — Query logging + Feedback loop — DONE
 
 **Prioridad:** MEDIA — analytics + mejora iterativa.
 **Riesgo:** BAJO — tabla nueva, inserts async.
 **Impacto:** Medir calidad y mejorar el sistema con datos reales.
+**Estado:** **DONE** — T-03 (PR #27). Migration `20260305_04` aplicada en SQL Editor.
 
 ### Migration SQL
 
 ```sql
+-- Archivo: supabase/migrations/20260305_04_rag_query_log.sql (APPLIED)
+
 CREATE TABLE IF NOT EXISTS rag_query_log (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id),
@@ -307,32 +311,50 @@ CREATE TABLE IF NOT EXISTS rag_query_log (
   top_similarity FLOAT,
   avg_similarity FLOAT,
   latency_ms INT,
-  search_type TEXT DEFAULT 'hybrid',
+  search_type TEXT NOT NULL DEFAULT 'hybrid',
   model_used TEXT,
-  feedback SMALLINT,  -- NULL=sin feedback, 1=thumbs up, -1=thumbs down
-  created_at TIMESTAMPTZ DEFAULT now()
+  feedback SMALLINT CHECK (feedback IN (-1, 1)),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_rag_query_log_inst_date ON rag_query_log (institution_id, created_at DESC);
-CREATE INDEX idx_rag_query_log_user ON rag_query_log (user_id, created_at DESC);
-CREATE INDEX idx_rag_query_log_negative ON rag_query_log (institution_id, feedback) WHERE feedback = -1;
+CREATE INDEX IF NOT EXISTS idx_rag_query_log_inst_date
+  ON rag_query_log (institution_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_rag_query_log_user
+  ON rag_query_log (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_rag_query_log_negative
+  ON rag_query_log (institution_id, feedback) WHERE feedback = -1;
 
 ALTER TABLE rag_query_log ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY rag_log_own ON rag_query_log FOR SELECT USING (user_id = auth.uid());
-CREATE POLICY rag_log_institution ON rag_query_log FOR SELECT USING (
-  EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = auth.uid()
-    AND m.institution_id = rag_query_log.institution_id
-    AND m.role IN ('owner','admin') AND m.is_active = TRUE)
-);
--- INSERT via adminClient (bypass RLS) — no policy needed
+CREATE POLICY rag_log_select_own ON rag_query_log FOR SELECT
+  USING (user_id = auth.uid());
+CREATE POLICY rag_log_select_institution ON rag_query_log FOR SELECT
+  USING (
+    EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = auth.uid()
+      AND m.institution_id = rag_query_log.institution_id
+      AND m.role IN ('owner','admin') AND m.is_active = TRUE)
+  );
+CREATE POLICY rag_log_update_feedback ON rag_query_log FOR UPDATE
+  USING (user_id = auth.uid())
+  WITH CHECK (user_id = auth.uid());
+
+-- INSERT via adminClient (bypass RLS) — no INSERT policy needed
 ```
 
-### Nuevos endpoints
+### RPCs
 
-- `PATCH /ai/rag-feedback` — `{ log_id, feedback: 1|-1 }`
-- `GET /ai/rag-analytics?institution_id=&from=&to=` — metricas agregadas
-- `GET /ai/embedding-coverage?institution_id=` — % chunks con embedding
+```sql
+-- rag_analytics_summary(p_institution_id, p_from, p_to) → metricas agregadas
+-- rag_embedding_coverage(p_institution_id) → % chunks con embedding
+-- Ambos SECURITY DEFINER, validacion de rol admin/owner en el TS code
+```
+
+### Endpoints implementados
+
+- `PATCH /ai/rag-feedback` — `{ log_id, feedback: 1|-1 }` — actualiza feedback del usuario
+- `GET /ai/rag-analytics?institution_id=&from=&to=` — metricas agregadas (admin/owner)
+- `GET /ai/embedding-coverage?institution_id=` — cobertura de embeddings (admin/owner)
+- `POST /ai/rag-chat` — ahora devuelve `log_id` en response para vincular feedback
 
 ---
 
@@ -438,7 +460,7 @@ Fase 1: Denormalizar institution_id   [DONE]   [T-01, PR #24]   [migration aplic
   |
 Fase 2: Columnas tsvector + GIN      [DONE]   [T-02, PR #25]   [migration aplicada en SQL Editor]
   |
-Fase 4: Query log + feedback          [1 dia]  [SQL + chat.ts]  [analytics para iterar]
+Fase 4: Query log + feedback          [DONE]   [T-03, PR #27]   [migration aplicada en SQL Editor]
   |
 Fase 5: Chunking + auto-ingest        [2 dias] [nuevo archivo]  [mejora calidad RAG]
   |
@@ -452,7 +474,7 @@ Fase 6: Retrieval avanzado            [2 dias] [chat.ts]        [Multi-Query + H
 Fase 7: Ingestion PDF                 [3 dias] [nuevo modulo]   [feature nueva]
 ```
 
-**Total estimado: ~11 dias restantes**
+**Total estimado: ~10 dias restantes**
 
 ---
 
