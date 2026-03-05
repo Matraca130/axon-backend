@@ -14,6 +14,9 @@
  *     connection_type is validated against a whitelist of 10
  *     predefined medical relationship types.
  *     source_keyword_id indicates direction for directional types.
+ *
+ * F1 FIX: LIST and GET now join keyword names via PostgREST embedded
+ *     resources, eliminating N+1 queries from the frontend.
  */
 
 import { Hono } from "npm:hono";
@@ -44,6 +47,19 @@ const VALID_CONNECTION_TYPES = new Set([
   "asociacion",
 ]);
 
+// ── F1 FIX: Explicit select with keyword name joins ─────────
+const CONNECTION_SELECT = [
+  "id",
+  "keyword_a_id",
+  "keyword_b_id",
+  "relationship",
+  "connection_type",
+  "source_keyword_id",
+  "created_at",
+  "keyword_a:keywords!keyword_a_id(id, name)",
+  "keyword_b:keywords!keyword_b_id(id, name)",
+].join(", ");
+
 /**
  * H-5 helper: resolve institution_id from a keyword_id or connection ID.
  */
@@ -65,6 +81,7 @@ async function resolveInstitution(
 }
 
 // LIST — get connections for a keyword (either side)
+// F1 FIX: Now joins keyword names to avoid N+1 on the frontend.
 keywordConnectionRoutes.get(connBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -82,7 +99,7 @@ keywordConnectionRoutes.get(connBase, async (c: Context) => {
 
   const { data, error } = await db
     .from("keyword_connections")
-    .select("*")
+    .select(CONNECTION_SELECT)
     .or(`keyword_a_id.eq.${keywordId},keyword_b_id.eq.${keywordId}`)
     .order("created_at", { ascending: true })
     .limit(200);
@@ -93,6 +110,7 @@ keywordConnectionRoutes.get(connBase, async (c: Context) => {
 });
 
 // GET by ID
+// F1 FIX: Now includes keyword name joins for consistency with LIST.
 keywordConnectionRoutes.get(`${connBase}/:id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -108,7 +126,7 @@ keywordConnectionRoutes.get(`${connBase}/:id`, async (c: Context) => {
 
   const { data, error } = await db
     .from("keyword_connections")
-    .select("*")
+    .select(CONNECTION_SELECT)
     .eq("id", id)
     .single();
   if (error)
