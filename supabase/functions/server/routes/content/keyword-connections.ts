@@ -17,6 +17,11 @@
  *
  * F1 FIX: LIST and GET now join keyword names via PostgREST embedded
  *     resources, eliminating N+1 queries from the frontend.
+ *
+ * F2-A FIX: Expanded join to include summary_id and definition.
+ *     summary_id is required for cross-summary navigation links.
+ *     definition is used for tooltip previews in KeywordPopup.
+ *     This makes frontend Phases 2 & 3 (fallback fetches) no-ops.
  */
 
 import { Hono } from "npm:hono";
@@ -47,7 +52,9 @@ const VALID_CONNECTION_TYPES = new Set([
   "asociacion",
 ]);
 
-// ── F1 FIX: Explicit select with keyword name joins ─────────
+// ── F1 + F2-A: Explicit select with keyword joins ───────────
+// F2-A: Added summary_id and definition to eliminate frontend
+// fallback fetches (Phases 2 & 3 in useKeywordPopupQueries).
 const CONNECTION_SELECT = [
   "id",
   "keyword_a_id",
@@ -56,8 +63,8 @@ const CONNECTION_SELECT = [
   "connection_type",
   "source_keyword_id",
   "created_at",
-  "keyword_a:keywords!keyword_a_id(id, name)",
-  "keyword_b:keywords!keyword_b_id(id, name)",
+  "keyword_a:keywords!keyword_a_id(id, name, summary_id, definition)",
+  "keyword_b:keywords!keyword_b_id(id, name, summary_id, definition)",
 ].join(", ");
 
 /**
