@@ -8,11 +8,18 @@
  *
  * Pipeline:
  *   1. Resolve institution (from summary or user's memberships)
- *   2. Embed the user's query via gemini-embedding-001 (768 dims)
- *   3. Hybrid search: pgvector cosine + full-text via rag_hybrid_search() RPC
- *   4. Fetch student knowledge profile via get_student_knowledge_context() RPC
- *   5. Generate response via Gemini 2.5 Flash with RAG context
- *   6. Log query metrics to rag_query_log (fire-and-forget)
+ *   2. Build augmented query from message + history (Phase 5)
+ *   3. Embed the augmented query via gemini-embedding-001 (768 dims)
+ *   4. Hybrid search: pgvector cosine + full-text via rag_hybrid_search() RPC
+ *   5. Fetch adjacent chunks for context expansion (Phase 5)
+ *   6. Fetch student knowledge profile via get_student_knowledge_context() RPC
+ *   7. Generate response via Gemini 2.5 Flash with RAG context
+ *   8. Log query metrics to rag_query_log (fire-and-forget)
+ *
+ * Phase 5 additions:
+ *   - History-augmented search: uses last 2 user messages to improve follow-up recall
+ *   - Adjacent chunk expansion: fetches ±1 order_index chunks for better context
+ *   - Smart context assembly: orders by summary→order_index, deduplicates
  *
  * Pre-flight fixes applied:
  *   PF-01 FIX: Changed 'institution_members' → 'memberships' + is_active filter
@@ -38,8 +45,244 @@ import {
   ALL_ROLES,
 } from "../../auth-helpers.ts";
 import { generateText, generateEmbedding } from "../../gemini.ts";
+import type { SupabaseClient } from "npm:@supabase/supabase-js";
 
 export const aiChatRoutes = new Hono();
+
+// ─── Phase 5: History-augmented search query builder ──────────────
+// Concatenates the last 2 user messages with the current query.
+// This improves recall for follow-up questions like:
+//   User: "Explain mitosis"  → embed("mitosis")
+//   User: "What about the phases?" → embed("mitosis phases") instead of just "phases"
+//
+// Each historical message is capped at 200 chars to keep the
+// embedding focused. The augmented query is used ONLY for the
+// embedding — the original message is what goes to Gemini.
+
+const MAX_HISTORY_CHARS_FOR_SEARCH = 200;
+
+function buildAugmentedQuery(
+  message: string,
+  history: Array<{ role: string; content: string }>,
+): { query: string; wasAugmented: boolean } {
+  // Extract last 2 user messages from history
+  const recentUserMessages = history
+    .filter((h) => h.role === "user")
+    .slice(-2)
+    .map((h) => h.content.slice(0, MAX_HISTORY_CHARS_FOR_SEARCH).trim())
+    .filter((s) => s.length > 0);
+
+  if (recentUserMessages.length === 0) {
+    return { query: message, wasAugmented: false };
+  }
+
+  // Combine: "previous context... current question"
+  const augmented = [...recentUserMessages, message].join(" ");
+  return { query: augmented, wasAugmented: true };
+}
+
+// ─── Phase 5: Adjacent chunk expansion ────────────────────────────
+// For each matched chunk, fetch chunks with order_index ±1 from the
+// same summary. This gives the LLM better context continuity.
+//
+// Example: If chunk #3 matches about "cell division", we also fetch
+// chunk #2 (intro context) and chunk #4 (continuation), so the LLM
+// sees the full explanation instead of just one fragment.
+
+interface MatchedChunk {
+  chunk_id: string;
+  summary_id: string;
+  summary_title: string;
+  content: string;
+  similarity: number;
+  text_rank: number;
+  combined_score: number;
+}
+
+interface ContextChunk {
+  id: string;
+  summary_id: string;
+  content: string;
+  order_index: number;
+  is_primary: boolean;
+}
+
+async function fetchAdjacentChunks(
+  db: SupabaseClient,
+  matches: MatchedChunk[],
+): Promise<ContextChunk[]> {
+  if (!matches || matches.length === 0) return [];
+
+  try {
+    // Get order_index for matched chunks
+    const matchedIds = matches.map((m) => m.chunk_id);
+    const { data: matchedWithOrder, error: orderErr } = await db
+      .from("chunks")
+      .select("id, summary_id, content, order_index")
+      .in("id", matchedIds);
+
+    if (orderErr || !matchedWithOrder) return [];
+
+    // Build set of (summary_id, order_index) pairs for adjacent chunks
+    const adjacentPairs = new Set<string>();
+    const matchedSet = new Set(matchedIds);
+
+    for (const chunk of matchedWithOrder) {
+      if (chunk.order_index !== null && chunk.order_index !== undefined) {
+        // Previous chunk
+        if (chunk.order_index > 0) {
+          adjacentPairs.add(`${chunk.summary_id}:${chunk.order_index - 1}`);
+        }
+        // Next chunk
+        adjacentPairs.add(`${chunk.summary_id}:${chunk.order_index + 1}`);
+      }
+    }
+
+    if (adjacentPairs.size === 0) return [];
+
+    // Fetch adjacent chunks
+    // We need to query by (summary_id, order_index) pairs.
+    // Since Supabase doesn't support tuple IN, we use OR filters.
+    // Group by summary_id for efficiency.
+    const summaryGroups = new Map<string, number[]>();
+    for (const pair of adjacentPairs) {
+      const [sumId, orderStr] = pair.split(":");
+      const orderIdx = parseInt(orderStr, 10);
+      if (!summaryGroups.has(sumId)) summaryGroups.set(sumId, []);
+      summaryGroups.get(sumId)!.push(orderIdx);
+    }
+
+    const allContextChunks: ContextChunk[] = [];
+
+    // Mark primary chunks
+    for (const chunk of matchedWithOrder) {
+      allContextChunks.push({
+        id: chunk.id,
+        summary_id: chunk.summary_id,
+        content: chunk.content,
+        order_index: chunk.order_index ?? 0,
+        is_primary: true,
+      });
+    }
+
+    // Fetch adjacent chunks per summary (max 3 summaries to limit queries)
+    const summaryEntries = Array.from(summaryGroups.entries()).slice(0, 3);
+    for (const [sumId, orderIndexes] of summaryEntries) {
+      const { data: adjacent } = await db
+        .from("chunks")
+        .select("id, summary_id, content, order_index")
+        .eq("summary_id", sumId)
+        .in("order_index", orderIndexes)
+        .is("deleted_at", null);
+
+      if (adjacent) {
+        for (const adj of adjacent) {
+          if (!matchedSet.has(adj.id)) {
+            allContextChunks.push({
+              id: adj.id,
+              summary_id: adj.summary_id,
+              content: adj.content,
+              order_index: adj.order_index ?? 0,
+              is_primary: false,
+            });
+          }
+        }
+      }
+    }
+
+    // Sort by summary_id → order_index for coherent reading
+    allContextChunks.sort((a, b) => {
+      if (a.summary_id !== b.summary_id) return a.summary_id.localeCompare(b.summary_id);
+      return a.order_index - b.order_index;
+    });
+
+    return allContextChunks;
+  } catch (e) {
+    console.warn("[RAG Chat] Adjacent chunk expansion failed, using primary only:", e);
+    return [];
+  }
+}
+
+// ─── Phase 5: Smart context assembly ──────────────────────────────
+// Assembles chunks into a coherent reading context, respecting
+// character limits and maintaining reading order.
+
+const MAX_CONTEXT_CHARS = 3000;
+
+function assembleContext(
+  matches: MatchedChunk[],
+  contextChunks: ContextChunk[],
+): { ragContext: string; sourcesUsed: Array<{ chunk_id: string; summary_title: string; similarity: number }>; contextChunksCount: number } {
+  const sourcesUsed = matches.map((m) => ({
+    chunk_id: m.chunk_id,
+    summary_title: m.summary_title,
+    similarity: Math.round(m.similarity * 100) / 100,
+  }));
+
+  if (contextChunks.length === 0 && matches.length === 0) {
+    return { ragContext: "", sourcesUsed, contextChunksCount: 0 };
+  }
+
+  // If we have expanded context chunks, use them (ordered)
+  if (contextChunks.length > 0) {
+    // Build a map of summary_id → title for labeling
+    const titleMap = new Map<string, string>();
+    for (const m of matches) {
+      titleMap.set(m.summary_id, m.summary_title);
+    }
+
+    let context = "";
+    let currentSummary = "";
+    let charCount = 0;
+    let chunksIncluded = 0;
+
+    for (const chunk of contextChunks) {
+      // Add summary header when switching summaries
+      if (chunk.summary_id !== currentSummary) {
+        const title = titleMap.get(chunk.summary_id) || "Material";
+        const header = `\n[De "${title}"]:\n`;
+        if (charCount + header.length > MAX_CONTEXT_CHARS) break;
+        context += header;
+        charCount += header.length;
+        currentSummary = chunk.summary_id;
+      }
+
+      // Add chunk content
+      const separator = chunk.is_primary ? "" : "";
+      const text = `${separator}${chunk.content}\n`;
+      if (charCount + text.length > MAX_CONTEXT_CHARS) {
+        // Add truncated version if we have room for at least 100 chars
+        const remaining = MAX_CONTEXT_CHARS - charCount;
+        if (remaining > 100) {
+          context += text.slice(0, remaining) + "...\n";
+          chunksIncluded++;
+        }
+        break;
+      }
+      context += text;
+      charCount += text.length;
+      chunksIncluded++;
+    }
+
+    return {
+      ragContext: context.trim()
+        ? `\n\nContexto relevante del material de estudio:\n${context.trim()}`
+        : "",
+      sourcesUsed,
+      contextChunksCount: chunksIncluded,
+    };
+  }
+
+  // Fallback: use matches directly (pre-Phase 5 behavior)
+  const ragContext = "\n\nContexto relevante del material de estudio:\n" +
+    matches
+      .map((m, i) => `[${i + 1}] (de "${m.summary_title}"): ${m.content}`)
+      .join("\n\n");
+
+  return { ragContext, sourcesUsed, contextChunksCount: matches.length };
+}
+
+// ─── Main route ───────────────────────────────────────────────────
 
 aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -68,7 +311,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     : [];
 
   // ── Resolve institution ──────────────────────────────────
-  // ⚠️ PF-05: These DB queries validate the JWT cryptographically.
+  // PF-05: These DB queries validate the JWT cryptographically.
   // They MUST happen before any Gemini API call.
   let institutionId: string | null = null;
   if (summaryId) {
@@ -79,8 +322,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     institutionId = instId as string;
   }
   if (!institutionId) {
-    // PF-01 FIX: Use 'memberships' table (not 'institution_members' which doesn't exist)
-    // Also filter by is_active = true, matching the pattern used everywhere in the backend
+    // PF-01 FIX: Use 'memberships' table (not 'institution_members')
     const { data: membership } = await db
       .from("memberships")
       .select("institution_id")
@@ -103,33 +345,39 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   // ── T-03: Start latency timer ────────────────────────────
   const t0 = Date.now();
 
+  // ── Phase 5: Build augmented search query ─────────────────
+  const { query: searchQuery, wasAugmented } = buildAugmentedQuery(message, history);
+
   // ── RAG: embed query and search ──────────────────────────
   let ragContext = "";
   let sourcesUsed: Array<{ chunk_id: string; summary_title: string; similarity: number }> = [];
+  let contextChunksCount = 0;
 
   try {
-    const queryEmbedding = await generateEmbedding(message, "RETRIEVAL_QUERY");
+    // Phase 5: Embed the augmented query (includes history context)
+    const queryEmbedding = await generateEmbedding(searchQuery, "RETRIEVAL_QUERY");
 
+    // Phase 5: Request more matches (8 instead of 5) for context expansion
     const { data: matches } = await db.rpc("rag_hybrid_search", {
       p_query_embedding: JSON.stringify(queryEmbedding),
-      p_query_text: message,
+      p_query_text: message,  // Use original message for FTS (more precise)
       p_institution_id: institutionId,
       p_summary_id: summaryId || null,
-      p_match_count: 5,
+      p_match_count: 8,
       p_similarity_threshold: 0.3,
     });
 
     if (matches && matches.length > 0) {
-      ragContext = "\n\nContexto relevante del material de estudio:\n" +
-        matches.map((m: Record<string, unknown>, i: number) =>
-          `[${i + 1}] (de "${m.summary_title}"): ${m.content}`
-        ).join("\n\n");
+      // Phase 5: Fetch adjacent chunks for context expansion
+      // Only expand top 5 matches to limit DB queries
+      const topMatches = matches.slice(0, 5) as MatchedChunk[];
+      const contextChunks = await fetchAdjacentChunks(db, topMatches);
 
-      sourcesUsed = matches.map((m: Record<string, unknown>) => ({
-        chunk_id: m.chunk_id as string,
-        summary_title: m.summary_title as string,
-        similarity: Math.round((m.similarity as number) * 100) / 100,
-      }));
+      // Phase 5: Assemble coherent context
+      const assembled = assembleContext(topMatches, contextChunks);
+      ragContext = assembled.ragContext;
+      sourcesUsed = assembled.sourcesUsed;
+      contextChunksCount = assembled.contextChunksCount;
     }
   } catch (e) {
     console.warn("[RAG Chat] Search failed, continuing without context:", e);
@@ -171,13 +419,12 @@ Responde en espanol.${profileContext}`;
       maxTokens: 1500,
     });
 
-    // ── T-03: Compute metrics and log query ──────────────────
+    // ── T-03 + Phase 5: Compute metrics and log query ─────────
     const latencyMs = Date.now() - t0;
     const sims = sourcesUsed.map((s) => s.similarity);
     const logId = crypto.randomUUID();
 
     // Fire-and-forget: INSERT via adminClient (bypass RLS).
-    // Non-blocking — if it fails, the user still gets their response.
     getAdminClient()
       .from("rag_query_log")
       .insert({
@@ -192,7 +439,7 @@ Responde en espanol.${profileContext}`;
           ? Math.round((sims.reduce((a, b) => a + b, 0) / sims.length) * 1000) / 1000
           : null,
         latency_ms: latencyMs,
-        search_type: "hybrid",
+        search_type: wasAugmented ? "hybrid_augmented" : "hybrid",
         model_used: "gemini-2.5-flash",
       })
       .then(({ error }) => {
@@ -204,7 +451,13 @@ Responde en espanol.${profileContext}`;
       sources: sourcesUsed,
       tokens: result.tokensUsed,
       profile_used: !!profileContext,
-      log_id: logId,  // T-03: frontend uses this to send feedback
+      log_id: logId,
+      // Phase 5: Additional metadata
+      _search: {
+        augmented: wasAugmented,
+        context_chunks: contextChunksCount,
+        primary_matches: sourcesUsed.length,
+      },
     });
   } catch (e) {
     console.error("[RAG Chat] Gemini error:", e);
