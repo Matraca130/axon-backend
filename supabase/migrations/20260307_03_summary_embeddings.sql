@@ -32,9 +32,9 @@
 --   - summaries.institution_id column exists (done in 20260304_06)
 -- ============================================================================
 
--- ════════════════════════════════════════════════════════════════════
+-- ══════════════════════════════════════════════════════════════════════
 -- 1. Embedding column on summaries
--- ════════════════════════════════════════════════════════════════════
+-- ══════════════════════════════════════════════════════════════════════
 
 ALTER TABLE summaries
   ADD COLUMN IF NOT EXISTS embedding vector(768);
@@ -44,9 +44,9 @@ COMMENT ON COLUMN summaries.embedding IS
   'Generated from title + content_markdown. '
   'Used by rag_coarse_to_fine_search for macro-level retrieval.';
 
--- ════════════════════════════════════════════════════════════════════
+-- ══════════════════════════════════════════════════════════════════════
 -- 2. HNSW index on summaries.embedding
--- ════════════════════════════════════════════════════════════════════
+-- ══════════════════════════════════════════════════════════════════════
 --
 -- Partial index: only indexes rows WHERE embedding IS NOT NULL.
 -- Benefits:
@@ -63,9 +63,9 @@ CREATE INDEX IF NOT EXISTS idx_summaries_embedding_hnsw
   WITH (m = 16, ef_construction = 64)
   WHERE embedding IS NOT NULL;
 
--- ════════════════════════════════════════════════════════════════════
+-- ══════════════════════════════════════════════════════════════════════
 -- 3. Coarse-to-Fine search RPC
--- ════════════════════════════════════════════════════════════════════
+-- ══════════════════════════════════════════════════════════════════════
 --
 -- Two-stage vector search for broad queries (no summary_id scope).
 --
@@ -86,6 +86,11 @@ CREATE INDEX IF NOT EXISTS idx_summaries_embedding_hnsw
 --   - ch.embedding IS NOT NULL: skip chunks without embeddings
 --   - NO ch.deleted_at filter: chunks use hard DELETE (consistent
 --     with rag_hybrid_search)
+--
+-- A1 FIX: Distance computation uses CTE to evaluate ONCE per row.
+--   Stage 1 previously computed (1 - (s.embedding <=> query)) in
+--   SELECT, WHERE, and ORDER BY (up to 3×). Now a single CTE
+--   computes sim once, consistent with rag_hybrid_search pattern.
 --
 -- Performance:
 --   - Stage 1 uses idx_summaries_embedding_hnsw (ANN scan, ~1ms)
@@ -114,8 +119,8 @@ AS $$
 BEGIN
   RETURN QUERY
 
-  -- Stage 1: Coarse — find most relevant summaries
-  WITH top_summaries AS (
+  -- Stage 1a: Compute summary similarity ONCE per row (A1 FIX)
+  WITH summary_scored AS (
     SELECT
       s.id,
       s.title,
@@ -125,8 +130,14 @@ BEGIN
       AND s.institution_id = p_institution_id
       AND s.deleted_at IS NULL
       AND s.is_active = TRUE
-      AND (1 - (s.embedding <=> p_query_embedding)) > p_similarity_threshold
-    ORDER BY s.embedding <=> p_query_embedding  -- ASC = closest first
+  ),
+
+  -- Stage 1b: Filter + rank summaries using pre-computed sim
+  top_summaries AS (
+    SELECT ss.id, ss.title, ss.sim
+    FROM summary_scored ss
+    WHERE ss.sim > p_similarity_threshold
+    ORDER BY ss.sim DESC
     LIMIT p_top_summaries
   ),
 
@@ -164,9 +175,9 @@ COMMENT ON FUNCTION rag_coarse_to_fine_search IS
   'Score = 0.3 × summary_sim + 0.7 × chunk_sim. '
   'Fase 3 — Bloque 2 del plan maestro RAG.';
 
--- ════════════════════════════════════════════════════════════════════
+-- ══════════════════════════════════════════════════════════════════════
 -- VERIFICATION
--- ════════════════════════════════════════════════════════════════════
+-- ══════════════════════════════════════════════════════════════════════
 
 DO $$
 DECLARE
@@ -191,13 +202,13 @@ BEGIN
     SELECT 1 FROM pg_proc WHERE proname = 'rag_coarse_to_fine_search'
   ) INTO v_has_rpc;
 
-  RAISE NOTICE '══════════════════════════════════════════════';
+  RAISE NOTICE '══════════════════════════════════════════════════';
   RAISE NOTICE '  FASE 3 MIGRATION VERIFICATION';
-  RAISE NOTICE '══════════════════════════════════════════════';
+  RAISE NOTICE '══════════════════════════════════════════════════';
   RAISE NOTICE '  summaries.embedding:          %', CASE WHEN v_has_embedding  THEN 'OK' ELSE 'MISSING!' END;
   RAISE NOTICE '  idx_summaries_embedding_hnsw: %', CASE WHEN v_has_hnsw_index THEN 'OK' ELSE 'MISSING!' END;
   RAISE NOTICE '  rag_coarse_to_fine_search:    %', CASE WHEN v_has_rpc        THEN 'OK' ELSE 'MISSING!' END;
-  RAISE NOTICE '══════════════════════════════════════════════';
+  RAISE NOTICE '══════════════════════════════════════════════════';
 
   IF NOT v_has_embedding OR NOT v_has_hnsw_index OR NOT v_has_rpc THEN
     RAISE WARNING 'Some components are missing! Check the notices above.';
