@@ -16,6 +16,11 @@
 import { Hono } from "npm:hono";
 import { registerCrud } from "./crud-factory.ts";
 import { authenticate, ok, err, PREFIX, getAdminClient } from "./db.ts";
+import {
+  requireInstitutionRole,
+  isDenied,
+  ALL_ROLES,
+} from "./auth-helpers.ts";
 import type { Context } from "npm:hono";
 
 const modelRoutes = new Hono();
@@ -30,6 +35,9 @@ const modelRoutes = new Hono();
 // Query:    GET /models-3d/batch?topic_ids=uuid1,uuid2,uuid3
 // Response: { data: { [topicId]: Model3D[] } }
 //
+// Security: Uses user client (RLS) + institution scoping via first
+// topic_id (all topics in a batch come from the same content tree).
+//
 // IMPORTANT: This route MUST be registered BEFORE registerCrud
 // for "models-3d" to prevent Hono from matching "batch" as ":id".
 // ═══════════════════════════════════════════════════════════════
@@ -37,6 +45,7 @@ const modelRoutes = new Hono();
 modelRoutes.get(`${PREFIX}/models-3d/batch`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
+  const { user, db } = auth;
 
   const raw = c.req.query("topic_ids") || "";
   const topicIds = raw.split(",").map((s) => s.trim()).filter(Boolean);
@@ -60,8 +69,31 @@ modelRoutes.get(`${PREFIX}/models-3d/batch`, async (c: Context) => {
     );
   }
 
-  const admin = getAdminClient();
-  const { data: models, error: dbErr } = await admin
+  // Institution scoping: resolve from first topic_id (all topics come
+  // from the same institution's content tree in ThreeDView).
+  try {
+    const { data: instData, error: instErr } = await db.rpc(
+      "resolve_parent_institution",
+      { p_table: "topics", p_id: topicIds[0] },
+    );
+    if (instErr || !instData) {
+      return err(c, "Cannot resolve institution for this resource", 404);
+    }
+    const roleCheck = await requireInstitutionRole(
+      db,
+      user.id,
+      instData as string,
+      ALL_ROLES,
+    );
+    if (isDenied(roleCheck)) {
+      return err(c, roleCheck.message, roleCheck.status);
+    }
+  } catch {
+    return err(c, "Institution scoping check failed", 500);
+  }
+
+  // Use user client (respects RLS) — consistent with CRUD factory
+  const { data: models, error: dbErr } = await db
     .from("models_3d")
     .select("*")
     .in("topic_id", topicIds)
