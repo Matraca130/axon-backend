@@ -4,7 +4,7 @@
  * Pure business-logic function, zero Hono/HTTP dependency.
  * Called by:
  *   - POST /ai/re-chunk  (5.6 — synchronous, professor waits)
- *   - POST/PATCH summary hooks (5.8 — fire-and-forget, future)
+ *   - POST/PATCH summary hooks (5.8 — fire-and-forget)
  *
  * Flow:
  *   1. Fetch summary content from DB
@@ -12,13 +12,20 @@
  *   3. Replace existing chunks (DELETE → INSERT)
  *   4. Generate embeddings for each chunk (sequential, rate-limited)
  *   5. Update summaries.last_chunked_at
+ *   6. Generate summary-level embedding (Fase 3)
+ *
+ * Also exports:
+ *   - truncateAtWord()       — text utility for safe truncation at word boundary
+ *   - embedSummaryContent()  — standalone summary embedding (for batch ingest)
  *
  * Error strategy:
  *   - Throws on fatal errors (summary not found, INSERT failed)
  *   - Absorbs embedding failures → returns embeddings_failed count
+ *   - Summary embedding failure is non-fatal in pipeline context
  *   - Caller decides whether to throw or log
  *
  * Fase 5, sub-task 5.5 — Issue #30
+ * Fase 3, sub-tasks 3.2/3.3 — Summary embeddings (Bloque 2)
  */
 
 import { chunkMarkdown, type ChunkOptions } from "./chunker.ts";
@@ -38,8 +45,96 @@ export interface AutoIngestResult {
   embeddings_failed: number;
   /** Chunking strategy used (from ChunkResult.strategy) */
   strategy_used: string;
+  /** Whether the summary-level embedding was generated successfully (Fase 3) */
+  summary_embedded: boolean;
   /** Total wall-clock time in milliseconds */
   elapsed_ms: number;
+}
+
+// ─── Text Utilities ─────────────────────────────────────────────────
+
+/**
+ * Truncate text at a word boundary, never exceeding maxChars.
+ *
+ * Used to prepare summary content for embedding generation.
+ * Gemini embedding-001 supports ~10K tokens; we truncate at 8000
+ * chars to leave ~2K tokens of margin.
+ *
+ * @param text      The text to truncate
+ * @param maxChars  Maximum character count
+ * @returns         Truncated text (may be shorter than maxChars)
+ *
+ * @example
+ *   truncateAtWord("Hello world foo", 11)
+ *   // → "Hello world"  (cuts at space before position 11)
+ *
+ *   truncateAtWord("Short", 100)
+ *   // → "Short"  (no truncation needed)
+ */
+export function truncateAtWord(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+
+  // Find the last space at or before maxChars
+  const cutPoint = text.lastIndexOf(" ", maxChars);
+
+  // Edge case: no spaces in the text (e.g., a single very long word
+  // or CJK text without spaces) → hard cut
+  if (cutPoint <= 0) return text.slice(0, maxChars);
+
+  return text.slice(0, cutPoint);
+}
+
+// ─── Summary Embedding ──────────────────────────────────────────────
+
+/** Max chars for summary embedding input. 8000 chars ≈ 2000-2500 tokens,
+ *  well within Gemini embedding-001's ~10K token limit. */
+const SUMMARY_EMBED_MAX_CHARS = 8000;
+
+/**
+ * Generate and store an embedding for a summary's full content.
+ *
+ * Concatenates title + content_markdown, truncates to safe length,
+ * generates a 768d embedding, and stores it in summaries.embedding.
+ *
+ * This function THROWS on failure. The caller decides whether to
+ * absorb or propagate the error:
+ *   - autoChunkAndEmbed(): catches + warns (non-fatal in pipeline)
+ *   - ingest.ts batch:    catches + increments failed counter
+ *   - Direct call:        propagates to HTTP handler
+ *
+ * @param summaryId         UUID of the summary
+ * @param title             Summary title (may be empty string)
+ * @param contentMarkdown   Summary content (must be non-empty)
+ * @throws                  If embedding generation or DB update fails
+ *
+ * Fase 3, sub-task 3.2 — Bloque 2
+ */
+export async function embedSummaryContent(
+  summaryId: string,
+  title: string,
+  contentMarkdown: string,
+): Promise<void> {
+  // Concatenate title + content with semantic separator.
+  // The ". " signals to the embedding model that the title
+  // is a distinct semantic unit from the body.
+  const combined = title.trim().length > 0
+    ? `${title.trim()}. ${contentMarkdown}`
+    : contentMarkdown;
+
+  const truncated = truncateAtWord(combined, SUMMARY_EMBED_MAX_CHARS);
+
+  const embedding = await generateEmbedding(truncated, "RETRIEVAL_DOCUMENT");
+
+  const { error } = await getAdminClient()
+    .from("summaries")
+    .update({ embedding: JSON.stringify(embedding) })
+    .eq("id", summaryId);
+
+  if (error) {
+    throw new Error(
+      `[Auto-Ingest] Summary embedding UPDATE failed for ${summaryId}: ${error.message}`,
+    );
+  }
 }
 
 // ─── Entry Point ────────────────────────────────────────────────────
@@ -110,6 +205,7 @@ export async function autoChunkAndEmbed(
       embeddings_generated: 0,
       embeddings_failed: 0,
       strategy_used: "none",
+      summary_embedded: false,
       elapsed_ms: Date.now() - t0,
     };
   }
@@ -136,6 +232,7 @@ export async function autoChunkAndEmbed(
       embeddings_generated: 0,
       embeddings_failed: 0,
       strategy_used: "none",
+      summary_embedded: false,
       elapsed_ms: Date.now() - t0,
     };
   }
@@ -216,7 +313,7 @@ export async function autoChunkAndEmbed(
     );
   }
 
-  // ── Step 7: Generate embeddings (sequential, rate-limited) ────
+  // ── Step 7: Generate chunk embeddings (sequential, rate-limited)
   //
   // Sequential loop with 1s pause every 10 embeddings.
   // Consistent with ingest.ts pattern.
@@ -272,13 +369,42 @@ export async function autoChunkAndEmbed(
     }
   }
 
-  // ── Step 8: Return result ─────────────────────────────────────
+  // ── Step 8: Generate summary-level embedding (Fase 3) ─────────
+  //
+  // Embed the FULL summary (title + content_markdown) as a single
+  // vector. This enables coarse-to-fine search: the summary embedding
+  // provides macro-relevance signal, then chunk embeddings provide
+  // fine-grained matches.
+  //
+  // Non-fatal: if this fails, chunk embeddings are still intact.
+  // The summary embedding can be generated later via:
+  //   POST /ai/ingest-embeddings { target: "summaries" }
+  //
+  // This is the LAST async step, placed AFTER chunk embeddings
+  // because chunks are more critical for search quality.
+
+  let summaryEmbedded = false;
+
+  try {
+    await embedSummaryContent(summaryId, title, contentMarkdown);
+    summaryEmbedded = true;
+  } catch (e) {
+    // Non-fatal: chunk embeddings already succeeded.
+    // Log at warn level — this is a degradation, not a failure.
+    console.warn(
+      `[Auto-Ingest] Summary embedding failed for ${summaryId}: ` +
+        (e as Error).message,
+    );
+  }
+
+  // ── Step 9: Return result ─────────────────────────────────────
 
   const elapsed = Date.now() - t0;
 
   console.info(
     `[Auto-Ingest] Done: ${summaryId} — ${chunks.length} chunks, ` +
-      `${generated} embedded, ${failed} failed, ${elapsed}ms`,
+      `${generated} embedded, ${failed} failed, ` +
+      `summary_embed=${summaryEmbedded}, ${elapsed}ms`,
   );
 
   return {
@@ -287,6 +413,7 @@ export async function autoChunkAndEmbed(
     embeddings_generated: generated,
     embeddings_failed: failed,
     strategy_used: chunks[0]?.strategy ?? "recursive",
+    summary_embedded: summaryEmbedded,
     elapsed_ms: elapsed,
   };
 }
