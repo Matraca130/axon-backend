@@ -5,7 +5,8 @@
 > `chunking-strategies.md`, `hybrid-retrieval.ts`, `adaptive-ia-study.md`),
 > adaptado a Gemini como provider inicial.
 >
-> **Auditoria v8:** 2026-03-05 — T-03 (query log + feedback loop) completado (PR #27, migration aplicada).
+> **Auditoria v9:** 2026-03-06 — Fase 5 chunking + auto-ingest completado (Issue #30, branch feat/fase5-chunking).
+> v8: T-03 (query log + feedback loop) completado (PR #27, migration aplicada).
 > v7: T-01 (denorm institution_id + RPC) y T-02 (tsvector + GIN) completados.
 > v6: Todos los quick fixes aplicados (INC-1/3/6).
 > v5: Cross-audit con codigo fuente real.
@@ -28,7 +29,7 @@
 | 8 | Ruta de ingesta de embeddings | **DONE** | blueprint |
 | 9 | Ruta de busqueda semantica + respuesta | **DONE** | blueprint |
 | 10 | Generacion adaptativa (flashcards/quiz) | **DONE** | blueprint |
-| 11 | Chunking inteligente (semantico) | **PENDIENTE** | blueprint + chunking-strategies |
+| 11 | Chunking inteligente (semantico) | **PARCIAL** | blueprint + chunking-strategies |
 | 12 | Re-ranking | **PENDIENTE** | blueprint + hybrid-retrieval |
 | 13 | Ingestion multi-fuente (PDF, API) | **PENDIENTE** | blueprint |
 | 14 | Auth + institution scoping | **DONE** | blueprint |
@@ -36,12 +37,12 @@
 | 16 | Denormalizacion institution_id | **DONE** | auditoria v2 → T-01 (PR #24) |
 | 17 | Feedback loop (thumbs up/down) en RAG chat | **DONE** | auditoria v2 → T-03 (PR #27) |
 | 18 | Monitoring de cobertura de embeddings | **DONE** | auditoria v2 → T-03 (PR #27) |
-| 19 | Auto-ingest trigger | **PENDIENTE** | auditoria v2 |
+| 19 | Auto-ingest trigger | **DONE** | auditoria v2 → Issue #30 |
 | 20 | Multi-Query Retrieval (+25% recall) | **PENDIENTE** | hybrid-retrieval.ts |
 | 21 | HyDE — Hypothetical Document Embeddings | **PENDIENTE** | hybrid-retrieval.ts |
 | 22 | Seleccion dinamica de estrategia de retrieval | **PENDIENTE** | hybrid-retrieval.ts |
 | 23 | Semantic Chunking (embedding-based boundaries) | **PENDIENTE** | chunking-strategies |
-| 24 | Decision framework para estrategia de chunking | **PENDIENTE** | chunking-strategies |
+| 24 | Decision framework para estrategia de chunking | **PARCIAL** | chunking-strategies |
 | 25 | NeedScore integration con /ai/generate | **PENDIENTE** | adaptive-ia-study |
 | 26 | Pre-generacion en background | **PENDIENTE** | adaptive-ia-study |
 | 27 | Rate limit especifico para AI (20/hr) | **DONE** | adaptive-ia-study → `routes/ai/index.ts` (INC-3) |
@@ -50,7 +51,11 @@
 | 30 | Quality dashboard para preguntas AI flaggeadas | **PENDIENTE** | adaptive-ia-study |
 | 31 | chat.ts comentarios stale en header | **DONE** | auditoria v2 → `routes/ai/chat.ts` (INC-1) |
 
-**Resumen: 17/31 completados, 14 pendientes.**
+**Resumen: 18/31 completados, 11 pendientes, 2 parciales.**
+
+> **Parciales:**
+> - #11 Chunking inteligente: Recursive Character implementado como default (Fase 5). Semantic Chunking (embedding-based boundaries, #23) pendiente para fases futuras.
+> - #24 Decision framework: Recursive = default implementado. Upgrade automático a Semantic para docs largos pendiente.
 
 ---
 
@@ -358,11 +363,41 @@ CREATE POLICY rag_log_update_feedback ON rag_query_log FOR UPDATE
 
 ---
 
-## Fase 5 — Chunking inteligente + Auto-ingest
+## Fase 5 — Chunking inteligente + Auto-ingest — DONE
 
 **Prioridad:** MEDIA-ALTA — chunking actual es basico, afecta calidad directamente.
 **Riesgo:** MEDIO — requiere re-ingest.
 **Impacto:** Mejor coherencia semantica = mejor retrieval = mejores respuestas.
+**Estado:** **DONE** — Issue #30 (branch `feat/fase5-chunking`). Sub-tasks 5.1–5.10 completados.
+
+### Archivos creados/modificados (Fase 5)
+
+| Archivo | Tipo | Descripción |
+|---|---|---|
+| `chunker.ts` | Nuevo | Motor de chunking: Recursive Character Splitting con respeto a límites markdown |
+| `auto-ingest.ts` | Nuevo | Pipeline puro: fetch summary → chunk → delete old → insert new → embed → update timestamp |
+| `summary-hook.ts` | Nuevo | afterWrite hook con 3 gates: update field check, ID extraction, content check |
+| `routes/ai/re-chunk.ts` | Nuevo | POST /ai/re-chunk — endpoint síncrono para re-chunking manual (profesor) |
+| `routes/ai/index.ts` | Modificado | Mount de `aiReChunkRoutes` |
+| `crud-factory.ts` | Modificado | `AfterWriteParams` type + `afterWrite?` callback en CrudConfig + fire-and-forget en POST/PUT |
+| `routes/content/crud.ts` | Modificado | `afterWrite: onSummaryWrite` en config de summaries |
+| `tests/summary_hook_test.ts` | Nuevo | 8 tests: gate logic (7 skip paths + 1 fire path) |
+| Migration `20260306_04` | Nuevo | Columnas `chunk_strategy TEXT DEFAULT 'recursive'` + `last_chunked_at TIMESTAMPTZ` en summaries |
+
+### Sub-tasks completados
+
+| # | Sub-task | Commits |
+|---|---|---|
+| 5.1 | `chunker.ts` — Recursive Character Splitting | Branch inicial |
+| 5.2 | 10 unit tests para chunker + 3 fixes auditía R2 | Branch inicial |
+| 5.3 | Fixtures de test (markdown samples) | Branch inicial |
+| 5.4 | Migration: `chunk_strategy` + `last_chunked_at` | Branch inicial |
+| 5.5 | `auto-ingest.ts` — función pura `autoChunkAndEmbed` + 1 fix R1 | `3026a31` |
+| 5.6 | `routes/ai/re-chunk.ts` — POST /ai/re-chunk | `3026a31` |
+| 5.7 | Mount `aiReChunkRoutes` en AI module combiner | `01de895` |
+| 5.8 | Fire-and-forget hook en POST/PUT summaries | `a883931`, `2b6f5b7`, `de5095f` |
+| 5.9 | 8 tests para `onSummaryWrite` gate logic | `aae4eb0` |
+| 5.10 | Actualizar RAG_ROADMAP.md | Este commit |
 
 ### Decision framework (de `chunking-strategies.md`)
 
@@ -462,7 +497,7 @@ Fase 2: Columnas tsvector + GIN      [DONE]   [T-02, PR #25]   [migration aplica
   |
 Fase 4: Query log + feedback          [DONE]   [T-03, PR #27]   [migration aplicada en SQL Editor]
   |
-Fase 5: Chunking + auto-ingest        [2 dias] [nuevo archivo]  [mejora calidad RAG]
+Fase 5: Chunking + auto-ingest        [DONE]   [Issue #30]      [mejora calidad RAG]
   |
 Fase 3: Embeddings en summaries       [1 dia]  [SQL + ingest]   [coarse-to-fine]
   |
@@ -474,7 +509,7 @@ Fase 6: Retrieval avanzado            [2 dias] [chat.ts]        [Multi-Query + H
 Fase 7: Ingestion PDF                 [3 dias] [nuevo modulo]   [feature nueva]
 ```
 
-**Total estimado: ~10 dias restantes**
+**Total estimado: ~8 dias restantes**
 
 ---
 
