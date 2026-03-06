@@ -134,28 +134,16 @@ export function chunkMarkdown(
 
 // ─── Core: Recursive Splitting ──────────────────────────────────────
 
-/**
- * Recursively split text using a hierarchy of separators.
- *
- * Re-attachment logic is separator-aware:
- *   - Headers (## / ###): re-attach header marker to the START of the next fragment
- *     so "## Mitosis\nContent" stays together.
- *   - Sentences (. ): append "." to the END of the previous fragment
- *     so "First sentence" becomes "First sentence." and the next starts clean.
- *   - Paragraphs (\n\n) / Spaces: no re-attachment needed — they're neutral breaks.
- */
 function recursiveSplit(
   text: string,
   separators: readonly string[],
   level: number,
   opts: Required<ChunkOptions>,
 ): string[] {
-  // Base case: text fits in one chunk
   if (text.length <= opts.maxChunkSize) {
     return [text];
   }
 
-  // No more separators → hard split by maxChunkSize (absolute last resort)
   if (level >= separators.length) {
     return hardSplit(text, opts.maxChunkSize);
   }
@@ -163,61 +151,48 @@ function recursiveSplit(
   const separator = separators[level];
   const parts = text.split(separator);
 
-  // If the separator didn't split anything useful → try next level
   if (parts.length <= 1) {
     return recursiveSplit(text, separators, level + 1, opts);
   }
 
-  // ── Separator-aware re-attachment ──────────────────────────────
   const fragments: string[] = [];
 
   if (isHeaderSeparator(separator)) {
-    // HEADERS: re-attach marker to the START of each subsequent fragment
-    // e.g. "\n## " split → prepend "## " to fragments[1..n]
     for (let i = 0; i < parts.length; i++) {
       if (i === 0) {
         if (parts[i].trim().length > 0) fragments.push(parts[i]);
       } else {
-        const headerMarker = separator.trimStart(); // "## " or "### "
+        const headerMarker = separator.trimStart();
         const restored = headerMarker + parts[i];
         if (restored.trim().length > 0) fragments.push(restored);
       }
     }
   } else if (separator === ". ") {
-    // SENTENCES: append "." to the END of each fragment (except the last)
-    // Split of "A. B. C." → ["A", "B", "C."] → ["A.", "B.", "C."]
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i];
       if (part.trim().length === 0) continue;
 
       if (i < parts.length - 1) {
-        // Not the last part → the "." was stripped, add it back
         fragments.push(part + ".");
       } else {
-        // Last part → may already end with "." or not; keep as-is
         fragments.push(part);
       }
     }
   } else {
-    // PARAGRAPHS / SPACES: neutral separators, no re-attachment
     for (const part of parts) {
       if (part.trim().length > 0) fragments.push(part);
     }
   }
 
-  // If re-attachment collapsed everything into one or zero fragments,
-  // try the next separator level
   if (fragments.length <= 1) {
     return recursiveSplit(text, separators, level + 1, opts);
   }
 
-  // Recurse: if any fragment is still too large, split it deeper
   const result: string[] = [];
   for (const frag of fragments) {
     if (frag.length <= opts.maxChunkSize) {
       result.push(frag);
     } else {
-      // Go one level deeper in the separator hierarchy
       const subChunks = recursiveSplit(frag, separators, level + 1, opts);
       result.push(...subChunks);
     }
@@ -228,11 +203,6 @@ function recursiveSplit(
 
 // ─── Hard Split (Last Resort) ───────────────────────────────────────
 
-/**
- * Hard-split text into chunks of exactly maxSize chars.
- * Only used when all separators have been exhausted — extremely rare
- * for well-formed markdown.
- */
 function hardSplit(text: string, maxSize: number): string[] {
   const chunks: string[] = [];
   let offset = 0;
@@ -245,11 +215,6 @@ function hardSplit(text: string, maxSize: number): string[] {
 
 // ─── Merge Small Chunks ─────────────────────────────────────────────
 
-/**
- * Merge chunks smaller than minSize with the next chunk.
- * Prevents low-information fragments that would waste embedding calls
- * and produce poor retrieval matches.
- */
 function mergeSmallChunks(chunks: string[], minSize: number): string[] {
   if (chunks.length <= 1) return chunks;
 
@@ -263,17 +228,14 @@ function mergeSmallChunks(chunks: string[], minSize: number): string[] {
       buffer = buffer + "\n\n" + chunk;
     }
 
-    // Flush buffer if it's large enough
     if (buffer.length >= minSize) {
       result.push(buffer);
       buffer = "";
     }
   }
 
-  // Handle remaining buffer
   if (buffer.length > 0) {
     if (result.length > 0 && buffer.length < minSize) {
-      // Merge with the last chunk instead of leaving a tiny trailing chunk
       result[result.length - 1] = result[result.length - 1] + "\n\n" + buffer;
     } else {
       result.push(buffer);
@@ -287,17 +249,9 @@ function mergeSmallChunks(chunks: string[], minSize: number): string[] {
 
 /**
  * Add overlap between consecutive chunks.
- * The last N characters of chunk[i] are prepended to chunk[i+1].
- * This ensures that retrieval context isn't lost at chunk boundaries.
- *
- * The overlap text is separated by "\n...\n" to signal to the LLM
- * that this is continued context from the previous segment.
- *
- * Note: The overlap text is ADDED to the chunk, so the final chunk
- * content may exceed maxChunkSize. This is standard behaviour — the
- * overlap provides retrieval context, not a size constraint.
+ * Exported for reuse by semantic-chunker.ts (D39).
  */
-function addOverlap(chunks: string[], overlapSize: number): string[] {
+export function addOverlap(chunks: string[], overlapSize: number): string[] {
   if (chunks.length <= 1 || overlapSize <= 0) return chunks;
 
   const result: string[] = [chunks[0]];
@@ -305,15 +259,8 @@ function addOverlap(chunks: string[], overlapSize: number): string[] {
   for (let i = 1; i < chunks.length; i++) {
     const prevChunk = chunks[i - 1];
 
-    // Extract overlap from the end of the previous chunk
-    // Try to start at a word boundary to avoid cutting mid-word
     let overlapStart = Math.max(0, prevChunk.length - overlapSize);
 
-    // Snap to the nearest word boundary (space) after overlapStart,
-    // but ONLY if we're cutting into the middle of the chunk.
-    // When overlapStart === 0 the entire previous chunk fits in the
-    // overlap window, so snapping forward would needlessly skip the
-    // first word.
     if (overlapStart > 0) {
       const spaceIdx = prevChunk.indexOf(" ", overlapStart);
       if (spaceIdx !== -1 && spaceIdx < prevChunk.length) {
@@ -331,4 +278,34 @@ function addOverlap(chunks: string[], overlapSize: number): string[] {
   }
 
   return result;
+}
+
+// ─── Strategy Selection (D41, D42) ──────────────────────────────────
+
+/**
+ * Recommend a chunking strategy based on text characteristics.
+ *
+ * @param text            The text to be chunked
+ * @param forceStrategy   Optional override — skips heuristic
+ * @param thresholdChars  Optional char threshold for semantic upgrade (default: 4000)
+ * @returns               The recommended strategy
+ */
+export function selectChunkStrategy(
+  text: string,
+  forceStrategy?: "recursive" | "semantic",
+  thresholdChars?: number,
+): "recursive" | "semantic" {
+  if (forceStrategy === "recursive" || forceStrategy === "semantic") {
+    return forceStrategy;
+  }
+
+  if (!text || text.trim().length === 0) return "recursive";
+
+  const SEMANTIC_THRESHOLD_CHARS = thresholdChars ?? 4000;
+
+  if (text.trim().length >= SEMANTIC_THRESHOLD_CHARS) {
+    return "semantic";
+  }
+
+  return "recursive";
 }
