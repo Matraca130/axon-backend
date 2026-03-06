@@ -1,7 +1,7 @@
 # Axon Backend Map
 
 > Single source of truth for navigating the `axon-backend` repository.
-> Last updated: 2026-03-04 (post cross-audit INC-4 fix — 26 migrations)
+> Last updated: 2026-03-08 (Fase 8 Par 4 cleanup — 40 migration files, 12 AI files, 6 test files)
 
 ## Repository Structure
 
@@ -25,7 +25,7 @@ axon-backend/
 |       |-- 06-ai-rag.md                <- AI/RAG endpoints, payloads, pipeline
 |       +-- README.md
 |-- supabase/
-|   |-- migrations/                     <- All SQL migrations (26 files)
+|   |-- migrations/                     <- All SQL migrations (40 files)
 |   +-- functions/server/               <- Edge Function (Hono + Deno)
 |       |-- index.ts                    <- ENTRYPOINT: mounts all routes + middleware
 |       |-- db.ts                       <- Supabase clients, auth, response helpers
@@ -35,26 +35,39 @@ axon-backend/
 |       |-- rate-limit.ts               <- In-memory sliding window rate limiter
 |       |-- timing-safe.ts              <- Constant-time string comparison
 |       |-- gemini.ts                   <- Gemini API helpers + GENERATE_MODEL constant
+|       |-- chunker.ts                  <- Recursive Character chunking engine (Fase 5)
+|       |-- auto-ingest.ts              <- Auto-chunking + embedding pipeline (Fase 5 + Fase 3)
+|       |-- summary-hook.ts             <- afterWrite hook for summaries (Fase 5)
 |       |
 |       |-- routes/                     <- SPLIT MODULES (7 domains)
-|       |   |-- content/                <- Content hierarchy (6 files)
+|       |   |-- content/                <- Content hierarchy (8 files)
 |       |   |   |-- index.ts            <- Module combiner
 |       |   |   |-- crud.ts             <- 9 registerCrud (courses->subtopics)
 |       |   |   |-- keyword-connections.ts  <- Manual CRUD
+|       |   |   |-- keyword-search.ts   <- Institution-scoped keyword search
 |       |   |   |-- prof-notes.ts       <- kw_prof_notes upsert
 |       |   |   |-- reorder.ts          <- Bulk reorder (M-3 RPC + fallback)
-|       |   |   +-- content-tree.ts     <- Nested hierarchy GET
-|       |   |-- study/                  <- Study system (5 files)
+|       |   |   |-- content-tree.ts     <- Nested hierarchy GET
+|       |   |   +-- flashcards-by-topic.ts <- Batch flashcard load by topic (PERF C1)
+|       |   |-- study/                  <- Study system (6 files)
 |       |   |   |-- index.ts            <- Module combiner
 |       |   |   |-- sessions.ts         <- 3 registerCrud (sessions, plans, tasks)
 |       |   |   |-- reviews.ts          <- Reviews + quiz-attempts (O-3 ownership)
 |       |   |   |-- progress.ts         <- topic-progress, topics-overview, reading-states, daily-activities, student-stats
-|       |   |   +-- spaced-rep.ts       <- FSRS + BKT states
-|       |   |-- ai/                     <- AI / RAG module (5 files)
-|       |   |   |-- index.ts            <- AI module combiner
-|       |   |   |-- generate.ts         <- POST /ai/generate (flashcards + quiz)
-|       |   |   |-- ingest.ts           <- POST /ai/ingest-embeddings (batch embeddings)
-|       |   |   |-- chat.ts             <- POST /ai/rag-chat (semantic search + Gemini)
+|       |   |   |-- spaced-rep.ts       <- FSRS + BKT states
+|       |   |   +-- batch-review.ts     <- POST /review-batch (PERF M1: atomic batch)
+|       |   |-- ai/                     <- AI / RAG module (12 files)
+|       |   |   |-- index.ts            <- AI module combiner + rate limit middleware
+|       |   |   |-- generate.ts         <- POST /ai/generate (manual: client provides IDs)
+|       |   |   |-- generate-smart.ts   <- POST /ai/generate-smart (adaptive: NeedScore auto-target) [Fase 8A]
+|       |   |   |-- pre-generate.ts     <- POST /ai/pre-generate (bulk: professor fills gaps) [Fase 8D]
+|       |   |   |-- report.ts           <- POST /ai/report + PATCH /ai/report/:id [Fase 8B]
+|       |   |   |-- report-dashboard.ts <- GET /ai/report-stats + GET /ai/reports [Fase 8C]
+|       |   |   |-- ingest.ts           <- POST /ai/ingest-embeddings (batch embeddings + summary embed)
+|       |   |   |-- re-chunk.ts         <- POST /ai/re-chunk (manual re-chunking) [Fase 5]
+|       |   |   |-- chat.ts             <- POST /ai/rag-chat (coarse-to-fine + hybrid search + Gemini)
+|       |   |   |-- feedback.ts         <- PATCH /ai/rag-feedback (T-03)
+|       |   |   |-- analytics.ts        <- GET /ai/rag-analytics + /ai/embedding-coverage (T-03)
 |       |   |   +-- list-models.ts      <- GET /ai/list-models (diagnostic)
 |       |   |-- members/                <- Institutions + memberships (4 files)
 |       |   |   |-- index.ts
@@ -88,10 +101,13 @@ axon-backend/
 |       |-- routes-student.tsx          <- Student instruments & notes (6KB)
 |       |-- routes-study-queue.tsx       <- Study queue algorithm (15KB)
 |       |
-|       +-- tests/                      <- Deno-native tests (3 files)
+|       +-- tests/                      <- Deno-native tests (6 files)
+|           |-- auth_helpers_test.ts
+|           |-- fase3_test.ts           <- 8 tests: truncateAtWord + summary_embedded assertion
 |           |-- rate_limit_test.ts
 |           |-- validate_test.ts
-|           +-- timing_safe_test.ts
+|           |-- timing_safe_test.ts
+|           +-- summary_hook_test.ts    <- 9 tests for afterWrite gate logic (Fase 5)
 +-- README.md
 ```
 
@@ -174,7 +190,7 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 
 ## Route Modules — Complete Endpoint Reference
 
-### `routes/content/` — Content Hierarchy (6 files)
+### `routes/content/` — Content Hierarchy (8 files)
 
 **Factory CRUD (9 tables):** `courses`, `semesters`, `sections`, `topics`, `summaries`, `chunks`, `summary-blocks`, `keywords`, `subtopics`
 
@@ -192,8 +208,9 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | DELETE | `/kw-prof-notes/:id` | prof-notes.ts | Hard delete |
 | PUT | `/reorder` | reorder.ts | Bulk reorder (M-3: RPC + fallback) |
 | GET | `/content-tree?institution_id=` | content-tree.ts | Nested hierarchy tree |
+| GET | `/flashcards-by-topic?topic_id=` | flashcards-by-topic.ts | Batch load all flashcards for a topic (PERF C1) |
 
-### `routes/study/` — Study System (5 files)
+### `routes/study/` — Study System (6 files)
 
 **Factory CRUD (3 tables):** `study-sessions`, `study-plans`, `study-plan-tasks`
 
@@ -212,6 +229,7 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | POST | `/reviews` | reviews.ts | Create review (grade 0-5) |
 | GET | `/quiz-attempts?quiz_question_id=&session_id=` | reviews.ts | List attempts |
 | POST | `/quiz-attempts` | reviews.ts | Create attempt |
+| POST | `/review-batch` | batch-review.ts | Atomic batch: reviews + FSRS + BKT in 1 request (PERF M1) |
 | GET | `/reading-states?summary_id=` | progress.ts | Get reading state |
 | POST | `/reading-states` | progress.ts | Upsert reading state |
 | GET | `/daily-activities?from=&to=` | progress.ts | List (P-2: capped 500) |
@@ -223,14 +241,28 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | GET | `/bkt-states?subtopic_id=` | spaced-rep.ts | List (capped 500) |
 | POST | `/bkt-states` | spaced-rep.ts | Upsert |
 
-### `routes/ai/` — AI / RAG Module (5 files)
+### `routes/ai/` — AI / RAG Module (12 files)
 
-| Method | Path | File | Description |
-|---|---|---|---|
-| POST | `/ai/generate` | generate.ts | Generate flashcard or quiz question (adaptive, uses student profile + BKT) |
-| POST | `/ai/ingest-embeddings` | ingest.ts | Batch-generate embeddings for chunks without vectors |
-| POST | `/ai/rag-chat` | chat.ts | Semantic search (hybrid: pgvector + full-text) + Gemini response |
-| GET | `/ai/list-models` | list-models.ts | Diagnostic: list all available Gemini models for current API key |
+**Rate limit middleware** (in `index.ts`):
+- 20 POST requests/hour per user via distributed `check_rate_limit()` RPC
+- Excludes: all GET/PATCH, POST `/ai/report` (no Gemini), POST `/ai/pre-generate` (own bucket)
+
+| Method | Path | File | Auth | Description |
+|---|---|---|---|---|
+| POST | `/ai/generate` | generate.ts | ALL_ROLES | Generate flashcard/quiz (client provides summary_id + keyword_id) |
+| POST | `/ai/generate-smart` | generate-smart.ts | ALL_ROLES | Adaptive generation (NeedScore auto-selects best keyword) [Fase 8A] |
+| POST | `/ai/pre-generate` | pre-generate.ts | CONTENT_WRITE | Bulk pre-generation (professor fills coverage gaps, own rate limit) [Fase 8D] |
+| POST | `/ai/report` | report.ts | ALL_ROLES | Report AI content quality issue (student flags bad content) [Fase 8B] |
+| PATCH | `/ai/report/:id` | report.ts | CONTENT_WRITE | Resolve/dismiss a quality report [Fase 8B] |
+| GET | `/ai/report-stats` | report-dashboard.ts | CONTENT_WRITE | Aggregate quality metrics via RPC [Fase 8C] |
+| GET | `/ai/reports` | report-dashboard.ts | CONTENT_WRITE | Paginated report listing with filters [Fase 8C] |
+| POST | `/ai/ingest-embeddings` | ingest.ts | MANAGEMENT | Batch-generate embeddings for chunks + summaries [Fase 3] |
+| POST | `/ai/re-chunk` | re-chunk.ts | CONTENT_WRITE | Manual re-chunking of a summary [Fase 5] |
+| POST | `/ai/rag-chat` | chat.ts | ALL_ROLES | Coarse-to-fine + hybrid search + Gemini response [Fase 3] |
+| PATCH | `/ai/rag-feedback` | feedback.ts | ALL_ROLES | Submit feedback on RAG chat response (thumbs up/down) [T-03] |
+| GET | `/ai/rag-analytics` | analytics.ts | MANAGEMENT | RAG query metrics (aggregated) [T-03] |
+| GET | `/ai/embedding-coverage` | analytics.ts | MANAGEMENT | % of chunks with embeddings [T-03] |
+| GET | `/ai/list-models` | list-models.ts | ALL_ROLES | Diagnostic: list available Gemini models |
 
 > Full documentation: [`docs/AI_PIPELINE.md`](AI_PIPELINE.md) and [`docs/figma-make/06-ai-rag.md`](figma-make/06-ai-rag.md)
 
@@ -283,7 +315,7 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 
 ## Migrations Inventory
 
-### `supabase/migrations/` (26 files — single canonical directory)
+### `supabase/migrations/` (40 files — single canonical directory)
 
 | File | Code | Status | Description |
 |---|---|---|---|
@@ -312,11 +344,27 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | `20260305_01` | -- | Applied | mv_knowledge_profile materialized view |
 | `20260305_02` | -- | Applied | get_student_knowledge_context() RPC |
 | `20260305_03` | LA-04 | Applied | pgvector setup: chunks.embedding + HNSW index + rag_hybrid_search() |
-| `20260305_04` | -- | Applied | pg_cron job: refresh mv_knowledge_profile every 15 min |
+| `20260305_04a` | -- | Applied | pg_cron job: refresh mv_knowledge_profile every 15 min |
+| `20260305_04b` | T-03 | Applied | rag_query_log table + indexes + RLS + analytics RPCs |
+| `20260305_05` | -- | Applied | idx_chunks_summary_order index |
+| `20260305_06` | -- | Applied | search_keywords_by_institution RPC |
+| `20260306_01` | -- | Applied | keyword_connections v2 (type column) |
+| `20260306_02a` | -- | Applied | fts_columns_and_rpc_v3 (tsvector + GIN + RPC) |
+| `20260306_02b` | -- | Applied | restore_optimized_rag_hybrid_search |
+| `20260306_02c` | -- | Applied | search_kw_published_filter |
+| `20260306_03` | T-02 | Applied | tsvector GIN columns (Fase 2) |
+| `20260307_01` | -- | Applied | Consolidated RAG safe-apply (tsvector + GIN + RPC v3) |
+| `20260307_02` | F5 | Applied | Chunking columns: chunk_strategy + last_chunked_at (Fase 5) |
+| `20260307_03` | F3 | Applied | Summary embeddings + HNSW + rag_coarse_to_fine_search() (Fase 3) |
+| `20260308_01` | F8A | PENDING | get_smart_generate_target() RPC — NeedScore keyword selection (Fase 8A) |
+| `20260308_02` | F8B | PENDING | ai_content_reports table + indexes + RLS (Fase 8B) |
+| `20260308_03` | F8C | PENDING | get_ai_report_stats() RPC — aggregate quality metrics (Fase 8C) |
 
-> **Note on duplicate `20260304_01` prefix:** Two files share this date prefix
-> (`algorithm_config` and `study_queue_rpc_scoping`). Listed here as `01a` and
-> `01b` for clarity. Both are applied.
+> **Note on duplicate date prefixes:** Some dates have multiple files (e.g. `20260304_01`,
+> `20260305_04`, `20260306_02`). Listed here with letter suffixes (a/b/c) for clarity.
+> All are applied unless marked PENDING.
+
+> **Note on Fase 8 migrations:** `20260308_01/02/03` must be applied via SQL Editor after merge.
 
 ---
 
@@ -365,8 +413,8 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | PF-02 | Ingest requires `institution_id` + role check | routes/ai/ingest.ts |
 | PF-05 | DB queries before Gemini calls (JWT validation security) | routes/ai/*.ts |
 | PF-09 | Ingest uses admin client for embedding UPDATE (bypass RLS) | routes/ai/ingest.ts |
-| BUG-1 | `created_by: user.id` in AI-generated inserts | routes/ai/generate.ts |
-| BUG-3 | Institution scoping via `resolve_parent_institution` | routes/ai/generate.ts |
+| BUG-1 | `created_by: user.id` in AI-generated inserts | routes/ai/generate.ts, generate-smart.ts, pre-generate.ts |
+| BUG-3 | Institution scoping via `resolve_parent_institution` | routes/ai/generate.ts, generate-smart.ts, pre-generate.ts |
 | BUG-4 | `keyword_id` fallback from summary's first keyword | routes/ai/generate.ts |
 | LA-01 | Scoped fallback query in ingest (cross-tenant prevention) | routes/ai/ingest.ts |
 | LA-02 | AbortController timeout on Gemini fetch (15s/10s) | gemini.ts |
@@ -376,12 +424,27 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | D-16 | Embedding model -> `gemini-embedding-001` + `outputDimensionality: 768` | gemini.ts |
 | D-17 | Generation model -> `gemini-2.5-flash` (quota bucket separation) | gemini.ts |
 | D-18 | `_meta.model` uses `GENERATE_MODEL` constant (was hardcoded) | routes/ai/generate.ts |
+| D-9 | Pre-generate has separate rate limit bucket (`ai-pregen:{userId}`, 10/hr) | routes/ai/pre-generate.ts |
+
+### PERF-series (Performance batch endpoints)
+| Code | Fix | File |
+|---|---|---|
+| C1 | Batch flashcard load by topic (eliminates N+1) | routes/content/flashcards-by-topic.ts |
+| M1 | Atomic batch review persistence (90 reqs -> 1) | routes/study/batch-review.ts |
 
 ### INC-series (Cross-audit fixes — 2026-03-04)
 | Code | Fix | File |
 |---|---|---|
 | INC-5 | `get_institution_summary_ids()` RPC for institution-scoped ingest | migration 20260304_05 |
 | INC-7 | Denormalize `institution_id` on summaries + sync trigger (Fase 1) | migration 20260304_06 |
+
+### F8-series (Fase 8 — IA Adaptativa — 2026-03-08)
+| Code | Fix | File |
+|---|---|---|
+| F8A | NeedScore-based adaptive generation (generate-smart) | routes/ai/generate-smart.ts, migration 20260308_01 |
+| F8B | AI content quality reporting (report + resolve) | routes/ai/report.ts, migration 20260308_02 |
+| F8C | Quality dashboard (stats RPC + paginated listing) | routes/ai/report-dashboard.ts, migration 20260308_03 |
+| F8D | Bulk content pre-generation (separate rate limit) | routes/ai/pre-generate.ts |
 
 ---
 
@@ -405,13 +468,16 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 
 ## Tests
 
-### `tests/` (Deno-native — 3 files)
+### `tests/` (Deno-native — 6 files)
 
 | File | Covers |
 |---|---|
+| `auth_helpers_test.ts` | requireInstitutionRole, isDenied, role checks |
+| `fase3_test.ts` | 8 tests: truncateAtWord + AutoIngestResult.summary_embedded (Fase 3) |
 | `rate_limit_test.ts` | Sliding window rate limiter |
 | `validate_test.ts` | All type guards + validateFields |
 | `timing_safe_test.ts` | Constant-time comparison |
+| `summary_hook_test.ts` | 9 tests for afterWrite gate logic (Fase 5) |
 
 Run: `deno test supabase/functions/server/tests/`
 
@@ -428,10 +494,5 @@ Run: `deno test supabase/functions/server/tests/`
 - Low priority: rename to `.ts` when convenient
 
 ### RAG Roadmap Pending (see `docs/RAG_ROADMAP.md`)
-- Fase 2: tsvector stored columns + GIN indexes
-- Fase 3: Embeddings on summaries (coarse-to-fine search)
-- Fase 4: Query logging + feedback loop
-- Fase 5: Intelligent chunking + auto-ingest trigger
 - Fase 6: Advanced retrieval (Multi-Query + HyDE + Re-ranking)
 - Fase 7: Multi-source ingestion (PDF)
-- Fase 8: Adaptive AI (NeedScore in generate, pre-generation, quality dashboard)

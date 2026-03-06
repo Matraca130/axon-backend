@@ -10,6 +10,7 @@
  *                          PATCH /ai/report/:id             (Fase 8B)
  *   report-dashboard.ts  — GET   /ai/report-stats           (Fase 8C)
  *                          GET   /ai/reports                (Fase 8C)
+ *   pre-generate.ts      — POST  /ai/pre-generate           (Fase 8D)
  *   ingest.ts            — POST  /ai/ingest-embeddings
  *   re-chunk.ts          — POST  /ai/re-chunk               (Fase 5)
  *   chat.ts              — POST  /ai/rag-chat
@@ -25,10 +26,16 @@
  * P6 FIX: POST /ai/report is excluded from rate limit — it doesn't
  * call Gemini, so it shouldn't consume the AI generation quota.
  *
+ * D9 FIX: POST /ai/pre-generate is excluded from the GENERAL rate limit.
+ * It has its OWN separate rate limit bucket (ai-pregen:{userId}, 10/hour)
+ * enforced inside the endpoint. This prevents pre-gen from consuming
+ * the student's interactive AI budget.
+ *
  * T-03: Added feedback and analytics sub-modules (Fase 4).
  * Fase 8A: Added generate-smart sub-module (adaptive generation).
  * Fase 8B: Added report sub-module (content quality reports).
  * Fase 8C: Added report-dashboard sub-module (dashboard + listing).
+ * Fase 8D: Added pre-generate sub-module (bulk content pre-generation).
  */
 
 import { Hono } from "npm:hono";
@@ -37,6 +44,7 @@ import { aiGenerateRoutes } from "./generate.ts";
 import { aiGenerateSmartRoutes } from "./generate-smart.ts";
 import { aiReportRoutes } from "./report.ts";
 import { aiReportDashboardRoutes } from "./report-dashboard.ts";
+import { aiPreGenerateRoutes } from "./pre-generate.ts";
 import { aiIngestRoutes } from "./ingest.ts";
 import { aiReChunkRoutes } from "./re-chunk.ts";
 import { aiChatRoutes } from "./chat.ts";
@@ -55,11 +63,12 @@ const aiRoutes = new Hono();
 // Only applies to Gemini-consuming POST routes (generate, generate-smart,
 // ingest, re-chunk, rag-chat).
 //
-// Excluded (no Gemini API cost):
+// Excluded (no Gemini API cost OR has own rate limit):
 //   GET  /ai/list-models, /ai/rag-analytics, /ai/embedding-coverage
 //   GET  /ai/report-stats, /ai/reports                    (Fase 8C)
 //   PATCH /ai/rag-feedback, /ai/report/:id
-//   POST  /ai/report  (P6 FIX: reports don't call Gemini)
+//   POST  /ai/report       (P6 FIX: no Gemini cost)
+//   POST  /ai/pre-generate  (D9 FIX: own rate limit bucket)
 const AI_RATE_LIMIT = 20;          // max requests per window
 const AI_RATE_WINDOW_MS = 3600000; // 1 hour in milliseconds
 
@@ -67,12 +76,19 @@ async function aiRateLimitMiddleware(c: Context, next: Next) {
   // Only rate-limit POST requests (the ones that call Gemini)
   if (c.req.method !== "POST") return next();
 
+  const url = new URL(c.req.url);
+
   // P6 FIX: Skip rate limit for /ai/report — no Gemini cost.
   // Reports are a feedback mechanism, not a generation action.
   // Without this exclusion, reporting would consume the student's
   // AI generation quota, disincentivizing quality feedback.
-  const url = new URL(c.req.url);
   if (url.pathname.endsWith("/ai/report")) return next();
+
+  // D9 FIX: Skip rate limit for /ai/pre-generate — has its own bucket.
+  // Pre-generation is a professor action with its own rate limit
+  // (ai-pregen:{userId}, 10/hour) enforced inside the endpoint.
+  // Applying the general limit here would double-limit professors.
+  if (url.pathname.endsWith("/ai/pre-generate")) return next();
 
   try {
     // Extract user ID from JWT (lightweight decode, no DB call)
@@ -118,6 +134,7 @@ aiRoutes.route("/", aiGenerateRoutes);
 aiRoutes.route("/", aiGenerateSmartRoutes);       // Fase 8A: POST /ai/generate-smart
 aiRoutes.route("/", aiReportRoutes);              // Fase 8B: POST /ai/report + PATCH /ai/report/:id
 aiRoutes.route("/", aiReportDashboardRoutes);     // Fase 8C: GET /ai/report-stats + /ai/reports
+aiRoutes.route("/", aiPreGenerateRoutes);         // Fase 8D: POST /ai/pre-generate
 aiRoutes.route("/", aiIngestRoutes);
 aiRoutes.route("/", aiReChunkRoutes);             // Fase 5: POST /ai/re-chunk
 aiRoutes.route("/", aiChatRoutes);
