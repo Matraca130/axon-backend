@@ -1,7 +1,7 @@
 # Axon Backend Map
 
 > Single source of truth for navigating the `axon-backend` repository.
-> Last updated: 2026-03-08 (Fase 8 Par 4 cleanup — 40 migration files, 12 AI files, 6 test files)
+> Last updated: 2026-03-09 (Fase 6 retrieval avanzado — 41 migration files, 12 AI files, 7 test files)
 
 ## Repository Structure
 
@@ -25,7 +25,7 @@ axon-backend/
 |       |-- 06-ai-rag.md                <- AI/RAG endpoints, payloads, pipeline
 |       +-- README.md
 |-- supabase/
-|   |-- migrations/                     <- All SQL migrations (40 files)
+|   |-- migrations/                     <- All SQL migrations (41 files)
 |   +-- functions/server/               <- Edge Function (Hono + Deno)
 |       |-- index.ts                    <- ENTRYPOINT: mounts all routes + middleware
 |       |-- db.ts                       <- Supabase clients, auth, response helpers
@@ -38,6 +38,7 @@ axon-backend/
 |       |-- chunker.ts                  <- Recursive Character chunking engine (Fase 5)
 |       |-- auto-ingest.ts              <- Auto-chunking + embedding pipeline (Fase 5 + Fase 3)
 |       |-- summary-hook.ts             <- afterWrite hook for summaries (Fase 5)
+|       |-- retrieval-strategies.ts     <- Multi-Query, HyDE, Re-ranking, Strategy Selection (Fase 6)
 |       |
 |       |-- routes/                     <- SPLIT MODULES (7 domains)
 |       |   |-- content/                <- Content hierarchy (8 files)
@@ -65,7 +66,7 @@ axon-backend/
 |       |   |   |-- report-dashboard.ts <- GET /ai/report-stats + GET /ai/reports [Fase 8C]
 |       |   |   |-- ingest.ts           <- POST /ai/ingest-embeddings (batch embeddings + summary embed)
 |       |   |   |-- re-chunk.ts         <- POST /ai/re-chunk (manual re-chunking) [Fase 5]
-|       |   |   |-- chat.ts             <- POST /ai/rag-chat (coarse-to-fine + hybrid search + Gemini)
+|       |   |   |-- chat.ts             <- POST /ai/rag-chat (Multi-Query/HyDE/Re-rank + c2f + hybrid) [Fase 6]
 |       |   |   |-- feedback.ts         <- PATCH /ai/rag-feedback (T-03)
 |       |   |   |-- analytics.ts        <- GET /ai/rag-analytics + /ai/embedding-coverage (T-03)
 |       |   |   +-- list-models.ts      <- GET /ai/list-models (diagnostic)
@@ -101,10 +102,11 @@ axon-backend/
 |       |-- routes-student.tsx          <- Student instruments & notes (6KB)
 |       |-- routes-study-queue.tsx       <- Study queue algorithm (15KB)
 |       |
-|       +-- tests/                      <- Deno-native tests (6 files)
+|       +-- tests/                      <- Deno-native tests (7 files)
 |           |-- auth_helpers_test.ts
 |           |-- fase3_test.ts           <- 8 tests: truncateAtWord + summary_embedded assertion
 |           |-- rate_limit_test.ts
+|           |-- retrieval_strategies_test.ts <- 11 tests: mergeSearchResults + selectStrategy + score blend (Fase 6)
 |           |-- validate_test.ts
 |           |-- timing_safe_test.ts
 |           +-- summary_hook_test.ts    <- 9 tests for afterWrite gate logic (Fase 5)
@@ -183,6 +185,19 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | `parseGeminiJson(text)` | Safely parse JSON from Gemini output (strips markdown fences) |
 | `getApiKey()` | Get GEMINI_API_KEY from Deno.env (throws if missing) |
 
+### `retrieval-strategies.ts` — Fase 6: Advanced Retrieval Strategies
+
+| Export | Description |
+|---|---|
+| `MatchedChunk` | Shared type for RAG search results (used by chat.ts) |
+| `RetrievalStrategy` | Type: `"standard" | "multi_query" | "hyde"` |
+| `selectStrategy(msg, summaryId, histLen)` | Auto-select best strategy based on query characteristics |
+| `generateMultiQueries(query)` | Gemini generates 2 reformulations (D27, D28) |
+| `generateHypotheticalDocument(query)` | Gemini generates hypothetical answer for HyDE (D24, D30) |
+| `rerankWithGemini(query, chunks, topK)` | Gemini scores relevance, blends 0.6×rerank + 0.4×original (D23, D29) |
+| `mergeSearchResults(sets)` | Dedup by chunk_id, keep highest score (pure function) |
+| `executeRetrievalEmbedding(strategy, query, embedFn)` | Orchestrator: runs strategy-specific embedding(s) |
+
 ### `rate-limit.ts` — 120 req/min sliding window
 ### `timing-safe.ts` — Constant-time comparison for webhook signatures
 
@@ -258,7 +273,7 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | GET | `/ai/reports` | report-dashboard.ts | CONTENT_WRITE | Paginated report listing with filters [Fase 8C] |
 | POST | `/ai/ingest-embeddings` | ingest.ts | MANAGEMENT | Batch-generate embeddings for chunks + summaries [Fase 3] |
 | POST | `/ai/re-chunk` | re-chunk.ts | CONTENT_WRITE | Manual re-chunking of a summary [Fase 5] |
-| POST | `/ai/rag-chat` | chat.ts | ALL_ROLES | Coarse-to-fine + hybrid search + Gemini response [Fase 3] |
+| POST | `/ai/rag-chat` | chat.ts | ALL_ROLES | Multi-Query/HyDE + Re-rank + c2f/hybrid search + Gemini [Fase 6] |
 | PATCH | `/ai/rag-feedback` | feedback.ts | ALL_ROLES | Submit feedback on RAG chat response (thumbs up/down) [T-03] |
 | GET | `/ai/rag-analytics` | analytics.ts | MANAGEMENT | RAG query metrics (aggregated) [T-03] |
 | GET | `/ai/embedding-coverage` | analytics.ts | MANAGEMENT | % of chunks with embeddings [T-03] |
@@ -315,7 +330,7 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 
 ## Migrations Inventory
 
-### `supabase/migrations/` (40 files — single canonical directory)
+### `supabase/migrations/` (41 files — single canonical directory)
 
 | File | Code | Status | Description |
 |---|---|---|---|
@@ -359,12 +374,13 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | `20260308_01` | F8A | PENDING | get_smart_generate_target() RPC — NeedScore keyword selection (Fase 8A) |
 | `20260308_02` | F8B | PENDING | ai_content_reports table + indexes + RLS (Fase 8B) |
 | `20260308_03` | F8C | PENDING | get_ai_report_stats() RPC — aggregate quality metrics (Fase 8C) |
+| `20260309_01` | F6 | PENDING | retrieval_strategy + rerank_applied columns on rag_query_log (Fase 6) |
 
 > **Note on duplicate date prefixes:** Some dates have multiple files (e.g. `20260304_01`,
 > `20260305_04`, `20260306_02`). Listed here with letter suffixes (a/b/c) for clarity.
 > All are applied unless marked PENDING.
 
-> **Note on Fase 8 migrations:** `20260308_01/02/03` must be applied via SQL Editor after merge.
+> **Note on Fase 8 + 6 migrations:** `20260308_01/02/03` and `20260309_01` must be applied via SQL Editor after merge.
 
 ---
 
@@ -446,6 +462,16 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | F8C | Quality dashboard (stats RPC + paginated listing) | routes/ai/report-dashboard.ts, migration 20260308_03 |
 | F8D | Bulk content pre-generation (separate rate limit) | routes/ai/pre-generate.ts |
 
+### F6-series (Fase 6 — Retrieval Avanzado — 2026-03-09)
+| Code | Fix | File |
+|---|---|---|
+| F6A | Multi-Query retrieval (2 Gemini reformulations + parallel embed) | retrieval-strategies.ts |
+| F6B | HyDE — Hypothetical Document Embeddings (question->answer gap bridge) | retrieval-strategies.ts |
+| F6C | Re-ranking via Gemini-as-Judge (0.6x rerank + 0.4x original blend) | retrieval-strategies.ts |
+| F6D | Dynamic strategy selection (summaryId->standard, short->hyde, long->multi_query) | retrieval-strategies.ts |
+| F6E | Strategy integration in chat.ts (N-search loop + merge + rerank pipeline) | routes/ai/chat.ts |
+| F6F | Observability: retrieval_strategy + rerank_applied columns in rag_query_log | migration 20260309_01 |
+
 ---
 
 ## Environment Variables
@@ -468,13 +494,14 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 
 ## Tests
 
-### `tests/` (Deno-native — 6 files)
+### `tests/` (Deno-native — 7 files)
 
 | File | Covers |
 |---|---|
 | `auth_helpers_test.ts` | requireInstitutionRole, isDenied, role checks |
 | `fase3_test.ts` | 8 tests: truncateAtWord + AutoIngestResult.summary_embedded (Fase 3) |
 | `rate_limit_test.ts` | Sliding window rate limiter |
+| `retrieval_strategies_test.ts` | 11 tests: mergeSearchResults + selectStrategy + score blend (Fase 6) |
 | `validate_test.ts` | All type guards + validateFields |
 | `timing_safe_test.ts` | Constant-time comparison |
 | `summary_hook_test.ts` | 9 tests for afterWrite gate logic (Fase 5) |
@@ -494,5 +521,4 @@ Run: `deno test supabase/functions/server/tests/`
 - Low priority: rename to `.ts` when convenient
 
 ### RAG Roadmap Pending (see `docs/RAG_ROADMAP.md`)
-- Fase 6: Advanced retrieval (Multi-Query + HyDE + Re-ranking)
 - Fase 7: Multi-source ingestion (PDF)
