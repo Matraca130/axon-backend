@@ -103,11 +103,10 @@ Deno.test("chunker: long paragraph without structure splits by sentences", () =>
   assert(result.length >= 2, `Expected ≥2 chunks, got ${result.length}`);
 
   // Since there are no headers/paragraphs, the splitter falls to ". "
-  // Each resulting chunk (pre-overlap) should end with a period
-  // (except possibly the last one which may not if overlap added text)
+  // The first chunk (no overlap prefix) should end at a sentence boundary
   const firstChunk = result[0].content;
   assert(
-    firstChunk.endsWith(".") || firstChunk.endsWith(".\n"),
+    firstChunk.endsWith("."),
     `First chunk should end at a sentence boundary, ends with: "...${firstChunk.slice(-20)}"`,
   );
 
@@ -182,10 +181,16 @@ Deno.test("chunker: overlap text is present between consecutive chunks", () => {
   assert(overlapFound, "At least one chunk should contain overlap from the previous chunk");
 });
 
-// ─── Test 9: Pre-overlap chunks respect maxChunkSize ────────────────
+// ─── Test 9: Core content respects maxChunkSize (accounting for merge) ─
 
-Deno.test("chunker: chunks respect maxChunkSize before overlap is added", () => {
+Deno.test("chunker: core content respects maxChunkSize (with merge tolerance)", () => {
   const maxChunkSize = 400;
+  // minChunkSize is clamped to min(100, 400) = 100 by the chunker
+  const minChunkSize = 100;
+  // Merge can join a sub-minSize fragment with the next chunk via "\n\n" (2 chars),
+  // so the theoretical max core size is maxChunkSize + minChunkSize + 2.
+  const mergeUpperBound = maxChunkSize + minChunkSize + 2;
+
   const result = chunkMarkdown(LONG_MARKDOWN, { maxChunkSize });
 
   for (const chunk of result) {
@@ -194,8 +199,9 @@ Deno.test("chunker: chunks respect maxChunkSize before overlap is added", () => 
     const coreContent = parts[parts.length - 1]; // Last part is the actual chunk
 
     assert(
-      coreContent.length <= maxChunkSize * 1.1, // 10% tolerance for merge joins
-      `Core content (${coreContent.length} chars) should be near maxChunkSize=${maxChunkSize}`,
+      coreContent.length <= mergeUpperBound,
+      `Core content (${coreContent.length} chars) exceeds merge upper bound ` +
+        `(maxChunkSize=${maxChunkSize} + minChunkSize=${minChunkSize} + 2 = ${mergeUpperBound})`,
     );
   }
 });
