@@ -16,9 +16,9 @@
 --   - Low mastery (p_know < 0.30):  score > 0.70
 --   - High mastery (p_know > 0.80): score < 0.20
 --
--- Keyword → Subtopic link:
+-- Keyword -> Subtopic link:
 --   BKT tracks mastery per subtopic, but we select keywords.
---   The link is: keyword → flashcards(keyword_id) → subtopic_id → bkt_states.
+--   The link is: keyword -> flashcards(keyword_id) -> subtopic_id -> bkt_states.
 --   If a keyword has no flashcards (or none with subtopic_id), p_know = 0.
 --
 -- Institution scoping:
@@ -32,7 +32,21 @@
 -- Tiebreaker: keyword.created_at ASC ensures deterministic ordering
 -- when multiple keywords have the same score (E1 fix: new students
 -- see content in the order the professor defined).
+--
+-- Audit fixes:
+--   A3 FIX: Added ORDER BY f.created_at ASC in LATERAL subquery
+--           for deterministic subtopic selection.
+--   A4 FIX: Added partial index idx_flashcards_keyword_subtopic
+--           for LATERAL subquery performance.
 -- ============================================================
+
+-- A4 FIX: Index for the LATERAL subquery in Step 5.
+-- Without this, each LATERAL iteration does a sequential scan on flashcards.
+-- Partial index: only rows with subtopic_id IS NOT NULL and not deleted.
+-- Covers the exact WHERE clause of the LATERAL.
+CREATE INDEX IF NOT EXISTS idx_flashcards_keyword_subtopic
+  ON flashcards (keyword_id, subtopic_id)
+  WHERE deleted_at IS NULL AND subtopic_id IS NOT NULL;
 
 CREATE OR REPLACE FUNCTION get_smart_generate_target(
   p_student_id UUID,
@@ -103,9 +117,12 @@ BEGIN
   ),
 
   -- Step 5: For each keyword, find ONE associated subtopic via flashcards.
-  -- This is the keyword → BKT bridge.
+  -- This is the keyword -> BKT bridge.
   -- LATERAL + LIMIT 1 is efficient (stops after first match).
-  -- If no flashcard exists for this keyword, linked_subtopic_id = NULL → p_know = 0.
+  -- A3 FIX: ORDER BY f.created_at ASC ensures deterministic pick
+  -- (oldest flashcard's subtopic wins, reproducible across calls).
+  -- A4 FIX: Uses idx_flashcards_keyword_subtopic partial index.
+  -- If no flashcard exists for this keyword, linked_subtopic_id = NULL -> p_know = 0.
   keywords_with_subtopic AS (
     SELECT
       kt.*,
@@ -118,6 +135,7 @@ BEGIN
       WHERE f.keyword_id = kt.kw_id
         AND f.subtopic_id IS NOT NULL
         AND f.deleted_at IS NULL
+      ORDER BY f.created_at ASC
       LIMIT 1
     ) kw_sub ON TRUE
     LEFT JOIN subtopics st ON st.id = kw_sub.subtopic_id
