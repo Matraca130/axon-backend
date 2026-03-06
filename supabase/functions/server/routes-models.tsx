@@ -8,8 +8,9 @@
  *   model_layers    — grouping layers for model parts (hard delete)
  *   model_parts     — individual meshes/parts of a model (hard delete)
  *
- * Custom endpoint:
- *   POST /upload-model-3d — multipart file upload for .glb/.gltf to Supabase Storage
+ * Custom endpoints:
+ *   GET  /models-3d/batch   — batch-fetch models for multiple topics (H2 perf fix)
+ *   POST /upload-model-3d   — multipart file upload for .glb/.gltf to Supabase Storage
  */
 
 import { Hono } from "npm:hono";
@@ -18,6 +19,74 @@ import { authenticate, ok, err, PREFIX, getAdminClient } from "./db.ts";
 import type { Context } from "npm:hono";
 
 const modelRoutes = new Hono();
+
+// ═══════════════════════════════════════════════════════════════
+// ── Custom: GET /models-3d/batch (H2 audit fix) ───────────────
+// ═══════════════════════════════════════════════════════════════
+//
+// Batch-fetch models for multiple topics in a single DB query.
+// Replaces N individual GET /models-3d?topic_id=X calls with 1 request.
+//
+// Query:    GET /models-3d/batch?topic_ids=uuid1,uuid2,uuid3
+// Response: { data: { [topicId]: Model3D[] } }
+//
+// IMPORTANT: This route MUST be registered BEFORE registerCrud
+// for "models-3d" to prevent Hono from matching "batch" as ":id".
+// ═══════════════════════════════════════════════════════════════
+
+modelRoutes.get(`${PREFIX}/models-3d/batch`, async (c: Context) => {
+  const auth = await authenticate(c);
+  if (auth instanceof Response) return auth;
+
+  const raw = c.req.query("topic_ids") || "";
+  const topicIds = raw.split(",").map((s) => s.trim()).filter(Boolean);
+
+  if (topicIds.length === 0) {
+    return err(c, "Missing or empty topic_ids query parameter", 400);
+  }
+  if (topicIds.length > 200) {
+    return err(c, "Maximum 200 topic_ids per batch request", 400);
+  }
+
+  // Validate UUID format to prevent injection
+  const uuidRegex =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const invalidIds = topicIds.filter((id) => !uuidRegex.test(id));
+  if (invalidIds.length > 0) {
+    return err(
+      c,
+      `Invalid UUID format: ${invalidIds.slice(0, 3).join(", ")}`,
+      400,
+    );
+  }
+
+  const admin = getAdminClient();
+  const { data: models, error: dbErr } = await admin
+    .from("models_3d")
+    .select("*")
+    .in("topic_id", topicIds)
+    .eq("is_active", true)
+    .is("deleted_at", null)
+    .order("order_index", { ascending: true });
+
+  if (dbErr) {
+    return err(c, `Database error: ${dbErr.message}`, 500);
+  }
+
+  // Group by topic_id — initialize all requested IDs with empty arrays
+  const grouped: Record<string, typeof models> = {};
+  for (const tid of topicIds) {
+    grouped[tid] = [];
+  }
+  for (const model of models || []) {
+    const tid = model.topic_id as string;
+    if (grouped[tid]) {
+      grouped[tid].push(model);
+    }
+  }
+
+  return ok(c, grouped);
+});
 
 // ═══════════════════════════════════════════════════════════════
 // ── CRUD Factory Entities ─────────────────────────────────────
