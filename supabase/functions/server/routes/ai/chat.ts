@@ -5,19 +5,19 @@
  *   message: string (required, max 2000 chars)
  *   summary_id: UUID (optional, scope search to one summary)
  *   history: Array<{role, content}> (optional, conversation history, max 6)
+ *   strategy: string (optional, Fase 6: auto|standard|multi_query|hyde)
  *
  * Pipeline:
  *   1. Resolve institution (from summary or user's memberships)
  *   2. Build augmented query from message + history (Phase 5)
- *   3. Embed the augmented query via gemini-embedding-001 (768 dims)
- *   4. Search strategy decision (Fase 3):
- *      a. summary_id given → rag_hybrid_search (scoped, FTS+vector)
- *      b. summary_id null  → rag_coarse_to_fine_search (summary→chunk vector)
- *      c. Fallback: if coarse-to-fine returns 0 → rag_hybrid_search (unscoped)
- *   5. Fetch adjacent chunks for context expansion (Phase 5)
- *   6. Fetch student knowledge profile via get_student_knowledge_context() RPC
- *   7. Generate response via Gemini 2.5 Flash with RAG context
- *   8. Log query metrics to rag_query_log (fire-and-forget)
+ *   3. Select retrieval strategy (Fase 6: auto/standard/multi_query/hyde)
+ *   4. Execute strategy-specific embedding(s) (Fase 6)
+ *   5. Search per embedding (hybrid or coarse-to-fine) + merge results
+ *   6. Re-rank merged results via Gemini-as-Judge (Fase 6)
+ *   7. Fetch adjacent chunks for context expansion (Phase 5)
+ *   8. Fetch student knowledge profile via get_student_knowledge_context() RPC
+ *   9. Generate response via Gemini 2.5 Flash with RAG context
+ *   10. Log query metrics to rag_query_log (fire-and-forget)
  *
  * Phase 5 additions:
  *   - History-augmented search: uses last 2 user messages to improve follow-up recall
@@ -29,6 +29,14 @@
  *   - normalizeCoarseToFineResults(): adapter for MatchedChunk compatibility
  *   - Fallback chain: coarse-to-fine → hybrid (unscoped) → empty context
  *   - search_type logging: hybrid | coarse_to_fine | hybrid_fallback (+ _augmented)
+ *
+ * Fase 6 additions:
+ *   - Strategy selection: selectStrategy() or client override via body.strategy
+ *   - Multi-Query: Gemini reformulates query → 3 embeddings → merge results
+ *   - HyDE: Gemini generates hypothetical answer → embed hypothesis
+ *   - Re-ranking: Gemini scores chunk relevance, blends with original score
+ *   - New log columns: retrieval_strategy, rerank_applied
+ *   - Response _search metadata extended with strategy info
  *
  * Pre-flight fixes applied:
  *   PF-01 FIX: Changed 'institution_members' → 'memberships' + is_active filter
@@ -53,12 +61,22 @@ import {
   isDenied,
   ALL_ROLES,
 } from "../../auth-helpers.ts";
-import { generateText, generateEmbedding } from "../../gemini.ts";
+import { generateText } from "../../gemini.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
+
+// Fase 6: Import strategy functions + shared MatchedChunk type
+import {
+  selectStrategy,
+  executeRetrievalEmbedding,
+  rerankWithGemini,
+  mergeSearchResults,
+  type MatchedChunk,
+  type RetrievalStrategy,
+} from "../../retrieval-strategies.ts";
 
 export const aiChatRoutes = new Hono();
 
-// ─── Phase 5: History-augmented search query builder ──────────────
+// ─── Phase 5: History-augmented search query builder ────────────
 // Concatenates the last 2 user messages with the current query.
 // This improves recall for follow-up questions like:
 //   User: "Explain mitosis"  → embed("mitosis")
@@ -97,16 +115,6 @@ function buildAugmentedQuery(
 // Example: If chunk #3 matches about "cell division", we also fetch
 // chunk #2 (intro context) and chunk #4 (continuation), so the LLM
 // sees the full explanation instead of just one fragment.
-
-interface MatchedChunk {
-  chunk_id: string;
-  summary_id: string;
-  summary_title: string;
-  content: string;
-  similarity: number;
-  text_rank: number;
-  combined_score: number;
-}
 
 interface ContextChunk {
   id: string;
@@ -325,7 +333,11 @@ function normalizeCoarseToFineResults(
   }));
 }
 
-// ─── Main route ───────────────────────────────────────────────────
+// ─── Fase 6: Valid strategy values for client override ────────────
+
+const VALID_STRATEGIES = ["auto", "standard", "multi_query", "hyde"] as const;
+
+// ─── Main route ─────────────────────────────────────────────────
 
 aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -353,7 +365,13 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
       }))
     : [];
 
-  // ── Resolve institution ──────────────────────────────────
+  // ── Fase 6: Parse strategy override (D22) ───────────────────
+  const requestedStrategy = typeof body.strategy === "string" ? body.strategy : "auto";
+  const strategyParam = VALID_STRATEGIES.includes(requestedStrategy as typeof VALID_STRATEGIES[number])
+    ? requestedStrategy
+    : "auto";
+
+  // ── Resolve institution ──────────────────────────────
   // PF-05: These DB queries validate the JWT cryptographically.
   // They MUST happen before any Gemini API call.
   let institutionId: string | null = null;
@@ -388,87 +406,106 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   // ── T-03: Start latency timer ────────────────────────────
   const t0 = Date.now();
 
-  // ── Phase 5: Build augmented search query ─────────────────
+  // ── Phase 5: Build augmented search query ───────────────────
   const { query: searchQuery, wasAugmented } = buildAugmentedQuery(message, history);
 
-  // ── RAG: embed query and search ──────────────────────────
-  // Fase 3: Search strategy decision
-  //   summaryId given  → rag_hybrid_search (scoped, FTS + vector)
-  //   summaryId null   → rag_coarse_to_fine_search (summary → chunk vector)
-  //                      fallback → rag_hybrid_search (unscoped)
+  // ── Fase 6: Select retrieval strategy ──────────────────────
+  const strategy: RetrievalStrategy = strategyParam === "auto"
+    ? selectStrategy(message, summaryId, history.length)
+    : strategyParam as RetrievalStrategy;
+
+  // ── RAG: embed, search, merge, re-rank ─────────────────────
   let ragContext = "";
   let sourcesUsed: Array<{ chunk_id: string; summary_title: string; similarity: number }> = [];
   let contextChunksCount = 0;
   let searchType = "hybrid";
+  let rerankApplied = false;
+  let strategyMeta: Record<string, unknown> = {};
 
   try {
-    // Phase 5: Embed the augmented query (includes history context)
-    const queryEmbedding = await generateEmbedding(searchQuery, "RETRIEVAL_QUERY");
-    const queryEmbeddingJson = JSON.stringify(queryEmbedding);
+    // ── Fase 6: Execute strategy-specific embedding(s) ────────
+    const embeddingOutput = await executeRetrievalEmbedding(
+      strategy, searchQuery,
+    );
+    strategyMeta = embeddingOutput.strategyMeta;
 
-    let matches: MatchedChunk[] = [];
+    // ── Fase 6: Run search for each embedding, collect all results ──
+    const allResultSets: MatchedChunk[][] = [];
 
-    if (summaryId) {
-      // ── SCOPED: Hybrid search within specific summary ──────
-      // Uses FTS + vector for precise matching within known material.
-      const { data } = await db.rpc("rag_hybrid_search", {
-        p_query_embedding: queryEmbeddingJson,
-        p_query_text: message,
-        p_institution_id: institutionId,
-        p_summary_id: summaryId,
-        p_match_count: 8,
-        p_similarity_threshold: 0.3,
-      });
-      matches = (data || []) as MatchedChunk[];
-      searchType = "hybrid";
-    } else {
-      // ── BROAD: Coarse-to-fine search (Fase 3) ──────────────
-      // Stage 1: Find top-N summaries by embedding similarity
-      // Stage 2: Find top-K chunks within those summaries
-      // Score: 0.3 × summary_sim + 0.7 × chunk_sim
-      const { data: c2fData, error: c2fErr } = await db.rpc(
-        "rag_coarse_to_fine_search",
-        {
-          p_query_embedding: queryEmbeddingJson,
-          p_institution_id: institutionId,
-          p_top_summaries: 3,
-          p_top_chunks: 8,
-          p_similarity_threshold: 0.3,
-        },
-      );
+    for (const { embedding } of embeddingOutput.embeddings) {
+      const queryEmbeddingJson = JSON.stringify(embedding);
 
-      if (!c2fErr && c2fData && c2fData.length > 0) {
-        matches = normalizeCoarseToFineResults(c2fData as CoarseToFineRow[]);
-        searchType = "coarse_to_fine";
-      } else {
-        // ── FALLBACK: No summary embeddings yet (transition) ───
-        // coarse-to-fine returned 0 results, likely because summaries
-        // don't have embeddings yet. Fall back to hybrid search
-        // without summary scope.
-        if (c2fErr) {
-          console.warn(
-            "[RAG Chat] Coarse-to-fine RPC failed, using hybrid fallback:",
-            c2fErr.message,
-          );
-        }
+      let matches: MatchedChunk[] = [];
 
-        const { data: hybridData } = await db.rpc("rag_hybrid_search", {
+      if (summaryId) {
+        // ── SCOPED: Hybrid search within specific summary ──────
+        const { data } = await db.rpc("rag_hybrid_search", {
           p_query_embedding: queryEmbeddingJson,
           p_query_text: message,
           p_institution_id: institutionId,
-          p_summary_id: null,
+          p_summary_id: summaryId,
           p_match_count: 8,
           p_similarity_threshold: 0.3,
         });
-        matches = (hybridData || []) as MatchedChunk[];
-        searchType = "hybrid_fallback";
+        matches = (data || []) as MatchedChunk[];
+        searchType = "hybrid";
+      } else {
+        // ── BROAD: Coarse-to-fine search (Fase 3) ──────────────
+        const { data: c2fData, error: c2fErr } = await db.rpc(
+          "rag_coarse_to_fine_search",
+          {
+            p_query_embedding: queryEmbeddingJson,
+            p_institution_id: institutionId,
+            p_top_summaries: 3,
+            p_top_chunks: 8,
+            p_similarity_threshold: 0.3,
+          },
+        );
+
+        if (!c2fErr && c2fData && c2fData.length > 0) {
+          matches = normalizeCoarseToFineResults(c2fData as CoarseToFineRow[]);
+          searchType = "coarse_to_fine";
+        } else {
+          // ── FALLBACK: hybrid search (unscoped) ───────────────
+          if (c2fErr) {
+            console.warn(
+              "[RAG Chat] Coarse-to-fine RPC failed, using hybrid fallback:",
+              c2fErr.message,
+            );
+          }
+
+          const { data: hybridData } = await db.rpc("rag_hybrid_search", {
+            p_query_embedding: queryEmbeddingJson,
+            p_query_text: message,
+            p_institution_id: institutionId,
+            p_summary_id: null,
+            p_match_count: 8,
+            p_similarity_threshold: 0.3,
+          });
+          matches = (hybridData || []) as MatchedChunk[];
+          searchType = "hybrid_fallback";
+        }
+      }
+
+      allResultSets.push(matches);
+    }
+
+    // ── Fase 6: Merge results from all embeddings (dedup) ───────
+    let mergedMatches = mergeSearchResults(allResultSets);
+
+    // ── Fase 6: Re-rank via Gemini-as-Judge (D20: always apply) ──
+    if (mergedMatches.length > 1) {
+      try {
+        mergedMatches = await rerankWithGemini(message, mergedMatches, 5);
+        rerankApplied = true;
+      } catch (e) {
+        console.warn("[RAG Chat] Re-ranking failed, using original order:", (e as Error).message);
       }
     }
 
-    if (matches.length > 0) {
+    if (mergedMatches.length > 0) {
       // Phase 5: Fetch adjacent chunks for context expansion
-      // Only expand top 5 matches to limit DB queries
-      const topMatches = matches.slice(0, 5);
+      const topMatches = mergedMatches.slice(0, 5);
       const contextChunks = await fetchAdjacentChunks(db, topMatches);
 
       // Phase 5: Assemble coherent context
@@ -481,7 +518,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     console.warn("[RAG Chat] Search failed, continuing without context:", e);
   }
 
-  // ── Fetch student profile ────────────────────────────────
+  // ── Fetch student profile ──────────────────────────────
   let profileContext = "";
   try {
     const { data: profile } = await db.rpc("get_student_knowledge_context", {
@@ -495,7 +532,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     // Profile not available, continue without it
   }
 
-  // ── Build conversation ───────────────────────────────────
+  // ── Build conversation ───────────────────────────────
   const systemPrompt = `Eres un tutor educativo amable y preciso.
 Responde basandote en el contexto proporcionado del material de estudio.
 Si no tienes informacion suficiente, dilo honestamente.
@@ -508,7 +545,7 @@ Responde en espanol.${profileContext}`;
 
   const userPrompt = `${conversationHistory ? `Conversacion previa:\n${conversationHistory}\n\n` : ""}Alumno: ${message}${ragContext}`;
 
-  // ── Generate response ────────────────────────────────────
+  // ── Generate response ────────────────────────────────
   try {
     const result = await generateText({
       prompt: userPrompt,
@@ -517,7 +554,7 @@ Responde en espanol.${profileContext}`;
       maxTokens: 1500,
     });
 
-    // ── T-03 + Fase 3: Compute metrics and log query ──────────
+    // ── T-03 + Fase 3 + Fase 6: Compute metrics and log query ──
     const latencyMs = Date.now() - t0;
     const sims = sourcesUsed.map((s) => s.similarity);
     const logId = crypto.randomUUID();
@@ -542,6 +579,9 @@ Responde en espanol.${profileContext}`;
         latency_ms: latencyMs,
         search_type: logSearchType,
         model_used: "gemini-2.5-flash",
+        // Fase 6: New columns
+        retrieval_strategy: strategy,
+        rerank_applied: rerankApplied,
       })
       .then(({ error }) => {
         if (error) console.warn("[RAG Log] Insert failed:", error.message);
@@ -553,12 +593,16 @@ Responde en espanol.${profileContext}`;
       tokens: result.tokensUsed,
       profile_used: !!profileContext,
       log_id: logId,
-      // Phase 5 + Fase 3: Search metadata
+      // Phase 5 + Fase 3 + Fase 6: Search metadata
       _search: {
         augmented: wasAugmented,
         search_type: searchType,
         context_chunks: contextChunksCount,
         primary_matches: sourcesUsed.length,
+        // Fase 6 metadata
+        strategy,
+        rerank_applied: rerankApplied,
+        ...strategyMeta,
       },
     });
   } catch (e) {
