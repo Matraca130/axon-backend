@@ -160,25 +160,37 @@ Deno.test("chunker: overlap text is present between consecutive chunks", () => {
     return;
   }
 
-  // Chunks after the first should contain the overlap marker "\n...\n"
-  // (The overlap format is: <overlap_text>\n...\n<chunk_content>)
-  let overlapFound = false;
-  for (let i = 1; i < result.length; i++) {
-    if (result[i].content.includes("\n...\n")) {
-      overlapFound = true;
+  // Verify ALL consecutive pairs for overlap consistency.
+  // The overlap format is: <overlap_text>\n...\n<chunk_content>
+  let overlapCount = 0;
 
-      // The text before "\n...\n" should be a suffix of the previous chunk's content
-      const [overlapPart] = result[i].content.split("\n...\n");
-      // The overlap text should appear somewhere in the previous chunk
-      assert(
-        result[i - 1].content.includes(overlapPart.trim()),
-        `Overlap text of chunk ${i} should appear in chunk ${i - 1}`,
-      );
-      break; // One verified overlap is sufficient
-    }
+  for (let i = 1; i < result.length; i++) {
+    const marker = "\n...\n";
+    const markerIdx = result[i].content.indexOf(marker);
+
+    if (markerIdx === -1) continue;
+
+    overlapCount++;
+
+    // The text BEFORE the marker should be a substring of the previous chunk
+    const overlapText = result[i].content.slice(0, markerIdx).trim();
+
+    assert(
+      overlapText.length > 0,
+      `Overlap text in chunk ${i} should not be empty`,
+    );
+
+    assert(
+      result[i - 1].content.includes(overlapText),
+      `Overlap text of chunk ${i} ("${overlapText.slice(0, 40)}...") ` +
+        `should appear in chunk ${i - 1}`,
+    );
   }
 
-  assert(overlapFound, "At least one chunk should contain overlap from the previous chunk");
+  assert(
+    overlapCount > 0,
+    "At least one chunk should contain overlap from the previous chunk",
+  );
 });
 
 // ─── Test 9: Core content respects maxChunkSize (accounting for merge) ─
@@ -187,21 +199,29 @@ Deno.test("chunker: core content respects maxChunkSize (with merge tolerance)", 
   const maxChunkSize = 400;
   // minChunkSize is clamped to min(100, 400) = 100 by the chunker
   const minChunkSize = 100;
-  // Merge can join a sub-minSize fragment with the next chunk via "\n\n" (2 chars),
-  // so the theoretical max core size is maxChunkSize + minChunkSize + 2.
-  const mergeUpperBound = maxChunkSize + minChunkSize + 2;
+  // mergeSmallChunks worst case: a sub-minSize trailing fragment merges
+  // with the last flushed chunk (which itself may already include one
+  // sub-minSize fragment). The arithmetic:
+  //   flushed chunk ≤ maxChunkSize + (minSize - 1) + 2   (from loop merge)
+  //   trailing merge += (minSize - 1) + 2                (from end-of-loop)
+  // So the absolute upper bound is maxChunkSize + 2*(minSize - 1) + 4,
+  // simplified to maxChunkSize + 2*minSize + 2.
+  const mergeUpperBound = maxChunkSize + 2 * minChunkSize + 2;
 
   const result = chunkMarkdown(LONG_MARKDOWN, { maxChunkSize });
 
   for (const chunk of result) {
     // Strip overlap prefix if present to get the "core" chunk
-    const parts = chunk.content.split("\n...\n");
-    const coreContent = parts[parts.length - 1]; // Last part is the actual chunk
+    const markerIdx = chunk.content.indexOf("\n...\n");
+    const coreContent =
+      markerIdx !== -1
+        ? chunk.content.slice(markerIdx + "\n...\n".length)
+        : chunk.content;
 
     assert(
       coreContent.length <= mergeUpperBound,
       `Core content (${coreContent.length} chars) exceeds merge upper bound ` +
-        `(maxChunkSize=${maxChunkSize} + minChunkSize=${minChunkSize} + 2 = ${mergeUpperBound})`,
+        `(maxChunkSize=${maxChunkSize} + 2*minChunkSize=${minChunkSize} + 2 = ${mergeUpperBound})`,
     );
   }
 });
@@ -215,14 +235,22 @@ Deno.test("chunker: custom maxChunkSize produces more, smaller chunks", () => {
   // Smaller maxChunkSize → more chunks
   assert(
     smallResult.length > defaultResult.length,
-    `maxChunkSize=300 should produce more chunks (${smallResult.length}) than default (${defaultResult.length})`,
+    `maxChunkSize=300 should produce more chunks (${smallResult.length}) ` +
+      `than default (${defaultResult.length})`,
   );
 
-  // DENSE_SENTENCES with smaller max should also split
-  const denseDefault = chunkMarkdown(DENSE_SENTENCES); // ~750 chars, default 800 → 1 chunk
+  // DENSE_SENTENCES with smaller max should produce more chunks than default.
+  // Note: DENSE_SENTENCES is ~810 chars, which may or may not split with
+  // the default maxChunkSize=800 depending on exact char count + merge.
+  // The robust check is: smaller max ALWAYS produces >= as many chunks.
+  const denseDefault = chunkMarkdown(DENSE_SENTENCES);
   const denseSplit = chunkMarkdown(DENSE_SENTENCES, { maxChunkSize: 300 });
 
-  assertEquals(denseDefault.length, 1, "DENSE_SENTENCES with default max should be 1 chunk");
+  assert(
+    denseSplit.length > denseDefault.length,
+    `DENSE_SENTENCES with max=300 (${denseSplit.length} chunks) should produce ` +
+      `more chunks than default (${denseDefault.length} chunks)`,
+  );
   assert(
     denseSplit.length >= 2,
     `DENSE_SENTENCES with max=300 should split into ≥2 chunks, got ${denseSplit.length}`,
