@@ -16,6 +16,7 @@
  *   prof-notes.ts          — manual CRUD for kw_prof_notes
  *   reorder.ts             — PUT /reorder (bulk reorder)
  *   content-tree.ts        — GET /content-tree (nested hierarchy)
+ *   flashcards-by-topic.ts — GET /flashcards-by-topic (PERF C1: batch load)
  */
 
 import { Hono } from "npm:hono";
@@ -25,6 +26,7 @@ import { keywordConnectionRoutes } from "./keyword-connections.ts";
 import { profNotesRoutes } from "./prof-notes.ts";
 import { reorderRoutes } from "./reorder.ts";
 import { contentTreeRoutes } from "./content-tree.ts";
+import { flashcardsByTopicRoutes } from "./flashcards-by-topic.ts";
 
 const content = new Hono();
 
@@ -35,5 +37,6 @@ content.route("/", keywordConnectionRoutes);
 content.route("/", profNotesRoutes);
 content.route("/", reorderRoutes);
 content.route("/", contentTreeRoutes);
+content.route("/", flashcardsByTopicRoutes);
 
 export { content };
