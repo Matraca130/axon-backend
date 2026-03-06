@@ -5,7 +5,9 @@
 > `chunking-strategies.md`, `hybrid-retrieval.ts`, `adaptive-ia-study.md`),
 > adaptado a Gemini como provider inicial.
 >
-> **Auditoria v9:** 2026-03-06 — Fase 5 chunking + auto-ingest completado (Issue #30, branch feat/fase5-chunking).
+> **Auditoria v10:** 2026-03-08 — Fase 8 IA Adaptativa completada (branch feat/fase8-ia-adaptativa).
+> 4 pares de sub-tareas: generate-smart + report + dashboard + pre-generate.
+> v9: Fase 5 chunking + auto-ingest completado (Issue #30, branch feat/fase5-chunking).
 > v8: T-03 (query log + feedback loop) completado (PR #27, migration aplicada).
 > v7: T-01 (denorm institution_id + RPC) y T-02 (tsvector + GIN) completados.
 > v6: Todos los quick fixes aplicados (INC-1/3/6).
@@ -43,19 +45,19 @@
 | 22 | Seleccion dinamica de estrategia de retrieval | **PENDIENTE** | hybrid-retrieval.ts |
 | 23 | Semantic Chunking (embedding-based boundaries) | **PENDIENTE** | chunking-strategies |
 | 24 | Decision framework para estrategia de chunking | **PARCIAL** | chunking-strategies |
-| 25 | NeedScore integration con /ai/generate | **PENDIENTE** | adaptive-ia-study |
-| 26 | Pre-generacion en background | **PENDIENTE** | adaptive-ia-study |
+| 25 | NeedScore integration con /ai/generate | **DONE** | adaptive-ia-study → Fase 8A |
+| 26 | Pre-generacion en background | **DONE** | adaptive-ia-study → Fase 8D |
 | 27 | Rate limit especifico para AI (20/hr) | **DONE** | adaptive-ia-study → `routes/ai/index.ts` (INC-3) |
 | 28 | Professor notes (kw_prof_notes) en prompt de generate | **DONE** | adaptive-ia-study → `routes/ai/generate.ts` (INC-6) |
-| 29 | Report question / flag AI content | **PENDIENTE** | adaptive-ia-study |
-| 30 | Quality dashboard para preguntas AI flaggeadas | **PENDIENTE** | adaptive-ia-study |
+| 29 | Report question / flag AI content | **DONE** | adaptive-ia-study → Fase 8B |
+| 30 | Quality dashboard para preguntas AI flaggeadas | **DONE** | adaptive-ia-study → Fase 8C |
 | 31 | chat.ts comentarios stale en header | **DONE** | auditoria v2 → `routes/ai/chat.ts` (INC-1) |
 
-**Resumen: 18/31 completados, 11 pendientes, 2 parciales.**
+**Resumen: 22/31 completados, 7 pendientes, 2 parciales.**
 
 > **Parciales:**
 > - #11 Chunking inteligente: Recursive Character implementado como default (Fase 5). Semantic Chunking (embedding-based boundaries, #23) pendiente para fases futuras.
-> - #24 Decision framework: Recursive = default implementado. Upgrade automático a Semantic para docs largos pendiente.
+> - #24 Decision framework: Recursive = default implementado. Upgrade automatico a Semantic para docs largos pendiente.
 
 ---
 
@@ -372,27 +374,27 @@ CREATE POLICY rag_log_update_feedback ON rag_query_log FOR UPDATE
 
 ### Archivos creados/modificados (Fase 5)
 
-| Archivo | Tipo | Descripción |
+| Archivo | Tipo | Descripcion |
 |---|---|---|
-| `chunker.ts` | Nuevo | Motor de chunking: Recursive Character Splitting con respeto a límites markdown |
+| `chunker.ts` | Nuevo | Motor de chunking: Recursive Character Splitting con respeto a limites markdown |
 | `auto-ingest.ts` | Nuevo | Pipeline puro: fetch summary → chunk → delete old → insert new → embed → update timestamp |
 | `summary-hook.ts` | Nuevo | afterWrite hook con 3 gates: update field check, ID extraction, content check |
-| `routes/ai/re-chunk.ts` | Nuevo | POST /ai/re-chunk — endpoint síncrono para re-chunking manual (profesor) |
+| `routes/ai/re-chunk.ts` | Nuevo | POST /ai/re-chunk — endpoint sincrono para re-chunking manual (profesor) |
 | `routes/ai/index.ts` | Modificado | Mount de `aiReChunkRoutes` |
 | `crud-factory.ts` | Modificado | `AfterWriteParams` type + `afterWrite?` callback en CrudConfig + fire-and-forget en POST/PUT |
 | `routes/content/crud.ts` | Modificado | `afterWrite: onSummaryWrite` en config de summaries |
 | `tests/summary_hook_test.ts` | Nuevo | 9 tests: gate logic (8 skip paths + 1 fire path) |
-| Migration `20260306_04` | Nuevo | Columnas `chunk_strategy TEXT DEFAULT 'recursive'` + `last_chunked_at TIMESTAMPTZ` en summaries |
+| Migration `20260307_02` | Nuevo | Columnas `chunk_strategy TEXT DEFAULT 'recursive'` + `last_chunked_at TIMESTAMPTZ` en summaries |
 
 ### Sub-tasks completados
 
 | # | Sub-task | Commits |
 |---|---|---|
 | 5.1 | `chunker.ts` — Recursive Character Splitting | Branch inicial |
-| 5.2 | 10 unit tests para chunker + 3 fixes auditoría R2 | Branch inicial |
+| 5.2 | 10 unit tests para chunker + 3 fixes auditoria R2 | Branch inicial |
 | 5.3 | Fixtures de test (markdown samples) | Branch inicial |
 | 5.4 | Migration: `chunk_strategy` + `last_chunked_at` | Branch inicial |
-| 5.5 | `auto-ingest.ts` — función pura `autoChunkAndEmbed` + 1 fix R1 | `3026a31` |
+| 5.5 | `auto-ingest.ts` — funcion pura `autoChunkAndEmbed` + 1 fix R1 | `3026a31` |
 | 5.6 | `routes/ai/re-chunk.ts` — POST /ai/re-chunk | `3026a31` |
 | 5.7 | Mount `aiReChunkRoutes` en AI module combiner | `01de895` |
 | 5.8 | Fire-and-forget hook en POST/PUT summaries | `a883931`, `2b6f5b7`, `de5095f` |
@@ -440,28 +442,129 @@ Ver secciones 6A–6D en versiones anteriores de este documento para detalle de 
 
 ---
 
-## Fase 8 — IA Adaptativa: NeedScore + Pre-generacion + Calidad
+## Fase 8 — IA Adaptativa: NeedScore + Pre-generacion + Calidad — DONE
 
 **Prioridad:** MEDIA — mejora la experiencia del alumno significativamente.
 **Riesgo:** MEDIO — varios cambios en generate.ts + nuevos endpoints.
 **Impacto:** Generacion mas inteligente + mecanismos de calidad.
+**Estado:** **DONE** — Branch `feat/fase8-ia-adaptativa`. 4 pares, 8 sub-tasks completados.
 
-### 8A. NeedScore integration con `/ai/generate` — PENDIENTE
+### Archivos creados/modificados (Fase 8)
+
+| Archivo | Tipo | Fase | Descripcion |
+|---|---|---|---|
+| Migration `20260308_01` | Nuevo | 8A | RPC `get_smart_generate_target()` — NeedScore-based keyword selection |
+| `routes/ai/generate-smart.ts` | Nuevo | 8A | POST /ai/generate-smart — adaptive generation with auto-target |
+| Migration `20260308_02` | Nuevo | 8B | Tabla `ai_content_reports` + indexes + RLS |
+| `routes/ai/report.ts` | Nuevo | 8B | POST /ai/report + PATCH /ai/report/:id — content quality reporting |
+| Migration `20260308_03` | Nuevo | 8C | RPC `get_ai_report_stats()` — aggregate quality metrics |
+| `routes/ai/report-dashboard.ts` | Nuevo | 8C | GET /ai/report-stats + GET /ai/reports — dashboard + listing |
+| `routes/ai/pre-generate.ts` | Nuevo | 8D | POST /ai/pre-generate — bulk content pre-generation |
+| `routes/ai/index.ts` | Modificado | ALL | Mount all new sub-modules + rate limit exclusions |
+
+### Sub-tasks completados
+
+| Par | Sub-tasks | Descripcion | Commits |
+|---|---|---|---|
+| Par 1 | 8.1 + 8.2 | `get_smart_generate_target` RPC + `generate-smart.ts` endpoint | Branch inicial |
+| Par 2 | 8.3 + 8.4 | `ai_content_reports` migration + `report.ts` endpoint (POST + PATCH) | Branch |
+| Par 3 | 8.5 + 8.6 | `get_ai_report_stats` RPC + `report-dashboard.ts` (GET stats + GET listing) | `9b10d04` |
+| Par 4 | 8.7 + 8.8 | `pre-generate.ts` endpoint + mount in index.ts | `c4e6377` |
+
+### Decisiones arquitectonicas aprobadas
+
+| ID | Decision | Justificacion |
+|---|---|---|
+| D1 | RPC retorna TOP 5 targets, no 1 | Permite dedup en TypeScript sin re-llamar al RPC |
+| D2 | Dedup en TypeScript, no SQL | Evita subquery correlacionada en SQL (N+1 risk) |
+| D3 | NO refactorizar `generate.ts` | Zero riesgo de regresion en el endpoint existente (SACRED) |
+| D9 | Pre-gen tiene bucket de rate limit separado | `ai-pregen:{userId}` (10/hr) vs `ai:{userId}` (20/hr) |
+| D14 | Pre-gen usa CONTENT_WRITE_ROLES | Solo profesores/admins pre-generan contenido |
+| D15 | Generacion secuencial en pre-gen | Respeta RPM de Gemini, error handling limpio |
+| D16 | Respuesta partial-success en pre-gen | 3 de 5 exitosos = retorna los 3 + 2 errores |
+| D17 | Sin student profile en pre-gen prompt | Contenido generico para TODOS los students |
+| D18 | Keywords por menor cobertura AI | Llena gaps primero (0 items > 3 items) |
+
+### Endpoints implementados (Fase 8)
+
+| Method | Path | File | Auth | Description |
+|---|---|---|---|---|
+| POST | `/ai/generate-smart` | generate-smart.ts | ALL_ROLES | Adaptive generation (NeedScore auto-target) |
+| POST | `/ai/report` | report.ts | ALL_ROLES | Report AI content quality issue |
+| PATCH | `/ai/report/:id` | report.ts | CONTENT_WRITE_ROLES | Resolve/dismiss a report |
+| GET | `/ai/report-stats` | report-dashboard.ts | CONTENT_WRITE_ROLES | Aggregate quality metrics |
+| GET | `/ai/reports` | report-dashboard.ts | CONTENT_WRITE_ROLES | Paginated report listing |
+| POST | `/ai/pre-generate` | pre-generate.ts | CONTENT_WRITE_ROLES | Bulk content pre-generation |
+
+### Advisory issues documentados (no-blocking)
+
+| Par | Issue | Severidad | Justificacion |
+|---|---|---|---|
+| Par 1 | A7: Validacion JSON Gemini pre-existente | Low | `parseGeminiJson()` no valida schema, solo parsea JSON |
+| Par 1 | A8: Full keyword scan pre-LIMIT en RPC | Low | RPC scans all keywords, LIMIT 5 at the end |
+| Par 2 | A7-TS: Sin state machine en PATCH status | Low | CHECK constraint en DB valida, TS no enforcea transiciones |
+| Par 2 | A8-TS: JS clock vs DB now() | Low | `new Date().toISOString()` vs DB `now()` — drift <1s |
+| Par 2 | B1: resolution_note sin length check | Low | TEXT column, no CHECK en DB |
+| Par 3 | A1: parsePagination() duplicada | Low | No exportada de crud-factory, 6 lineas |
+| Par 3 | A2: Filter arrays duplicados | Low | Source of truth es DB CHECK constraint |
+| Par 4 | A1: truncateAtWord() en 3 archivos | Low | No exportada, 5 lineas cada una |
+| Par 4 | A5: Rate limit cuenta REQUEST no ITEMS | Info | Design decision, 10 req × 5 items = 50 max |
+
+### 8A. NeedScore integration con `/ai/generate-smart` — **DONE**
 
 El `NeedScore` ya existe en `routes-study-queue.tsx`:
 ```
 NeedScore = 0.40*overdue + 0.30*(1-p_know) + 0.20*fragility + 0.10*novelty
 ```
 
-Nuevo endpoint propuesto: POST `/ai/generate-smart` que elige subtopic automaticamente.
+Implementado como POST `/ai/generate-smart` que:
+1. Llama al RPC `get_smart_generate_target()` → top 5 keywords por NeedScore
+2. Dedup check: skip keywords con contenido AI reciente (ventana 2h)
+3. Elige el mejor target → prompt adaptativo → Gemini → insert → return
+4. Temperatura adaptativa segun p_know (0.5 bajo, 0.7 medio, 0.85 alto)
+5. Respuesta incluye `_smart` metadata (razon de seleccion, NeedScore, p_know)
 
-### 8B. Pre-generacion en background — PENDIENTE
+Migration: `20260308_01_smart_generate_target_rpc.sql`
 
-POST `/ai/pre-generate` para generar contenido en background.
+### 8B. Report question / Flag AI content — **DONE**
 
-### 8C. Professor notes en prompt de generate.ts — **DONE** (INC-6)
+Implementado como:
+- `POST /ai/report` — student reporta contenido AI de baja calidad
+- `PATCH /ai/report/:id` — profesor/admin resuelve el reporte
 
-Aplicado en `routes/ai/generate.ts`:
+Tabla: `ai_content_reports` con status workflow (pending → reviewed → resolved/dismissed).
+Auth: POST usa ALL_ROLES (students reportan), PATCH usa CONTENT_WRITE_ROLES (profesores resuelven).
+`institution_id` resuelto server-side via `resolve_parent_institution()`.
+
+Migration: `20260308_02_ai_content_reports.sql`
+
+### 8C. Quality dashboard — **DONE**
+
+Implementado como:
+- `GET /ai/report-stats?institution_id=&from=&to=` — 14 metricas agregadas via RPC
+- `GET /ai/reports?institution_id=&status=&reason=&content_type=&limit=&offset=` — listado paginado
+
+RPC: `get_ai_report_stats()` — counts por status/reason/content_type + avg resolution hours.
+Listado: exact count, created_at DESC, filtros validados con isOneOf().
+Auth: CONTENT_WRITE_ROLES (profesores ven y resuelven reportes).
+
+Migration: `20260308_03_ai_report_stats_rpc.sql`
+
+### 8D. Pre-generacion en background — **DONE**
+
+Implementado como POST `/ai/pre-generate`:
+- Input: `{ summary_id, action, count? }` (max 5 items)
+- Seleccion de keywords por menor cobertura AI (fill gaps first)
+- Generacion secuencial con partial-success response
+- Rate limit separado: `ai-pregen:{userId}`, 10 req/hr
+- Sin student profile en prompt (contenido generico)
+- Respuesta: `{ generated: [...], errors: [...], _meta: {...} }`
+
+No requirio nueva migration (usa tablas existentes + check_rate_limit RPC).
+
+### 8E. Professor notes en prompt de generate.ts — **DONE** (INC-6)
+
+Aplicado en `routes/ai/generate.ts` y replicado en `generate-smart.ts` y `pre-generate.ts`:
 ```typescript
 const { data: profNotes } = await db
   .from("kw_prof_notes")
@@ -475,16 +578,13 @@ if (profNotes && profNotes.length > 0) {
 }
 ```
 
-### 8D. Rate limit especifico para AI — **DONE** (INC-3)
+### 8F. Rate limit especifico para AI — **DONE** (INC-3)
 
 Aplicado en `routes/ai/index.ts`:
 - Middleware `aiRateLimitMiddleware` con `check_rate_limit()` RPC
 - 20 req/hr por usuario, solo POST, degradacion graceful
 - Usa la tabla `rate_limit_entries` de migration `20260303_02`
-
-### 8E. Report question / Flag AI content — PENDIENTE
-
-### 8F. Quality dashboard — PENDIENTE
+- Pre-generate excluido (tiene su propio bucket separado, D9)
 
 ---
 
@@ -499,17 +599,16 @@ Fase 4: Query log + feedback          [DONE]   [T-03, PR #27]   [migration aplic
   |
 Fase 5: Chunking + auto-ingest        [DONE]   [Issue #30]      [mejora calidad RAG]
   |
-Fase 3: Embeddings en summaries       [1 dia]  [SQL + ingest]   [coarse-to-fine]
+Fase 8: IA adaptativa                 [DONE]   [feat/fase8]     [NeedScore + pre-gen + calidad]
   |
-Fase 8: IA adaptativa (restante)      [2 dias] [generate.ts +]  [NeedScore + pre-gen + calidad]
-  |                                            [nuevos endpoints]
+Fase 3: Embeddings en summaries       [1 dia]  [SQL + ingest]   [coarse-to-fine]
   |
 Fase 6: Retrieval avanzado            [2 dias] [chat.ts]        [Multi-Query + HyDE + re-rank]
   |
 Fase 7: Ingestion PDF                 [3 dias] [nuevo modulo]   [feature nueva]
 ```
 
-**Total estimado: ~8 dias restantes**
+**Total estimado: ~6 dias restantes (Fases 3, 6, 7)**
 
 ---
 
