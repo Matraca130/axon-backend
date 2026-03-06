@@ -2,19 +2,19 @@
  * routes/ai/report.ts — AI content report endpoints (Fase 8B)
  *
  * POST  /ai/report      — Create a report on AI-generated content
- * PATCH /ai/report/:id   — Resolve/update a report (admin/teacher/coordinator)
+ * PATCH /ai/report/:id   — Resolve/update a report (owner/admin/professor)
  *
  * Purpose:
  *   Closes the feedback loop of the adaptive AI system.
- *   Students and teachers can flag AI-generated quiz questions or
+ *   Students and professors can flag AI-generated quiz questions or
  *   flashcards as incorrect, inappropriate, low quality, or irrelevant.
- *   Admins/teachers/coordinators can then review and resolve reports.
+ *   Owners/admins/professors can then review and resolve reports.
  *
  * Design decisions:
  *   D1: Polymorphic FK (content_type + content_id) — one table for both types
  *   D2: institution_id resolved server-side from content's summary_id
  *   D3: POST — ANY active member can report (ALL_ROLES)
- *   D4: PATCH — Only admin/teacher/coordinator (RESOLVER_ROLES)
+ *   D4: PATCH — Only owner/admin/professor (CONTENT_WRITE_ROLES)
  *   D5: UNIQUE(content_type, content_id, reported_by) — one report per user per content
  *
  * Audit fixes incorporated:
@@ -22,6 +22,9 @@
  *   P5: description max 2000 chars (DB CHECK + app validation)
  *   P6: Excluded from AI rate limit (no Gemini cost) — handled in index.ts
  *   P7: resolved_at/resolved_by conditional logic per target status
+ *   A1-TS: RESOLVER_ROLES replaced with CONTENT_WRITE_ROLES (audit fix)
+ *   A2-TS: Removed `as unknown as string[]` cast (resolved by A1-TS)
+ *   A3-TS: Over-select fixed — .select("summary_id") only
  *
  * Reviewer feedback incorporated:
  *   Point 1: .maybeSingle() for existence checks (cleaner than .single())
@@ -37,6 +40,7 @@ import {
   requireInstitutionRole,
   isDenied,
   ALL_ROLES,
+  CONTENT_WRITE_ROLES,
 } from "../../auth-helpers.ts";
 
 export const aiReportRoutes = new Hono();
@@ -57,9 +61,14 @@ const PATCH_STATUSES = [
   "dismissed",
 ] as const;
 
-// D4: Only these roles can resolve/review reports.
+// D4: Roles that can resolve/review reports.
+// Reuses CONTENT_WRITE_ROLES from auth-helpers.ts: ["owner", "admin", "professor"]
 // Students can report (ALL_ROLES) but cannot resolve.
-const RESOLVER_ROLES = ["admin", "teacher", "coordinator"] as const;
+//
+// A1-TS audit fix: Previously used ["admin", "teacher", "coordinator"]
+// which contained non-existent role names ("teacher" should be "professor",
+// "coordinator" doesn't exist) and omitted "owner". This caused PATCH
+// to be inaccessible for professors and owners.
 
 const MAX_DESCRIPTION_LENGTH = 2000; // P5: matches DB CHECK constraint
 
@@ -113,10 +122,11 @@ aiReportRoutes.post(`${PREFIX}/ai/report`, async (c: Context) => {
 
   // ── Step 3: Fetch content + validate source='ai' (P1, E2, E8) ─
   // Point 1: .maybeSingle() — returns null on 0 rows, not an error
+  // A3-TS: select only summary_id (source is filtered, not read)
   const table = contentTable(contentType);
   const { data: content, error: contentErr } = await db
     .from(table)
-    .select("summary_id, source")
+    .select("summary_id")
     .eq("id", contentId)
     .eq("source", "ai") // P1: only AI-generated content can be reported
     .maybeSingle();
@@ -229,11 +239,13 @@ aiReportRoutes.patch(`${PREFIX}/ai/report/:id`, async (c: Context) => {
 
   // ── Step 4: Verify role in report's institution (D4, E5, E7) ─
   // E7: use report.institution_id, NOT a client-provided value (EC6)
+  // A1-TS audit fix: Uses CONTENT_WRITE_ROLES ["owner", "admin", "professor"]
+  // from auth-helpers.ts instead of the incorrect local RESOLVER_ROLES.
   const roleCheck = await requireInstitutionRole(
     db,
     user.id,
     report.institution_id as string,
-    RESOLVER_ROLES as unknown as string[],
+    CONTENT_WRITE_ROLES,
   );
   if (isDenied(roleCheck))
     return err(c, "Insufficient permissions to manage reports", 403);
