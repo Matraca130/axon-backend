@@ -1,14 +1,18 @@
 /**
  * routes/content/crud.ts — Content hierarchy CRUD registrations
  *
- * 10 registerCrud calls covering the full content hierarchy:
+ * 9 registerCrud calls covering the full content hierarchy:
  * courses → semesters → sections → topics → summaries → chunks → summary_blocks → keywords → subtopics
  *
  * No custom endpoints here — only factory-generated CRUD.
+ *
+ * Fase 5: summaries config includes `afterWrite: onSummaryWrite`
+ * to trigger auto-ingest (chunking + embedding) on POST/PUT.
  */
 
 import { Hono } from "npm:hono";
 import { registerCrud } from "../../crud-factory.ts";
+import { onSummaryWrite } from "../../summary-hook.ts";
 
 export const contentCrudRoutes = new Hono();
 
@@ -73,6 +77,8 @@ registerCrud(contentCrudRoutes, {
 });
 
 // 5. Summaries — Topic -> Summary (SACRED, soft-delete)
+//    afterWrite: triggers auto-ingest (chunking + embedding) on POST/PUT.
+//    See summary-hook.ts for trigger conditions and guards.
 registerCrud(contentCrudRoutes, {
   table: "summaries",
   slug: "summaries",
@@ -91,6 +97,7 @@ registerCrud(contentCrudRoutes, {
     "is_active",
     "estimated_study_minutes",
   ],
+  afterWrite: onSummaryWrite,
 });
 
 // 6. Chunks — Summary -> Chunk (NO updated_at, NO created_by, NO is_active)
