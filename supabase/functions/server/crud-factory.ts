@@ -32,6 +32,8 @@
  *
  * A-2 FIX: POST endpoint validates requiredFields BEFORE calling
  *   checkContentScope, avoiding unnecessary RPC calls on invalid bodies.
+ *
+ * Fase 5: Added onAfterCreate/onAfterUpdate hooks for auto-ingest integration.
  */
 
 import { Hono } from "npm:hono";
@@ -70,6 +72,18 @@ const PARENT_KEY_TO_TABLE: Record<string, string> = {
 
 // ─── Types ──────────────────────────────────────────────────────
 
+/**
+ * Callback context passed to onAfterCreate/onAfterUpdate hooks.
+ */
+export interface AfterHookContext {
+  /** The created or updated row (as returned by Supabase) */
+  row: Record<string, unknown>;
+  /** The authenticated user ID */
+  userId: string;
+  /** The Supabase client (user-scoped) */
+  db: any;
+}
+
 export interface CrudConfig {
   table: string;
   slug: string;
@@ -84,6 +98,10 @@ export interface CrudConfig {
   requiredFields?: string[];
   createFields: string[];
   updateFields: string[];
+
+  // Fase 5: Post-operation hooks (fire-and-forget)
+  onAfterCreate?: (ctx: AfterHookContext) => void;
+  onAfterUpdate?: (ctx: AfterHookContext) => void;
 }
 
 // ─── Pagination Helper ─────────────────────────────────────────
@@ -190,9 +208,6 @@ async function checkContentScope(
   if (cfg.scopeToUser || !cfg.parentKey) return null;
 
   // A-10 FIX: Only apply institution scoping to known content-hierarchy parents.
-  // Tables with parentKeys NOT in the mapping (e.g. study_plan_id → study_plans)
-  // are not part of the content hierarchy and don't have a clean FK path to
-  // institution_id. Skipping is safe because their parents are user-scoped.
   if (!isContentHierarchyParent(cfg.parentKey)) return null;
 
   let institutionId: string | null = null;
@@ -216,7 +231,7 @@ async function checkContentScope(
   return null; // Access granted
 }
 
-// ─── Factory ───────────────────────────────────────────────────
+// ─── Factory ─────────────────────────────────────────────────────
 
 export function registerCrud(app: Hono, cfg: CrudConfig) {
   const base = `${PREFIX}/${cfg.slug}`;
@@ -324,7 +339,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     }
 
     // A-2 FIX: Validate required fields BEFORE institution check.
-    // Avoids unnecessary RPC call when body is incomplete.
     if (cfg.requiredFields) {
       const missing = cfg.requiredFields.filter((f) => {
         const v = body[f];
@@ -359,6 +373,16 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       .single();
     if (error)
       return err(c, `Create ${cfg.table} failed: ${error.message}`, 500);
+
+    // Fase 5: Fire-and-forget post-create hook
+    if (cfg.onAfterCreate && data) {
+      try {
+        cfg.onAfterCreate({ row: data, userId: user.id, db });
+      } catch (e) {
+        console.warn(`[CRUD] onAfterCreate hook failed for ${cfg.table}:`, (e as Error).message);
+      }
+    }
+
     return ok(c, data, 201);
   });
 
@@ -397,6 +421,16 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     const { data, error } = await query.select().single();
     if (error)
       return err(c, `Update ${cfg.table} ${id} failed: ${error.message}`, 500);
+
+    // Fase 5: Fire-and-forget post-update hook
+    if (cfg.onAfterUpdate && data) {
+      try {
+        cfg.onAfterUpdate({ row: data, userId: user.id, db });
+      } catch (e) {
+        console.warn(`[CRUD] onAfterUpdate hook failed for ${cfg.table}:`, (e as Error).message);
+      }
+    }
+
     return ok(c, data);
   });
 

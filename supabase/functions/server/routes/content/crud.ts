@@ -4,13 +4,51 @@
  * 10 registerCrud calls covering the full content hierarchy:
  * courses → semesters → sections → topics → summaries → chunks → summary_blocks → keywords → subtopics
  *
+ * Fase 5: Summaries now have onAfterCreate/onAfterUpdate hooks that
+ * trigger automatic chunking + embedding via autoChunkAndEmbed().
+ * The hook only fires when content_markdown is present (create) or
+ * was included in the update payload.
+ *
  * No custom endpoints here — only factory-generated CRUD.
  */
 
 import { Hono } from "npm:hono";
 import { registerCrud } from "../../crud-factory.ts";
+import { autoChunkAndEmbed } from "../../auto-ingest.ts";
 
 export const contentCrudRoutes = new Hono();
+
+// ─── Fase 5: Auto-ingest hook for summaries ──────────────────────
+// Fire-and-forget: chunks + embeds the summary's markdown after
+// create or update. Errors are logged but never block the response.
+
+function triggerAutoIngest(row: Record<string, unknown>) {
+  const summaryId = row.id as string;
+  const contentMarkdown = row.content_markdown as string | null;
+
+  // Only trigger if there's content to chunk
+  if (!summaryId || !contentMarkdown || contentMarkdown.trim().length === 0) {
+    return;
+  }
+
+  // Resolve institution_id: summaries don't have it directly,
+  // but autoChunkAndEmbed uses adminClient and doesn't need it
+  // for DB operations. We pass empty string as placeholder.
+  autoChunkAndEmbed(summaryId, "")
+    .then((result) => {
+      console.log(
+        `[Auto-Ingest] ${result.chunks_created} chunks, ` +
+        `${result.embeddings_generated} embeds for summary ${summaryId} ` +
+        `(${result.elapsed_ms}ms)`,
+      );
+    })
+    .catch((err) => {
+      console.error(
+        `[Auto-Ingest] Failed for summary ${summaryId}:`,
+        (err as Error).message,
+      );
+    });
+}
 
 // 1. Courses — Institution -> Course
 registerCrud(contentCrudRoutes, {
@@ -73,6 +111,7 @@ registerCrud(contentCrudRoutes, {
 });
 
 // 5. Summaries — Topic -> Summary (SACRED, soft-delete)
+//    Fase 5: onAfterCreate + onAfterUpdate trigger auto-ingest
 registerCrud(contentCrudRoutes, {
   table: "summaries",
   slug: "summaries",
@@ -91,6 +130,8 @@ registerCrud(contentCrudRoutes, {
     "is_active",
     "estimated_study_minutes",
   ],
+  onAfterCreate: ({ row }) => triggerAutoIngest(row),
+  onAfterUpdate: ({ row }) => triggerAutoIngest(row),
 });
 
 // 6. Chunks — Summary -> Chunk (NO updated_at, NO created_by, NO is_active)
