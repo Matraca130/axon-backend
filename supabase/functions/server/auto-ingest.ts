@@ -51,7 +51,7 @@ export interface AutoIngestResult {
  * must be validated by the caller (route handler or hook).
  *
  * @param summaryId      UUID of the summary to process
- * @param institutionId  UUID of the institution (for logging only)
+ * @param institutionId  UUID of the institution (used for logging context)
  * @param options        Optional chunking parameter overrides
  * @returns              Stats about the operation
  * @throws              If summary not found or chunk INSERT fails
@@ -73,6 +73,12 @@ export async function autoChunkAndEmbed(
 ): Promise<AutoIngestResult> {
   const t0 = Date.now();
   const adminDb = getAdminClient();
+
+  // R1-I1 FIX: Log entry with institutionId for operational debugging.
+  // Previously the parameter was declared but never referenced.
+  console.info(
+    `[Auto-Ingest] Processing summary ${summaryId} (institution: ${institutionId})`,
+  );
 
   // ── Step 1: Fetch summary content ─────────────────────────────
 
@@ -253,6 +259,7 @@ export async function autoChunkAndEmbed(
 
       // Rate limit: 1s pause every 10 successful embeddings
       // Prevents hitting Gemini's RPM limit during bulk operations
+      // Guard: generated > 0 avoids spurious pause when 0 % 10 === 0
       if (generated > 0 && generated % 10 === 0) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
@@ -267,12 +274,19 @@ export async function autoChunkAndEmbed(
 
   // ── Step 8: Return result ─────────────────────────────────────
 
+  const elapsed = Date.now() - t0;
+
+  console.info(
+    `[Auto-Ingest] Done: ${summaryId} — ${chunks.length} chunks, ` +
+      `${generated} embedded, ${failed} failed, ${elapsed}ms`,
+  );
+
   return {
     summary_id: summaryId,
     chunks_created: chunks.length,
     embeddings_generated: generated,
     embeddings_failed: failed,
     strategy_used: chunks[0]?.strategy ?? "recursive",
-    elapsed_ms: Date.now() - t0,
+    elapsed_ms: elapsed,
   };
 }
