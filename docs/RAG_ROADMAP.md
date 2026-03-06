@@ -5,7 +5,8 @@
 > `chunking-strategies.md`, `hybrid-retrieval.ts`, `adaptive-ia-study.md`),
 > adaptado a Gemini como provider inicial.
 >
-> **Auditoria v11:** 2026-03-08 — Fase 8 IA Adaptativa completada (branch feat/fase8-ia-adaptativa).
+> **Auditoria v12:** 2026-03-09 — Fase 6 Retrieval Avanzado completada (branch feat/fase6-retrieval-avanzado).
+> v11: Fase 8 IA Adaptativa completada (branch feat/fase8-ia-adaptativa).
 > v10: Fase 3 coarse-to-fine search completado (branch feat/fase3-summary-embeddings).
 > v9: Fase 5 chunking + auto-ingest completado (Issue #30, branch feat/fase5-chunking).
 > v8: T-03 (query log + feedback loop) completado (PR #27, migration aplicada).
@@ -32,7 +33,7 @@
 | 9 | Ruta de busqueda semantica + respuesta | **DONE** | blueprint |
 | 10 | Generacion adaptativa (flashcards/quiz) | **DONE** | blueprint |
 | 11 | Chunking inteligente (semantico) | **PARCIAL** | blueprint + chunking-strategies |
-| 12 | Re-ranking | **PENDIENTE** | blueprint + hybrid-retrieval |
+| 12 | Re-ranking | **DONE** | blueprint + hybrid-retrieval → Fase 6C |
 | 13 | Ingestion multi-fuente (PDF, API) | **PENDIENTE** | blueprint |
 | 14 | Auth + institution scoping | **DONE** | blueprint |
 | 15 | Retry con backoff exponencial | **DONE** | blueprint |
@@ -40,9 +41,9 @@
 | 17 | Feedback loop (thumbs up/down) en RAG chat | **DONE** | auditoria v2 → T-03 (PR #27) |
 | 18 | Monitoring de cobertura de embeddings | **DONE** | auditoria v2 → T-03 (PR #27) |
 | 19 | Auto-ingest trigger | **DONE** | auditoria v2 → Issue #30 |
-| 20 | Multi-Query Retrieval (+25% recall) | **PENDIENTE** | hybrid-retrieval.ts |
-| 21 | HyDE — Hypothetical Document Embeddings | **PENDIENTE** | hybrid-retrieval.ts |
-| 22 | Seleccion dinamica de estrategia de retrieval | **PENDIENTE** | hybrid-retrieval.ts |
+| 20 | Multi-Query Retrieval (+25% recall) | **DONE** | hybrid-retrieval.ts → Fase 6A |
+| 21 | HyDE — Hypothetical Document Embeddings | **DONE** | hybrid-retrieval.ts → Fase 6B |
+| 22 | Seleccion dinamica de estrategia de retrieval | **DONE** | hybrid-retrieval.ts → Fase 6D |
 | 23 | Semantic Chunking (embedding-based boundaries) | **PENDIENTE** | chunking-strategies |
 | 24 | Decision framework para estrategia de chunking | **PARCIAL** | chunking-strategies |
 | 25 | NeedScore integration con /ai/generate | **DONE** | adaptive-ia-study → Fase 8A |
@@ -53,8 +54,12 @@
 | 30 | Quality dashboard para preguntas AI flaggeadas | **DONE** | adaptive-ia-study → Fase 8C |
 | 31 | chat.ts comentarios stale en header | **DONE** | auditoria v2 → `routes/ai/chat.ts` (INC-1) |
 
-**Resumen: 23/31 completados, 6 pendientes, 2 parciales.**
+**Resumen: 27/31 completados, 2 pendientes, 2 parciales.**
 
+> **Pendientes:**
+> - #13 Ingestion multi-fuente (PDF, API) — Fase 7
+> - #23 Semantic Chunking (embedding-based boundaries) — fase futura
+>
 > **Parciales:**
 > - #11 Chunking inteligente: Recursive Character implementado como default (Fase 5). Semantic Chunking (embedding-based boundaries, #23) pendiente para fases futuras.
 > - #24 Decision framework: Recursive = default implementado. Upgrade automatico a Semantic para docs largos pendiente.
@@ -390,16 +395,176 @@ Ver [Appendix A > chunkMarkdown()](#a1-chunkertsimplementacion-completa) para el
 
 ---
 
-## Fase 6 — Retrieval avanzado (Multi-Query + HyDE + Re-ranking)
+## Fase 6 — Retrieval avanzado (Multi-Query + HyDE + Re-ranking) — DONE
 
 **Prioridad:** MEDIA — mejora significativa de recall y precision.
-**Riesgo:** MEDIO — agrega llamadas Gemini extra.
+**Riesgo:** MEDIO — agrega llamadas Gemini extra (mitigado con degradacion graceful).
 **Impacto:** +25-40% recall/precision segun la estrategia.
+**Estado:** **DONE** — Branch `feat/fase6-retrieval-avanzado`. Migration `20260309_01`.
 
 > **Fuente:** `hybrid-retrieval.ts` de la investigacion describe 4 estrategias.
-> La #1 (Hybrid RRF) ya esta implementada. Faltan #2, #3, y #4.
+> La #1 (Hybrid RRF) ya estaba implementada. Fase 6 implementa #2 (Multi-Query),
+> #3 (HyDE), y #4 (Re-ranking) con seleccion dinamica.
 
-Ver secciones 6A-6D en versiones anteriores de este documento para detalle de implementacion.
+### Archivos creados/modificados (Fase 6)
+
+| Archivo | Tipo | Descripcion |
+|---|---|---|
+| `retrieval-strategies.ts` | Nuevo | Funciones puras: generateMultiQueries, generateHypotheticalDocument, rerankWithGemini, mergeSearchResults, selectStrategy, executeRetrievalEmbedding |
+| `routes/ai/chat.ts` | Modificado | Integracion de strategies: N-search loop, merge, rerank, strategy metadata en response |
+| `tests/retrieval_strategies_test.ts` | Nuevo | 11 tests: mergeSearchResults (5), selectStrategy (4), score blend (1), priority (1) |
+| Migration `20260309_01` | Nuevo | Columnas `retrieval_strategy TEXT` + `rerank_applied BOOLEAN` en rag_query_log |
+
+### Sub-tasks completados
+
+| Par | Sub-tasks | Descripcion | Commits |
+|---|---|---|---|
+| Par 1 | 6.1 + 6.2 | `retrieval-strategies.ts` + tests unitarios | `ca8ed99` |
+| Audit R1 | fix | selectStrategy priority order (historyLength before wordCount) | `a51aa60` |
+| Par 2 | 6.3 + 6.4 | Migration `20260309_01` + chat.ts integracion completa | `36eeed6` |
+| Docs | 6.5 + 6.6 | BACKEND_MAP.md + RAG_ROADMAP.md v12 | `e983a1b` |
+
+### Arquitectura de retrieval (Fase 6)
+
+```
+Usuario envia query + history + optional strategy param
+    |
+    v
+selectStrategy(message, summaryId, historyLength)
+  OR client override (body.strategy)
+    |
+    v
++------------------+--------------------+------------------+
+| standard         | multi_query        | hyde             |
+| (summaryId dado) | (query larga OR    | (query corta,    |
+|                  |  history > 2)      |  ≤5 palabras)    |
++------------------+--------------------+------------------+
+    |                    |                    |
+    v                    v                    v
+1 embedding         3 embeddings          1 embedding
+(query original)    (original + 2         (hipotesis de
+                     reformulaciones       Gemini, no query)
+                     en paralelo, D21)     taskType=DOC, D24)
+    |                    |                    |
+    +--------------------+--------------------+
+    |
+    v
+POR CADA embedding: search (hybrid o c2f)
+    |
+    v
+mergeSearchResults() — dedup por chunk_id, max score
+    |
+    v
+rerankWithGemini() — Gemini scores 0-10, blend 0.6×rerank + 0.4×original (D23)
+    |
+    v
+fetchAdjacentChunks() → assembleContext() → generateText()
+    |
+    v
+Log: retrieval_strategy + rerank_applied + strategy metadata
+```
+
+### Decisiones arquitectonicas (D19-D30)
+
+| # | Decision | Razonamiento |
+|---|---|---|
+| D19 | Archivo separado `retrieval-strategies.ts` | chat.ts ya tenia 21KB; separar mantiene cohesion |
+| D20 | Re-ranking siempre (si >1 resultado) | Gemini-as-Judge mejora precision sin costo de embedding |
+| D21 | Embeddings en paralelo (multi-query) | Promise.all para 3 embeddings, ~misma latencia que 1 |
+| D22 | Client override via `body.strategy` | Permite testing A/B y debug sin cambiar backend |
+| D23 | Score blend 0.6×rerank + 0.4×original | Preserva signal original; Gemini refina, no reemplaza |
+| D24 | HyDE reemplaza query (no la combina) | Investigacion muestra que hypothesis embedding es superior |
+| D25 | Re-rank usa todos los chunks de input | chat.ts ya limita a 8; re-ranker no necesita su propio limit |
+| D26 | Columnas separadas strategy vs search_type | search_type = metodo de busqueda; strategy = tecnica de retrieval |
+| D27 | 2 reformulaciones (no 3) | Ahorra RPM de Gemini sin sacrificar recall significativo |
+| D28 | Temperature 0.8 para reformulaciones | Diversidad de sinonimos y perspectivas |
+| D29 | Temperature 0.0 para re-ranking | Determinismo en scoring de relevancia |
+| D30 | Temperature 0.3 para HyDE | Factual pero con algo de variacion |
+
+### Exported types (de `retrieval-strategies.ts`)
+
+```typescript
+export interface MatchedChunk {
+  chunk_id: string;
+  summary_id: string;
+  summary_title: string;
+  content: string;
+  similarity: number;
+  text_rank: number;
+  combined_score: number;
+}
+
+export type RetrievalStrategy = "standard" | "multi_query" | "hyde";
+
+export interface RetrievalEmbeddingOutput {
+  embeddings: Array<{ query: string; embedding: number[] }>;
+  strategyMeta: Record<string, unknown>;
+}
+```
+
+### Funciones exportadas
+
+| Funcion | Tipo | Descripcion |
+|---|---|---|
+| `selectStrategy(msg, summaryId, histLen)` | Pure | Auto-selecciona strategy basada en query characteristics |
+| `generateMultiQueries(query)` | Async | Gemini genera 2 reformulaciones (graceful: returns []) |
+| `generateHypotheticalDocument(query)` | Async | Gemini genera hipotesis 2-3 oraciones (graceful: returns "") |
+| `rerankWithGemini(query, chunks, topK)` | Async | Gemini scores relevancia 0-10, blend con original (graceful: returns original) |
+| `mergeSearchResults(sets)` | Pure | Dedup por chunk_id, keep max score, sort descending |
+| `executeRetrievalEmbedding(strategy, query, embedFn?)` | Async | Orchestrator: ejecuta embedding(s) segun strategy |
+
+### Cambios en `POST /ai/rag-chat` (chat.ts)
+
+- **Nuevo param:** `strategy?: "auto" | "standard" | "multi_query" | "hyde"` (default: "auto")
+- **Import:** MatchedChunk ahora viene de retrieval-strategies.ts (antes inline)
+- **Pipeline:** selectStrategy → executeRetrievalEmbedding → N searches → merge → rerank → context
+- **Response `_search`:** agrega `strategy`, `rerank_applied`, y metadata de la strategy usada
+- **Log:** inserta `retrieval_strategy` y `rerank_applied` en rag_query_log
+- **Backward compatible:** sin param `strategy` = "auto" = misma logica que pre-Fase 6
+
+### Migration SQL
+
+```sql
+-- Archivo: supabase/migrations/20260309_01_retrieval_strategy_log.sql (PENDING)
+
+ALTER TABLE rag_query_log
+  ADD COLUMN IF NOT EXISTS retrieval_strategy TEXT NOT NULL DEFAULT 'standard';
+
+ALTER TABLE rag_query_log
+  ADD COLUMN IF NOT EXISTS rerank_applied BOOLEAN NOT NULL DEFAULT FALSE;
+```
+
+### Auditoria R1 — Bug corregido
+
+| Issue | Severidad | Fix |
+|---|---|---|
+| `selectStrategy()` evaluaba `wordCount <= 5` antes de `historyLength > 2` | **Bug** | Reordenar: check historyLength primero (mayor prioridad) |
+| `assertNotEquals` importado pero no usado en tests | Low | Removido |
+
+**Tracing del bug:**
+```
+selectStrategy("¿Y luego?", null, 4)
+  ANTES: wordCount=2 ≤ 5 → return "hyde" ← INCORRECTO
+  DESPUES: historyLength=4 > 2 → return "multi_query" ← CORRECTO
+```
+
+### Advisory issues documentados (no-blocking)
+
+| Issue | Severidad | Descripcion |
+|---|---|---|
+| A1 | Low | Log INSERT incluye columnas de migration `20260309_01`. Si migration no aplicada, INSERT falla silenciosamente (fire-and-forget). Se autocorrige al aplicar migration. |
+
+### Costo estimado Gemini API (free tier)
+
+| Strategy | Calls Gemini extra | Embeddings extra | Impacto en RPM |
+|---|---|---|---|
+| standard | 0 (rerank only: +1) | 0 | +1 gen call |
+| multi_query | +1 (reformulations) + 1 (rerank) | +2 | +2 gen, +2 embed |
+| hyde | +1 (hypothesis) + 1 (rerank) | 0 (reemplaza, no agrega) | +2 gen |
+
+> Free tier: 1500 RPM embed, 15 RPM gen. En el peor caso (multi_query),
+> una query usa 3 RPM gen (reformulation + rerank + response) y 3 RPM embed.
+> Con 15 RPM gen, maximo ~5 queries/min concurrentes. Aceptable para desarrollo.
 
 ---
 
@@ -572,12 +737,12 @@ Fase 3: Embeddings en summaries       [DONE]   [Fase 3 branch]  [coarse-to-fine 
   |
 Fase 8: IA adaptativa                 [DONE]   [feat/fase8]     [NeedScore + pre-gen + calidad]
   |
-Fase 6: Retrieval avanzado            [2 dias] [chat.ts]        [Multi-Query + HyDE + re-rank]
+Fase 6: Retrieval avanzado            [DONE]   [feat/fase6]     [Multi-Query + HyDE + re-rank]
   |
 Fase 7: Ingestion PDF                 [3 dias] [nuevo modulo]   [feature nueva]
 ```
 
-**Total estimado: ~5 dias restantes (Fases 6 y 7)**
+**Total estimado: ~3 dias restantes (Fase 7 unicamente)**
 
 ---
 
