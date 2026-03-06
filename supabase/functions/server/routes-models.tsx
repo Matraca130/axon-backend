@@ -155,6 +155,8 @@ registerCrud(modelRoutes, {
 });
 
 // 2. Model 3D Pins — Model -> Pin (professor-created, orderable, hard delete)
+//    NOTE: DB column is "title" (not "label"). Verified in schema-3d-ai.md.
+//    Frontend sends { title: "..." } — must match createFields/updateFields.
 registerCrud(modelRoutes, {
   table: "model_3d_pins",
   slug: "model-3d-pins",
@@ -169,7 +171,7 @@ registerCrud(modelRoutes, {
     "pin_type",
     "geometry",
     "normal",
-    "label",
+    "title",
     "color",
     "description",
     "order_index",
@@ -179,7 +181,7 @@ registerCrud(modelRoutes, {
     "pin_type",
     "geometry",
     "normal",
-    "label",
+    "title",
     "color",
     "description",
     "order_index",
