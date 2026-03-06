@@ -10,7 +10,10 @@
  *   1. Resolve institution (from summary or user's memberships)
  *   2. Build augmented query from message + history (Phase 5)
  *   3. Embed the augmented query via gemini-embedding-001 (768 dims)
- *   4. Hybrid search: pgvector cosine + full-text via rag_hybrid_search() RPC
+ *   4. Search strategy decision (Fase 3):
+ *      a. summary_id given → rag_hybrid_search (scoped, FTS+vector)
+ *      b. summary_id null  → rag_coarse_to_fine_search (summary→chunk vector)
+ *      c. Fallback: if coarse-to-fine returns 0 → rag_hybrid_search (unscoped)
  *   5. Fetch adjacent chunks for context expansion (Phase 5)
  *   6. Fetch student knowledge profile via get_student_knowledge_context() RPC
  *   7. Generate response via Gemini 2.5 Flash with RAG context
@@ -20,6 +23,12 @@
  *   - History-augmented search: uses last 2 user messages to improve follow-up recall
  *   - Adjacent chunk expansion: fetches ±1 order_index chunks for better context
  *   - Smart context assembly: orders by summary→order_index, deduplicates
+ *
+ * Fase 3 additions:
+ *   - Coarse-to-fine search: two-level vector search (summary → chunk)
+ *   - normalizeCoarseToFineResults(): adapter for MatchedChunk compatibility
+ *   - Fallback chain: coarse-to-fine → hybrid (unscoped) → empty context
+ *   - search_type logging: hybrid | coarse_to_fine | hybrid_fallback (+ _augmented)
  *
  * Pre-flight fixes applied:
  *   PF-01 FIX: Changed 'institution_members' → 'memberships' + is_active filter
@@ -282,6 +291,40 @@ function assembleContext(
   return { ragContext, sourcesUsed, contextChunksCount: matches.length };
 }
 
+// ─── Fase 3: Coarse-to-Fine result normalizer ─────────────────────
+// Converts the rag_coarse_to_fine_search() RPC result into the
+// MatchedChunk[] shape that fetchAdjacentChunks() and assembleContext()
+// already expect. This avoids duplicating downstream logic.
+//
+// Mapping:
+//   chunk_similarity  → similarity (primary metric for ordering)
+//   0                 → text_rank  (no FTS in coarse-to-fine)
+//   combined_score    → combined_score (0.3*sum + 0.7*chunk from RPC)
+
+interface CoarseToFineRow {
+  chunk_id: string;
+  summary_id: string;
+  summary_title: string;
+  content: string;
+  summary_similarity: number;
+  chunk_similarity: number;
+  combined_score: number;
+}
+
+function normalizeCoarseToFineResults(
+  rows: CoarseToFineRow[],
+): MatchedChunk[] {
+  return rows.map((r) => ({
+    chunk_id: r.chunk_id,
+    summary_id: r.summary_id,
+    summary_title: r.summary_title,
+    content: r.content,
+    similarity: r.chunk_similarity,
+    text_rank: 0,
+    combined_score: r.combined_score,
+  }));
+}
+
 // ─── Main route ───────────────────────────────────────────────────
 
 aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
@@ -349,28 +392,83 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   const { query: searchQuery, wasAugmented } = buildAugmentedQuery(message, history);
 
   // ── RAG: embed query and search ──────────────────────────
+  // Fase 3: Search strategy decision
+  //   summaryId given  → rag_hybrid_search (scoped, FTS + vector)
+  //   summaryId null   → rag_coarse_to_fine_search (summary → chunk vector)
+  //                      fallback → rag_hybrid_search (unscoped)
   let ragContext = "";
   let sourcesUsed: Array<{ chunk_id: string; summary_title: string; similarity: number }> = [];
   let contextChunksCount = 0;
+  let searchType = "hybrid";
 
   try {
     // Phase 5: Embed the augmented query (includes history context)
     const queryEmbedding = await generateEmbedding(searchQuery, "RETRIEVAL_QUERY");
+    const queryEmbeddingJson = JSON.stringify(queryEmbedding);
 
-    // Phase 5: Request more matches (8 instead of 5) for context expansion
-    const { data: matches } = await db.rpc("rag_hybrid_search", {
-      p_query_embedding: JSON.stringify(queryEmbedding),
-      p_query_text: message,  // Use original message for FTS (more precise)
-      p_institution_id: institutionId,
-      p_summary_id: summaryId || null,
-      p_match_count: 8,
-      p_similarity_threshold: 0.3,
-    });
+    let matches: MatchedChunk[] = [];
 
-    if (matches && matches.length > 0) {
+    if (summaryId) {
+      // ── SCOPED: Hybrid search within specific summary ──────
+      // Uses FTS + vector for precise matching within known material.
+      const { data } = await db.rpc("rag_hybrid_search", {
+        p_query_embedding: queryEmbeddingJson,
+        p_query_text: message,
+        p_institution_id: institutionId,
+        p_summary_id: summaryId,
+        p_match_count: 8,
+        p_similarity_threshold: 0.3,
+      });
+      matches = (data || []) as MatchedChunk[];
+      searchType = "hybrid";
+    } else {
+      // ── BROAD: Coarse-to-fine search (Fase 3) ──────────────
+      // Stage 1: Find top-N summaries by embedding similarity
+      // Stage 2: Find top-K chunks within those summaries
+      // Score: 0.3 × summary_sim + 0.7 × chunk_sim
+      const { data: c2fData, error: c2fErr } = await db.rpc(
+        "rag_coarse_to_fine_search",
+        {
+          p_query_embedding: queryEmbeddingJson,
+          p_institution_id: institutionId,
+          p_top_summaries: 3,
+          p_top_chunks: 8,
+          p_similarity_threshold: 0.3,
+        },
+      );
+
+      if (!c2fErr && c2fData && c2fData.length > 0) {
+        matches = normalizeCoarseToFineResults(c2fData as CoarseToFineRow[]);
+        searchType = "coarse_to_fine";
+      } else {
+        // ── FALLBACK: No summary embeddings yet (transition) ───
+        // coarse-to-fine returned 0 results, likely because summaries
+        // don't have embeddings yet. Fall back to hybrid search
+        // without summary scope.
+        if (c2fErr) {
+          console.warn(
+            "[RAG Chat] Coarse-to-fine RPC failed, using hybrid fallback:",
+            c2fErr.message,
+          );
+        }
+
+        const { data: hybridData } = await db.rpc("rag_hybrid_search", {
+          p_query_embedding: queryEmbeddingJson,
+          p_query_text: message,
+          p_institution_id: institutionId,
+          p_summary_id: null,
+          p_match_count: 8,
+          p_similarity_threshold: 0.3,
+        });
+        matches = (hybridData || []) as MatchedChunk[];
+        searchType = "hybrid_fallback";
+      }
+    }
+
+    if (matches.length > 0) {
       // Phase 5: Fetch adjacent chunks for context expansion
       // Only expand top 5 matches to limit DB queries
-      const topMatches = matches.slice(0, 5) as MatchedChunk[];
+      const topMatches = matches.slice(0, 5);
       const contextChunks = await fetchAdjacentChunks(db, topMatches);
 
       // Phase 5: Assemble coherent context
@@ -419,10 +517,13 @@ Responde en espanol.${profileContext}`;
       maxTokens: 1500,
     });
 
-    // ── T-03 + Phase 5: Compute metrics and log query ─────────
+    // ── T-03 + Fase 3: Compute metrics and log query ──────────
     const latencyMs = Date.now() - t0;
     const sims = sourcesUsed.map((s) => s.similarity);
     const logId = crypto.randomUUID();
+
+    // Fase 3: Combine search strategy + augmentation for full observability
+    const logSearchType = wasAugmented ? `${searchType}_augmented` : searchType;
 
     // Fire-and-forget: INSERT via adminClient (bypass RLS).
     getAdminClient()
@@ -439,7 +540,7 @@ Responde en espanol.${profileContext}`;
           ? Math.round((sims.reduce((a, b) => a + b, 0) / sims.length) * 1000) / 1000
           : null,
         latency_ms: latencyMs,
-        search_type: wasAugmented ? "hybrid_augmented" : "hybrid",
+        search_type: logSearchType,
         model_used: "gemini-2.5-flash",
       })
       .then(({ error }) => {
@@ -452,9 +553,10 @@ Responde en espanol.${profileContext}`;
       tokens: result.tokensUsed,
       profile_used: !!profileContext,
       log_id: logId,
-      // Phase 5: Additional metadata
+      // Phase 5 + Fase 3: Search metadata
       _search: {
         augmented: wasAugmented,
+        search_type: searchType,
         context_chunks: contextChunksCount,
         primary_matches: sourcesUsed.length,
       },
