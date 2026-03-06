@@ -381,7 +381,7 @@ CREATE POLICY rag_log_update_feedback ON rag_query_log FOR UPDATE
 | `routes/ai/index.ts` | Modificado | Mount de `aiReChunkRoutes` |
 | `crud-factory.ts` | Modificado | `AfterWriteParams` type + `afterWrite?` callback en CrudConfig + fire-and-forget en POST/PUT |
 | `routes/content/crud.ts` | Modificado | `afterWrite: onSummaryWrite` en config de summaries |
-| `tests/summary_hook_test.ts` | Nuevo | 8 tests: gate logic (7 skip paths + 1 fire path) |
+| `tests/summary_hook_test.ts` | Nuevo | 9 tests: gate logic (8 skip paths + 1 fire path) |
 | Migration `20260306_04` | Nuevo | Columnas `chunk_strategy TEXT DEFAULT 'recursive'` + `last_chunked_at TIMESTAMPTZ` en summaries |
 
 ### Sub-tasks completados
@@ -389,15 +389,15 @@ CREATE POLICY rag_log_update_feedback ON rag_query_log FOR UPDATE
 | # | Sub-task | Commits |
 |---|---|---|
 | 5.1 | `chunker.ts` — Recursive Character Splitting | Branch inicial |
-| 5.2 | 10 unit tests para chunker + 3 fixes auditía R2 | Branch inicial |
+| 5.2 | 10 unit tests para chunker + 3 fixes auditoría R2 | Branch inicial |
 | 5.3 | Fixtures de test (markdown samples) | Branch inicial |
 | 5.4 | Migration: `chunk_strategy` + `last_chunked_at` | Branch inicial |
 | 5.5 | `auto-ingest.ts` — función pura `autoChunkAndEmbed` + 1 fix R1 | `3026a31` |
 | 5.6 | `routes/ai/re-chunk.ts` — POST /ai/re-chunk | `3026a31` |
 | 5.7 | Mount `aiReChunkRoutes` en AI module combiner | `01de895` |
 | 5.8 | Fire-and-forget hook en POST/PUT summaries | `a883931`, `2b6f5b7`, `de5095f` |
-| 5.9 | 8 tests para `onSummaryWrite` gate logic | `aae4eb0` |
-| 5.10 | Actualizar RAG_ROADMAP.md | Este commit |
+| 5.9 | 9 tests para `onSummaryWrite` gate logic | `aae4eb0`, `3d2fdab` |
+| 5.10 | Actualizar RAG_ROADMAP.md | `d1046c4` |
 
 ### Decision framework (de `chunking-strategies.md`)
 
