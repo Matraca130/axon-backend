@@ -9,10 +9,10 @@
  *   Gate 3: Skip if content_markdown is empty/null/whitespace.
  *
  * Test strategy:
- *   - Gates that SKIP (T1–T7): verify the function returns without
+ *   - Gates that SKIP (T1–T8): verify the function returns without
  *     throwing. Since skip paths exit before any async work, these
  *     tests are fully synchronous and deterministic.
- *   - Fire path (T8): verify the function doesn't throw even when
+ *   - Fire path (T9): verify the function doesn't throw even when
  *     autoChunkAndEmbed fails (fake Supabase URL → connection refused).
  *     The hook's .catch() absorbs the async error and logs it.
  *
@@ -39,7 +39,7 @@ import {
 //
 // db.ts evaluates these at module load time and throws if missing.
 // Port 1 is reserved (tcpmux) and never listens → ECONNREFUSED in ~1ms.
-// This ensures the fire-path test (T8) fails fast instead of hanging.
+// This ensures the fire-path test (T9) fails fast instead of hanging.
 
 Deno.env.set("SUPABASE_URL", "http://127.0.0.1:1");
 Deno.env.set("SUPABASE_ANON_KEY", "fake-anon-key-for-testing");
@@ -265,7 +265,20 @@ Deno.test("T6 · Gate 3 — create with empty content_markdown → no-op", () =>
   });
 });
 
-Deno.test("T7 · Gate 3 — create with whitespace-only content → no-op", () => {
+Deno.test("T7 · Gate 3 — create with null content_markdown → no-op", () => {
+  // Scenario: professor created a summary with title only.
+  // The DB column defaults to NULL (not ""). This is the most
+  // common skip case in production.
+  //
+  // !null → true → return (same branch as empty string).
+  onSummaryWrite({
+    action: "create",
+    row: makeRow({ content_markdown: null }),
+    userId: "user-123",
+  });
+});
+
+Deno.test("T8 · Gate 3 — create with whitespace-only content → no-op", () => {
   // Scenario: professor typed some spaces/newlines but no real content.
   // The trim() check catches this.
   onSummaryWrite({
@@ -294,7 +307,7 @@ Deno.test("T7 · Gate 3 — create with whitespace-only content → no-op", () =
 // promise creates async ops that Deno's test sanitizer would flag.
 
 Deno.test({
-  name: "T8 · Fire — create with valid content → autoChunkAndEmbed fires, error absorbed",
+  name: "T9 · Fire — create with valid content → autoChunkAndEmbed fires, error absorbed",
   fn: async () => {
     // Capture console.error to verify the hook's .catch() fires
     const errors: string[] = [];
