@@ -25,6 +25,7 @@
  *
  * Fase 3 additions:
  *   3.4: target="summaries" mode — batch summary embedding via embedSummaryContent()
+ *   A2:  Added `skipped` counter for empty-content summaries (audit fix)
  */
 
 import { Hono } from "npm:hono";
@@ -233,6 +234,14 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
 // embedding generation (title + content, truncated at 8000 chars,
 // RETRIEVAL_DOCUMENT task type).
 //
+// A2 FIX: Added `skipped` counter. The SQL filter
+// `.not("content_markdown", "is", null)` excludes NULL but not
+// empty strings ("") or whitespace-only ("   "). The loop
+// correctly skips these, but previously they were invisible
+// in the response (processed + failed < total_found with no
+// explanation). Now `skipped` makes the accounting transparent:
+//   processed + failed + skipped === total_found
+//
 // Fase 3, sub-task 3.4 — Bloque 2
 // ═══════════════════════════════════════════════════════════════════
 
@@ -252,6 +261,9 @@ async function ingestSummaryEmbeddings(
   //   - content_markdown IS NOT NULL: nothing to embed without content
   //   - deleted_at IS NULL: don't embed soft-deleted summaries
   //   - is_active = TRUE: don't embed inactive summaries
+  //
+  // Note: IS NOT NULL does NOT exclude empty strings ("") or
+  // whitespace-only strings. Those are caught by the loop guard.
 
   const { data: summaries, error: fetchErr } = await adminDb
     .from("summaries")
@@ -271,6 +283,7 @@ async function ingestSummaryEmbeddings(
     return ok(c, {
       processed: 0,
       failed: 0,
+      skipped: 0,
       total_found: 0,
       target: "summaries",
       message: "No summaries without embeddings found for this institution",
@@ -280,6 +293,7 @@ async function ingestSummaryEmbeddings(
   // ── Process each summary ──────────────────────────────────
   let processed = 0;
   let failed = 0;
+  let skipped = 0;
   const errors: string[] = [];
 
   for (const summary of summaries) {
@@ -287,8 +301,10 @@ async function ingestSummaryEmbeddings(
       const title = (summary.title as string) ?? "";
       const content = summary.content_markdown as string;
 
-      // Skip if content is empty/whitespace after trimming
+      // A2 FIX: Skip empty/whitespace content and count it explicitly.
+      // SQL IS NOT NULL doesn't catch "" or "   \n  ".
       if (!content || content.trim().length === 0) {
+        skipped++;
         continue;
       }
 
@@ -309,6 +325,7 @@ async function ingestSummaryEmbeddings(
   return ok(c, {
     processed,
     failed,
+    skipped,
     total_found: summaries.length,
     target: "summaries",
     errors: errors.slice(0, 5),
