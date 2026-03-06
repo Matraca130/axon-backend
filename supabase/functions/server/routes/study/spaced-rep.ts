@@ -7,6 +7,7 @@
  *
  * P-2 FIX: Pagination caps added.
  * M-1 FIX: BKT total_attempts/correct_attempts now INCREMENT instead of replace.
+ * M-5 FIX: Added subtopic_ids (plural) batch filter to GET /bkt-states.
  */
 
 import { Hono } from "npm:hono";
@@ -28,6 +29,7 @@ import type { Context } from "npm:hono";
 export const spacedRepRoutes = new Hono();
 
 const MAX_PAGINATION_LIMIT = 500;
+const MAX_BATCH_SUBTOPIC_IDS = 200;
 const FSRS_STATES = ["new", "learning", "review", "relearning"] as const;
 
 // ─── FSRS States ───────────────────────────────────────────────────────
@@ -108,9 +110,42 @@ spacedRepRoutes.get(`${PREFIX}/bkt-states`, async (c: Context) => {
     .order("updated_at", { ascending: false });
 
   const subtopicId = c.req.query("subtopic_id");
+  const subtopicIds = c.req.query("subtopic_ids");
+
+  // M-5 FIX: subtopic_id (singular) and subtopic_ids (plural) are mutually
+  // exclusive. Using both would create ambiguous query semantics.
+  if (subtopicId && subtopicIds) {
+    return err(c, "Cannot use both subtopic_id and subtopic_ids — pick one", 400);
+  }
+
   if (subtopicId) {
     if (!isUuid(subtopicId)) return err(c, "subtopic_id must be a valid UUID", 400);
     query = query.eq("subtopic_id", subtopicId);
+  }
+
+  // M-5 FIX: Batch filter by multiple subtopic IDs (comma-separated).
+  // Replaces the global ?limit=500 workaround with precise scoped fetch.
+  // Frontend sends subtopic_ids derived from the subtopics-batch response
+  // for the current summary, reducing data transfer from "all student BKT
+  // states ever" to "only BKT states for this summary's subtopics".
+  if (subtopicIds) {
+    const ids = subtopicIds.split(",").map((s) => s.trim()).filter(Boolean);
+    if (ids.length === 0) {
+      return err(c, "subtopic_ids must contain at least one UUID", 400);
+    }
+    if (ids.length > MAX_BATCH_SUBTOPIC_IDS) {
+      return err(
+        c,
+        `subtopic_ids cannot exceed ${MAX_BATCH_SUBTOPIC_IDS} (got ${ids.length})`,
+        400,
+      );
+    }
+    for (const id of ids) {
+      if (!isUuid(id)) {
+        return err(c, `Invalid UUID in subtopic_ids: ${id}`, 400);
+      }
+    }
+    query = query.in("subtopic_id", ids);
   }
 
   let limit = parseInt(c.req.query("limit") ?? "100", 10);
