@@ -21,6 +21,8 @@
  *   D28: Temperature 0.8 for reformulations (diversity)
  *   D29: Temperature 0.0 for re-ranking (deterministic scoring)
  *   D30: Temperature 0.3 for HyDE (factual content)
+ *
+ * Audit R1 fix: selectStrategy checks historyLength before wordCount
  */
 
 import { generateText, generateEmbedding, parseGeminiJson } from "./gemini.ts";
@@ -55,11 +57,16 @@ export interface RetrievalEmbeddingOutput {
 /**
  * Selects the best retrieval strategy based on query characteristics.
  *
- * Rules:
- *   1. summaryId present → "standard" (scoped search is already precise)
- *   2. Word count ≤ 5   → "hyde" (short factual questions benefit most)
- *   3. Word count > 5 OR historyLength > 2 → "multi_query" (complex/follow-up)
- *   4. Default → "standard"
+ * Priority order (highest first):
+ *   1. summaryId present    → "standard" (scoped search is already precise)
+ *   2. historyLength > 2    → "multi_query" (deep conversation → reformulations)
+ *   3. wordCount ≤ 5        → "hyde" (short factual questions benefit most)
+ *   4. wordCount > 5        → "multi_query" (complex questions → reformulations)
+ *   5. Default              → "standard"
+ *
+ * Audit R1 fix: historyLength checked before wordCount.
+ * Rationale: multi-turn dialog benefits more from query reformulation
+ * than from a hypothetical answer, even when the latest message is short.
  */
 export function selectStrategy(
   message: string,
@@ -69,13 +76,17 @@ export function selectStrategy(
   // Scoped search is already precise — no advanced strategy needed
   if (summaryId) return "standard";
 
+  // R1 FIX: Deep conversation history has highest priority (after scoped)
+  // Multi-turn dialog → reformulations catch context from prior messages
+  if (historyLength > 2) return "multi_query";
+
   const wordCount = message.trim().split(/\s+/).length;
 
   // Short questions → HyDE (hypothetical answer embedding)
   if (wordCount <= 5) return "hyde";
 
-  // Long questions or deep conversation → Multi-Query (reformulations)
-  if (wordCount > 5 || historyLength > 2) return "multi_query";
+  // Long/complex questions → Multi-Query (reformulations)
+  if (wordCount > 5) return "multi_query";
 
   return "standard";
 }
