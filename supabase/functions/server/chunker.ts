@@ -64,6 +64,11 @@ const SEPARATORS = [
   " ",       // Word boundaries — last resort
 ] as const;
 
+/** Check if a separator is a markdown header marker */
+function isHeaderSeparator(sep: string): boolean {
+  return sep.includes("#");
+}
+
 // ─── Entry Point ────────────────────────────────────────────────────
 
 /**
@@ -109,12 +114,12 @@ export function chunkMarkdown(
 /**
  * Recursively split text using a hierarchy of separators.
  *
- * At each level:
- *   1. Split text by current separator
- *   2. Re-attach the separator to the start of each fragment (for headers)
- *      so that "## Mitosis" stays with its content
- *   3. For each fragment: if it fits → keep; if too large → recurse deeper
- *   4. If we're at the last separator (" ") and still too large → hard split
+ * Re-attachment logic is separator-aware:
+ *   - Headers (## / ###): re-attach header marker to the START of the next fragment
+ *     so "## Mitosis\nContent" stays together.
+ *   - Sentences (. ): append "." to the END of the previous fragment
+ *     so "First sentence" becomes "First sentence." and the next starts clean.
+ *   - Paragraphs (\n\n) / Spaces: no re-attachment needed — they're neutral breaks.
  */
 function recursiveSplit(
   text: string,
@@ -140,23 +145,47 @@ function recursiveSplit(
     return recursiveSplit(text, separators, level + 1, opts);
   }
 
-  // Re-attach separator to each fragment (except the first)
-  // This preserves headers: "## Mitosis\nContent" stays as "## Mitosis\nContent"
+  // ── Separator-aware re-attachment ──────────────────────────────
   const fragments: string[] = [];
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i];
-    if (i === 0) {
-      // First fragment: no separator prefix
-      if (part.trim().length > 0) {
-        fragments.push(part);
-      }
-    } else {
-      // Subsequent fragments: re-attach separator
-      const restored = separator.trimStart() + part;
-      if (restored.trim().length > 0) {
-        fragments.push(restored);
+
+  if (isHeaderSeparator(separator)) {
+    // HEADERS: re-attach marker to the START of each subsequent fragment
+    // e.g. "\n## " split → prepend "## " to fragments[1..n]
+    for (let i = 0; i < parts.length; i++) {
+      if (i === 0) {
+        if (parts[i].trim().length > 0) fragments.push(parts[i]);
+      } else {
+        const headerMarker = separator.trimStart(); // "## " or "### "
+        const restored = headerMarker + parts[i];
+        if (restored.trim().length > 0) fragments.push(restored);
       }
     }
+  } else if (separator === ". ") {
+    // SENTENCES: append "." to the END of each fragment (except the last)
+    // Split of "A. B. C." → ["A", "B", "C."] → ["A.", "B.", "C."]
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (part.trim().length === 0) continue;
+
+      if (i < parts.length - 1) {
+        // Not the last part → the "." was stripped, add it back
+        fragments.push(part + ".");
+      } else {
+        // Last part → may already end with "." or not; keep as-is
+        fragments.push(part);
+      }
+    }
+  } else {
+    // PARAGRAPHS / SPACES: neutral separators, no re-attachment
+    for (const part of parts) {
+      if (part.trim().length > 0) fragments.push(part);
+    }
+  }
+
+  // If re-attachment collapsed everything into one or zero fragments,
+  // try the next separator level
+  if (fragments.length <= 1) {
+    return recursiveSplit(text, separators, level + 1, opts);
   }
 
   // Recurse: if any fragment is still too large, split it deeper
