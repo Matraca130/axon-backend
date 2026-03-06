@@ -1,7 +1,7 @@
 /**
  * routes/content/crud.ts — Content hierarchy CRUD registrations
  *
- * 10 registerCrud calls covering the full content hierarchy:
+ * 9 registerCrud calls covering the full content hierarchy:
  * courses → semesters → sections → topics → summaries → chunks → summary_blocks → keywords → subtopics
  *
  * No custom endpoints here — only factory-generated CRUD.
