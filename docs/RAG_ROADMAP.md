@@ -5,8 +5,8 @@
 > `chunking-strategies.md`, `hybrid-retrieval.ts`, `adaptive-ia-study.md`),
 > adaptado a Gemini como provider inicial.
 >
-> **Auditoria v10:** 2026-03-08 — Fase 8 IA Adaptativa completada (branch feat/fase8-ia-adaptativa).
-> 4 pares de sub-tareas: generate-smart + report + dashboard + pre-generate.
+> **Auditoria v11:** 2026-03-08 — Fase 8 IA Adaptativa completada (branch feat/fase8-ia-adaptativa).
+> v10: Fase 3 coarse-to-fine search completado (branch feat/fase3-summary-embeddings).
 > v9: Fase 5 chunking + auto-ingest completado (Issue #30, branch feat/fase5-chunking).
 > v8: T-03 (query log + feedback loop) completado (PR #27, migration aplicada).
 > v7: T-01 (denorm institution_id + RPC) y T-02 (tsvector + GIN) completados.
@@ -23,7 +23,7 @@
 |---|---|---|---|
 | 1 | pgvector extension habilitada | **DONE** | blueprint |
 | 2 | Columna `embedding` en `chunks` | **DONE** | blueprint |
-| 3 | Columna `embedding` en `summaries` | **PENDIENTE** | blueprint |
+| 3 | Columna `embedding` en `summaries` | **DONE** | blueprint → Fase 3 (migration `20260307_03`) |
 | 4 | Columnas `fts TSVECTOR` generadas + GIN | **DONE** | blueprint → T-02 (PR #25) |
 | 5 | Indices HNSW para vectores en chunks | **DONE** | blueprint (LA-04) |
 | 6 | `rag_hybrid_search()` RPC | **DONE** | blueprint (LA-05) → optimizado T-01 + T-02 |
@@ -53,7 +53,7 @@
 | 30 | Quality dashboard para preguntas AI flaggeadas | **DONE** | adaptive-ia-study → Fase 8C |
 | 31 | chat.ts comentarios stale en header | **DONE** | auditoria v2 → `routes/ai/chat.ts` (INC-1) |
 
-**Resumen: 22/31 completados, 7 pendientes, 2 parciales.**
+**Resumen: 23/31 completados, 6 pendientes, 2 parciales.**
 
 > **Parciales:**
 > - #11 Chunking inteligente: Recursive Character implementado como default (Fase 5). Semantic Chunking (embedding-based boundaries, #23) pendiente para fases futuras.
@@ -198,101 +198,70 @@ CREATE INDEX IF NOT EXISTS idx_summaries_fts ON summaries USING gin (fts);
 
 ---
 
-## Fase 3 — Embeddings en summaries (coarse-to-fine)
+## Fase 3 — Embeddings en summaries (coarse-to-fine) — DONE
 
 **Prioridad:** MEDIA — busqueda en 2 niveles.
 **Riesgo:** MEDIO — requiere cambio en ingest + nuevo RPC.
 **Impacto:** Queries amplias encuentran mejor match a nivel summary.
+**Estado:** **DONE** — Branch `feat/fase3-summary-embeddings`. Migration `20260307_03`.
 
 > **Relacion con investigacion:** Esto es la version "macro" del **Parent-Child Chunking**
 > descrito en `chunking-strategies.md`. Summary=parent, Chunks=children.
 > La busqueda encuentra el child (chunk) pero usa el parent (summary) para contexto amplio.
 
-### Migration SQL
+### Sub-tasks completados (Fase 3)
 
-```sql
-ALTER TABLE summaries ADD COLUMN IF NOT EXISTS embedding vector(768);
+| # | Sub-task | Archivo | Commit |
+|---|---|---|---|
+| 3.1 | Migration: `summaries.embedding vector(768)` + HNSW index + `rag_coarse_to_fine_search()` RPC | `migrations/20260307_03_summary_embeddings.sql` | `ec614b2` |
+| 3.2 | `truncateAtWord()` — word-boundary safe truncation utility | `auto-ingest.ts` | `0645aea` |
+| 3.3 | `embedSummaryContent()` — standalone summary embedding function + pipeline Step 8 | `auto-ingest.ts` | `0645aea` |
+| 3.4 | `ingest.ts` — batch summary embedding via `target="summaries"` param | `routes/ai/ingest.ts` | `0e7248d` |
+| 3.5 | `chat.ts` — coarse-to-fine search integration + fallback chain + `normalizeCoarseToFineResults()` | `routes/ai/chat.ts` | `3694e9d` |
+| 3.6 | 8 tests for `truncateAtWord()` + type assertion for `AutoIngestResult.summary_embedded` | `tests/fase3_test.ts` | `93ecd92` |
+| 3.7 | RAG_ROADMAP.md update (this section) | `docs/RAG_ROADMAP.md` | — |
+| A1 | Audit fix: cosine distance computed once per row in `rag_coarse_to_fine_search()` | `migrations/20260307_03_summary_embeddings.sql` | `656ac84` |
 
-CREATE INDEX IF NOT EXISTS idx_summaries_embedding_hnsw
-  ON summaries USING hnsw (embedding vector_cosine_ops)
-  WITH (m = 16, ef_construction = 64) WHERE embedding IS NOT NULL;
+### Arquitectura de busqueda (Fase 3)
+
+```
+Usuario envia query
+    |
+    v
+generateEmbedding(query, "RETRIEVAL_QUERY") → 768d vector
+    |
+    v
+¿summary_id dado?
+    |
+    ├─ SI → rag_hybrid_search(summary_id=...)  [FTS + vector, scoped]
+    |        searchType = "hybrid"
+    |
+    └─ NO → rag_coarse_to_fine_search()  [2-stage vector]
+             |
+             ├─ resultados > 0 → normalizeCoarseToFineResults()
+             |                   searchType = "coarse_to_fine"
+             |
+             └─ resultados = 0 → FALLBACK: rag_hybrid_search(summary_id=null)
+                                 searchType = "hybrid_fallback"
+    |
+    v
+fetchAdjacentChunks() → assembleContext() → generateText()
+    |
+    v
+Log: search_type = searchType + (wasAugmented ? "_augmented" : "")
 ```
 
-### Cambio en `routes/ai/ingest.ts`
+### Decisiones arquitectonicas clave
 
-```typescript
-// Despues de procesar chunks, generar embedding del summary completo
-const summaryText = truncateAtWord(
-  `${summary.title}. ${summary.content_markdown}`,
-  8000 // Gemini embedding soporta hasta ~10k tokens
-);
-const summaryEmbedding = await generateEmbedding(summaryText, "RETRIEVAL_DOCUMENT");
-
-await adminClient
-  .from("summaries")
-  .update({ embedding: JSON.stringify(summaryEmbedding) })
-  .eq("id", summaryId);
-```
-
-### Nuevo RPC: `rag_coarse_to_fine_search()`
-
-```sql
-CREATE OR REPLACE FUNCTION rag_coarse_to_fine_search(
-  p_query_embedding vector(768),
-  p_query_text TEXT,
-  p_institution_id UUID,
-  p_top_summaries INT DEFAULT 3,
-  p_top_chunks INT DEFAULT 5,
-  p_similarity_threshold FLOAT DEFAULT 0.3
-)
-RETURNS TABLE (
-  chunk_id UUID, summary_id UUID, summary_title TEXT, content TEXT,
-  summary_similarity FLOAT, chunk_similarity FLOAT, combined_score FLOAT
-)
-LANGUAGE plpgsql SECURITY DEFINER
-AS $$
-BEGIN
-  RETURN QUERY
-  WITH top_summaries AS (
-    SELECT s.id, s.title,
-      (1 - (s.embedding <=> p_query_embedding))::FLOAT AS sim
-    FROM summaries s
-    WHERE s.embedding IS NOT NULL
-      AND s.institution_id = p_institution_id
-      AND s.deleted_at IS NULL AND s.is_active = TRUE
-      AND (1 - (s.embedding <=> p_query_embedding)) > p_similarity_threshold
-    ORDER BY s.embedding <=> p_query_embedding
-    LIMIT p_top_summaries
-  ),
-  ranked_chunks AS (
-    SELECT ch.id AS c_id, ts.id AS s_id, ts.title AS s_title,
-      ch.content AS c_content, ts.sim AS s_sim,
-      (1 - (ch.embedding <=> p_query_embedding))::FLOAT AS c_sim,
-      ROW_NUMBER() OVER (ORDER BY ch.embedding <=> p_query_embedding) AS rn
-    FROM chunks ch JOIN top_summaries ts ON ts.id = ch.summary_id
-    WHERE ch.embedding IS NOT NULL
-  )
-  SELECT rc.c_id, rc.s_id, rc.s_title, rc.c_content,
-    rc.s_sim, rc.c_sim,
-    (0.3 * rc.s_sim + 0.7 * rc.c_sim)::FLOAT AS combined
-  FROM ranked_chunks rc WHERE rc.rn <= p_top_chunks
-  ORDER BY (0.3 * rc.s_sim + 0.7 * rc.c_sim) DESC;
-END;
-$$;
-```
-
-### Integracion en `chat.ts`
-
-```typescript
-// Decidir que RPC usar:
-if (summaryId) {
-  // Con summary_id especifico -> hybrid search (ya scoped)
-  results = await db.rpc("rag_hybrid_search", { ... });
-} else {
-  // Sin summary_id -> coarse-to-fine (busca el mejor summary primero)
-  results = await db.rpc("rag_coarse_to_fine_search", { ... });
-}
-```
+| # | Decision | Razonamiento |
+|---|---|---|
+| D1 | Score = 0.3×summary + 0.7×chunk | El chunk contiene la informacion especifica; 50/50 sobre-rankea summaries con chunks mediocres |
+| D2 | Global LIMIT (no per-summary) | Si un summary tiene los 5 mejores chunks, los queremos todos |
+| D3 | Partial HNSW index (`WHERE NOT NULL`) | Zero overhead durante transicion; summaries sin embedding no indexados |
+| D4 | CTE `summary_scored` computa distancia 1× (A1 fix) | Evita 3× computacion en SELECT/WHERE/ORDER BY |
+| D5 | `embedSummaryContent` throws, caller decides | Pipeline (non-fatal) vs batch (counts failed) vs direct (propagates) |
+| D6 | `truncateAtWord` max 8000 chars | Gemini embedding-001 soporta ~10K tokens; 8000 chars ≈ 2K-2.5K tokens de margen |
+| D7 | Fallback chain: c2f → hybrid → empty | Transicion gradual: summaries sin embedding siguen encontrables via hybrid |
 
 ---
 
@@ -599,16 +568,16 @@ Fase 4: Query log + feedback          [DONE]   [T-03, PR #27]   [migration aplic
   |
 Fase 5: Chunking + auto-ingest        [DONE]   [Issue #30]      [mejora calidad RAG]
   |
-Fase 8: IA adaptativa                 [DONE]   [feat/fase8]     [NeedScore + pre-gen + calidad]
+Fase 3: Embeddings en summaries       [DONE]   [Fase 3 branch]  [coarse-to-fine search]
   |
-Fase 3: Embeddings en summaries       [1 dia]  [SQL + ingest]   [coarse-to-fine]
+Fase 8: IA adaptativa                 [DONE]   [feat/fase8]     [NeedScore + pre-gen + calidad]
   |
 Fase 6: Retrieval avanzado            [2 dias] [chat.ts]        [Multi-Query + HyDE + re-rank]
   |
 Fase 7: Ingestion PDF                 [3 dias] [nuevo modulo]   [feature nueva]
 ```
 
-**Total estimado: ~6 dias restantes (Fases 3, 6, 7)**
+**Total estimado: ~5 dias restantes (Fases 6 y 7)**
 
 ---
 
@@ -630,9 +599,9 @@ Corregido: middleware con `check_rate_limit()` RPC, 20 req/hr, solo POST.
 
 1. `EMBEDDING_DIMENSIONS` en `gemini.ts`
 2. `ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(NEW_DIM)`
-3. `ALTER TABLE summaries ALTER COLUMN embedding TYPE vector(NEW_DIM)` (si Fase 3)
+3. `ALTER TABLE summaries ALTER COLUMN embedding TYPE vector(NEW_DIM)` (Fase 3 — DONE)
 4. Function signature: `p_query_embedding vector(768)` en `rag_hybrid_search()`
-5. Function signature: `p_query_embedding vector(768)` en `rag_coarse_to_fine_search()`
+5. Function signature: `p_query_embedding vector(768)` en `rag_coarse_to_fine_search()` (Fase 3 — DONE)
 6. Re-ingest ALL chunks y summaries
 7. Recrear indices HNSW
 
