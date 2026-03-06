@@ -3,7 +3,7 @@
  *
  * Provides:
  *   - login()  → authenticate via Supabase Auth REST API, returns JWT
- *   - api.*    → typed HTTP methods (get, post, patch) against Edge Functions
+ *   - api.*    → typed HTTP methods (get, post, patch, put, del) against Edge Functions
  *
  * Environment variables (from GitHub Secrets):
  *   TEST_SUPABASE_URL       — e.g. https://xxx.supabase.co
@@ -13,6 +13,8 @@
  *   TEST_ADMIN_EMAIL        — admin/owner in the same institution
  *   TEST_ADMIN_PASSWORD
  *   TEST_INSTITUTION_ID     — UUID of test institution
+ *
+ * Fase 5: Added put() and del() methods for content CRUD tests.
  */
 
 // ─── Environment ────────────────────────────────────────────────────
@@ -122,6 +124,12 @@ export const api = {
 
   patch: <T = unknown>(path: string, token: string, body: Record<string, unknown>) =>
     request<T>("PATCH", path, token, body),
+
+  put: <T = unknown>(path: string, token: string, body: Record<string, unknown>) =>
+    request<T>("PUT", path, token, body),
+
+  del: <T = unknown>(path: string, token: string) =>
+    request<T>("DELETE", path, token),
 };
 
 // ─── Assertion Helpers ──────────────────────────────────────────────
