@@ -11,6 +11,7 @@
  *   scopeToUser     — column auto-set to user.id on CREATE, auto-filtered on LIST/GET/UPDATE/DELETE
  *   hasCreatedBy    — sets created_by = user.id on CREATE (not filtered on LIST)
  *   hasIsActive     — when softDelete, also toggles is_active (default true; false for student notes)
+ *   afterWrite      — optional fire-and-forget hook called after successful POST or PUT (Fase 5)
  *
  * N-9 FIX: Pagination limit capped at 500, offset validated >= 0.
  * O-5 FIX: GET /:id now applies scopeToUser filter (was missing before).
@@ -70,6 +71,21 @@ const PARENT_KEY_TO_TABLE: Record<string, string> = {
 
 // ─── Types ──────────────────────────────────────────────────────
 
+/**
+ * Parameters passed to the afterWrite lifecycle hook.
+ * Exported for use by hook implementations (e.g. summary-hook.ts).
+ */
+export interface AfterWriteParams {
+  /** Whether the write was a create (POST) or update (PUT) */
+  action: "create" | "update";
+  /** The full row returned by Supabase after .select() */
+  row: Record<string, unknown>;
+  /** For "update" only: the field names the client actually sent (excludes updated_at) */
+  updatedFields?: string[];
+  /** The authenticated user's ID */
+  userId: string;
+}
+
 export interface CrudConfig {
   table: string;
   slug: string;
@@ -84,6 +100,18 @@ export interface CrudConfig {
   requiredFields?: string[];
   createFields: string[];
   updateFields: string[];
+
+  /**
+   * Optional lifecycle hook called after successful POST or PUT.
+   *
+   * Invoked synchronously (fire-and-forget) — the factory does NOT
+   * await the hook. If the hook starts async work (e.g. embedding
+   * generation), it manages its own error handling via .catch().
+   *
+   * The HTTP response is NEVER delayed by this hook.
+   * NOT called on DELETE or RESTORE operations.
+   */
+  afterWrite?: (params: AfterWriteParams) => void;
 }
 
 // ─── Pagination Helper ─────────────────────────────────────────
@@ -359,6 +387,21 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       .single();
     if (error)
       return err(c, `Create ${cfg.table} failed: ${error.message}`, 500);
+
+    // Fase 5: Fire-and-forget afterWrite hook (e.g. auto-ingest for summaries).
+    // Wrapped in try/catch to absorb synchronous exceptions from hook setup.
+    // The HTTP response is NEVER delayed or affected by hook failures.
+    if (cfg.afterWrite) {
+      try {
+        cfg.afterWrite({ action: "create", row: data, userId: user.id });
+      } catch (hookErr) {
+        console.warn(
+          `[CRUD Hook] afterWrite threw on ${cfg.table} create:`,
+          (hookErr as Error).message,
+        );
+      }
+    }
+
     return ok(c, data, 201);
   });
 
@@ -389,6 +432,11 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       return err(c, "No valid fields to update", 400);
     }
 
+    // Capture which fields the client actually sent BEFORE appending updated_at.
+    // Used by afterWrite hooks to decide whether to trigger side effects
+    // (e.g. only re-chunk summaries when content_markdown changed).
+    const updatedFields = Object.keys(row);
+
     if (cfg.hasUpdatedAt) row.updated_at = new Date().toISOString();
 
     let query = db.from(cfg.table).update(row).eq("id", id);
@@ -397,6 +445,20 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     const { data, error } = await query.select().single();
     if (error)
       return err(c, `Update ${cfg.table} ${id} failed: ${error.message}`, 500);
+
+    // Fase 5: Fire-and-forget afterWrite hook.
+    // updatedFields reflects ONLY what the client sent (not updated_at).
+    if (cfg.afterWrite) {
+      try {
+        cfg.afterWrite({ action: "update", row: data, updatedFields, userId: user.id });
+      } catch (hookErr) {
+        console.warn(
+          `[CRUD Hook] afterWrite threw on ${cfg.table} update:`,
+          (hookErr as Error).message,
+        );
+      }
+    }
+
     return ok(c, data);
   });
 
