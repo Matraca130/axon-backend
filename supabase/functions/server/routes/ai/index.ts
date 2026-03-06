@@ -17,25 +17,16 @@
  *   list-models.ts       — GET   /ai/list-models (diagnostic)
  *   feedback.ts          — PATCH /ai/rag-feedback (T-03)
  *   analytics.ts         — GET   /ai/rag-analytics + /ai/embedding-coverage (T-03)
+ *   ingest-pdf.ts        — POST  /ai/ingest-pdf              (Fase 7)
  *
  * INC-3 FIX: Added AI-specific rate limit middleware (20 req/hour).
  * Uses the distributed check_rate_limit() RPC from migration 20260303_02.
  * Applies to Gemini-consuming POST routes (generate, generate-smart,
- * ingest, re-chunk, rag-chat).
+ * ingest, re-chunk, rag-chat, ingest-pdf).
  *
- * P6 FIX: POST /ai/report is excluded from rate limit — it doesn't
- * call Gemini, so it shouldn't consume the AI generation quota.
- *
- * D9 FIX: POST /ai/pre-generate is excluded from the GENERAL rate limit.
- * It has its OWN separate rate limit bucket (ai-pregen:{userId}, 10/hour)
- * enforced inside the endpoint. This prevents pre-gen from consuming
- * the student's interactive AI budget.
- *
- * T-03: Added feedback and analytics sub-modules (Fase 4).
- * Fase 8A: Added generate-smart sub-module (adaptive generation).
- * Fase 8B: Added report sub-module (content quality reports).
- * Fase 8C: Added report-dashboard sub-module (dashboard + listing).
- * Fase 8D: Added pre-generate sub-module (bulk content pre-generation).
+ * P6 FIX: POST /ai/report excluded from rate limit (no Gemini cost).
+ * D9 FIX: POST /ai/pre-generate has own rate limit bucket.
+ * Fase 7: Added ingest-pdf sub-module (PDF upload + extraction).
  */
 
 import { Hono } from "npm:hono";
@@ -51,52 +42,30 @@ import { aiChatRoutes } from "./chat.ts";
 import { aiListModelsRoutes } from "./list-models.ts";
 import { aiFeedbackRoutes } from "./feedback.ts";
 import { aiAnalyticsRoutes } from "./analytics.ts";
+import { aiIngestPdfRoutes } from "./ingest-pdf.ts";
 import { authenticate, err, getAdminClient, PREFIX } from "../../db.ts";
 
 const aiRoutes = new Hono();
 
-// ── INC-3 FIX: AI-specific rate limit middleware ─────────────────
-// 20 AI requests per hour per user.
-// Uses the distributed check_rate_limit() RPC (migration 20260303_02)
-// which works correctly across multiple Deno isolates.
-//
-// Only applies to Gemini-consuming POST routes (generate, generate-smart,
-// ingest, re-chunk, rag-chat).
-//
-// Excluded (no Gemini API cost OR has own rate limit):
-//   GET  /ai/list-models, /ai/rag-analytics, /ai/embedding-coverage
-//   GET  /ai/report-stats, /ai/reports                    (Fase 8C)
-//   PATCH /ai/rag-feedback, /ai/report/:id
-//   POST  /ai/report       (P6 FIX: no Gemini cost)
-//   POST  /ai/pre-generate  (D9 FIX: own rate limit bucket)
-const AI_RATE_LIMIT = 20;          // max requests per window
-const AI_RATE_WINDOW_MS = 3600000; // 1 hour in milliseconds
+// INC-3 FIX: AI-specific rate limit middleware (20 req/hour)
+const AI_RATE_LIMIT = 20;
+const AI_RATE_WINDOW_MS = 3600000;
 
 async function aiRateLimitMiddleware(c: Context, next: Next) {
-  // Only rate-limit POST requests (the ones that call Gemini)
   if (c.req.method !== "POST") return next();
 
   const url = new URL(c.req.url);
 
-  // P6 FIX: Skip rate limit for /ai/report — no Gemini cost.
-  // Reports are a feedback mechanism, not a generation action.
-  // Without this exclusion, reporting would consume the student's
-  // AI generation quota, disincentivizing quality feedback.
+  // P6 FIX: Skip /ai/report (no Gemini cost)
   if (url.pathname.endsWith("/ai/report")) return next();
-
-  // D9 FIX: Skip rate limit for /ai/pre-generate — has its own bucket.
-  // Pre-generation is a professor action with its own rate limit
-  // (ai-pregen:{userId}, 10/hour) enforced inside the endpoint.
-  // Applying the general limit here would double-limit professors.
+  // D9 FIX: Skip /ai/pre-generate (own rate limit bucket)
   if (url.pathname.endsWith("/ai/pre-generate")) return next();
 
   try {
-    // Extract user ID from JWT (lightweight decode, no DB call)
     const auth = await authenticate(c);
     if (auth instanceof Response) return auth;
     const userId = auth.user.id;
 
-    // Check rate limit via distributed RPC
     const adminDb = getAdminClient();
     const { data, error } = await adminDb.rpc("check_rate_limit", {
       p_key: `ai:${userId}`,
@@ -105,7 +74,6 @@ async function aiRateLimitMiddleware(c: Context, next: Next) {
     });
 
     if (error) {
-      // If rate limit check fails, log but don't block
       console.warn(`[AI RateLimit] RPC failed: ${error.message}. Allowing request.`);
       return next();
     }
@@ -119,27 +87,26 @@ async function aiRateLimitMiddleware(c: Context, next: Next) {
       );
     }
   } catch (e) {
-    // Graceful degradation: if anything fails, allow the request
     console.warn(`[AI RateLimit] Exception: ${(e as Error).message}. Allowing request.`);
   }
 
   return next();
 }
 
-// Apply rate limit middleware to all AI routes
 aiRoutes.use(`${PREFIX}/ai/*`, aiRateLimitMiddleware);
 
 // Mount sub-modules
 aiRoutes.route("/", aiGenerateRoutes);
-aiRoutes.route("/", aiGenerateSmartRoutes);       // Fase 8A: POST /ai/generate-smart
-aiRoutes.route("/", aiReportRoutes);              // Fase 8B: POST /ai/report + PATCH /ai/report/:id
-aiRoutes.route("/", aiReportDashboardRoutes);     // Fase 8C: GET /ai/report-stats + /ai/reports
-aiRoutes.route("/", aiPreGenerateRoutes);         // Fase 8D: POST /ai/pre-generate
+aiRoutes.route("/", aiGenerateSmartRoutes);       // Fase 8A
+aiRoutes.route("/", aiReportRoutes);              // Fase 8B
+aiRoutes.route("/", aiReportDashboardRoutes);     // Fase 8C
+aiRoutes.route("/", aiPreGenerateRoutes);         // Fase 8D
 aiRoutes.route("/", aiIngestRoutes);
-aiRoutes.route("/", aiReChunkRoutes);             // Fase 5: POST /ai/re-chunk
+aiRoutes.route("/", aiReChunkRoutes);             // Fase 5
 aiRoutes.route("/", aiChatRoutes);
 aiRoutes.route("/", aiListModelsRoutes);
-aiRoutes.route("/", aiFeedbackRoutes);            // T-03: PATCH /ai/rag-feedback
-aiRoutes.route("/", aiAnalyticsRoutes);            // T-03: GET /ai/rag-analytics + /ai/embedding-coverage
+aiRoutes.route("/", aiFeedbackRoutes);            // T-03
+aiRoutes.route("/", aiAnalyticsRoutes);            // T-03
+aiRoutes.route("/", aiIngestPdfRoutes);            // Fase 7
 
 export { aiRoutes };
