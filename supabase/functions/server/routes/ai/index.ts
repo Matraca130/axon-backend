@@ -4,16 +4,18 @@
  * Mounts all AI sub-modules into a single Hono router.
  *
  * Sub-modules:
- *   generate.ts        — POST  /ai/generate
- *   generate-smart.ts  — POST  /ai/generate-smart        (Fase 8A)
- *   report.ts          — POST  /ai/report                (Fase 8B)
- *                        PATCH /ai/report/:id             (Fase 8B)
- *   ingest.ts          — POST  /ai/ingest-embeddings
- *   re-chunk.ts        — POST  /ai/re-chunk               (Fase 5)
- *   chat.ts            — POST  /ai/rag-chat
- *   list-models.ts     — GET   /ai/list-models (diagnostic)
- *   feedback.ts        — PATCH /ai/rag-feedback (T-03)
- *   analytics.ts       — GET   /ai/rag-analytics + /ai/embedding-coverage (T-03)
+ *   generate.ts          — POST  /ai/generate
+ *   generate-smart.ts    — POST  /ai/generate-smart        (Fase 8A)
+ *   report.ts            — POST  /ai/report                (Fase 8B)
+ *                          PATCH /ai/report/:id             (Fase 8B)
+ *   report-dashboard.ts  — GET   /ai/report-stats           (Fase 8C)
+ *                          GET   /ai/reports                (Fase 8C)
+ *   ingest.ts            — POST  /ai/ingest-embeddings
+ *   re-chunk.ts          — POST  /ai/re-chunk               (Fase 5)
+ *   chat.ts              — POST  /ai/rag-chat
+ *   list-models.ts       — GET   /ai/list-models (diagnostic)
+ *   feedback.ts          — PATCH /ai/rag-feedback (T-03)
+ *   analytics.ts         — GET   /ai/rag-analytics + /ai/embedding-coverage (T-03)
  *
  * INC-3 FIX: Added AI-specific rate limit middleware (20 req/hour).
  * Uses the distributed check_rate_limit() RPC from migration 20260303_02.
@@ -26,6 +28,7 @@
  * T-03: Added feedback and analytics sub-modules (Fase 4).
  * Fase 8A: Added generate-smart sub-module (adaptive generation).
  * Fase 8B: Added report sub-module (content quality reports).
+ * Fase 8C: Added report-dashboard sub-module (dashboard + listing).
  */
 
 import { Hono } from "npm:hono";
@@ -33,6 +36,7 @@ import type { Context, Next } from "npm:hono";
 import { aiGenerateRoutes } from "./generate.ts";
 import { aiGenerateSmartRoutes } from "./generate-smart.ts";
 import { aiReportRoutes } from "./report.ts";
+import { aiReportDashboardRoutes } from "./report-dashboard.ts";
 import { aiIngestRoutes } from "./ingest.ts";
 import { aiReChunkRoutes } from "./re-chunk.ts";
 import { aiChatRoutes } from "./chat.ts";
@@ -53,6 +57,7 @@ const aiRoutes = new Hono();
 //
 // Excluded (no Gemini API cost):
 //   GET  /ai/list-models, /ai/rag-analytics, /ai/embedding-coverage
+//   GET  /ai/report-stats, /ai/reports                    (Fase 8C)
 //   PATCH /ai/rag-feedback, /ai/report/:id
 //   POST  /ai/report  (P6 FIX: reports don't call Gemini)
 const AI_RATE_LIMIT = 20;          // max requests per window
@@ -110,13 +115,14 @@ aiRoutes.use(`${PREFIX}/ai/*`, aiRateLimitMiddleware);
 
 // Mount sub-modules
 aiRoutes.route("/", aiGenerateRoutes);
-aiRoutes.route("/", aiGenerateSmartRoutes); // Fase 8A: POST /ai/generate-smart
-aiRoutes.route("/", aiReportRoutes);        // Fase 8B: POST /ai/report + PATCH /ai/report/:id
+aiRoutes.route("/", aiGenerateSmartRoutes);       // Fase 8A: POST /ai/generate-smart
+aiRoutes.route("/", aiReportRoutes);              // Fase 8B: POST /ai/report + PATCH /ai/report/:id
+aiRoutes.route("/", aiReportDashboardRoutes);     // Fase 8C: GET /ai/report-stats + /ai/reports
 aiRoutes.route("/", aiIngestRoutes);
-aiRoutes.route("/", aiReChunkRoutes);       // Fase 5: POST /ai/re-chunk
+aiRoutes.route("/", aiReChunkRoutes);             // Fase 5: POST /ai/re-chunk
 aiRoutes.route("/", aiChatRoutes);
 aiRoutes.route("/", aiListModelsRoutes);
-aiRoutes.route("/", aiFeedbackRoutes);      // T-03: PATCH /ai/rag-feedback
-aiRoutes.route("/", aiAnalyticsRoutes);      // T-03: GET /ai/rag-analytics + /ai/embedding-coverage
+aiRoutes.route("/", aiFeedbackRoutes);            // T-03: PATCH /ai/rag-feedback
+aiRoutes.route("/", aiAnalyticsRoutes);            // T-03: GET /ai/rag-analytics + /ai/embedding-coverage
 
 export { aiRoutes };
