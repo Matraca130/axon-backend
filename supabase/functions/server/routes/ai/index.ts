@@ -4,24 +4,27 @@
  * Mounts all AI sub-modules into a single Hono router.
  *
  * Sub-modules:
- *   generate.ts     — POST  /ai/generate
- *   ingest.ts       — POST  /ai/ingest-embeddings
- *   re-chunk.ts     — POST  /ai/re-chunk          (Fase 5)
- *   chat.ts         — POST  /ai/rag-chat
- *   list-models.ts  — GET   /ai/list-models (diagnostic)
- *   feedback.ts     — PATCH /ai/rag-feedback (T-03)
- *   analytics.ts    — GET   /ai/rag-analytics + /ai/embedding-coverage (T-03)
+ *   generate.ts        — POST  /ai/generate
+ *   generate-smart.ts  — POST  /ai/generate-smart        (Fase 8A)
+ *   ingest.ts          — POST  /ai/ingest-embeddings
+ *   re-chunk.ts        — POST  /ai/re-chunk               (Fase 5)
+ *   chat.ts            — POST  /ai/rag-chat
+ *   list-models.ts     — GET   /ai/list-models (diagnostic)
+ *   feedback.ts        — PATCH /ai/rag-feedback (T-03)
+ *   analytics.ts       — GET   /ai/rag-analytics + /ai/embedding-coverage (T-03)
  *
  * INC-3 FIX: Added AI-specific rate limit middleware (20 req/hour).
  * Uses the distributed check_rate_limit() RPC from migration 20260303_02.
- * Applies to all POST routes (generate, ingest, re-chunk, rag-chat).
+ * Applies to all POST routes (generate, generate-smart, ingest, re-chunk, rag-chat).
  *
  * T-03: Added feedback and analytics sub-modules (Fase 4).
+ * Fase 8A: Added generate-smart sub-module (adaptive generation).
  */
 
 import { Hono } from "npm:hono";
 import type { Context, Next } from "npm:hono";
 import { aiGenerateRoutes } from "./generate.ts";
+import { aiGenerateSmartRoutes } from "./generate-smart.ts";
 import { aiIngestRoutes } from "./ingest.ts";
 import { aiReChunkRoutes } from "./re-chunk.ts";
 import { aiChatRoutes } from "./chat.ts";
@@ -32,12 +35,13 @@ import { authenticate, err, getAdminClient, PREFIX } from "../../db.ts";
 
 const aiRoutes = new Hono();
 
-// ── INC-3 FIX: AI-specific rate limit middleware ─────────────────────
+// ── INC-3 FIX: AI-specific rate limit middleware ─────────────────
 // 20 AI requests per hour per user.
 // Uses the distributed check_rate_limit() RPC (migration 20260303_02)
 // which works correctly across multiple Deno isolates.
 //
-// Only applies to POST routes (generate, ingest, re-chunk, rag-chat).
+// Only applies to POST routes (generate, generate-smart, ingest,
+// re-chunk, rag-chat).
 // GET /ai/list-models, GET /ai/rag-analytics, GET /ai/embedding-coverage
 // and PATCH /ai/rag-feedback are excluded (no Gemini API cost).
 const AI_RATE_LIMIT = 20;          // max requests per window
@@ -88,6 +92,7 @@ aiRoutes.use(`${PREFIX}/ai/*`, aiRateLimitMiddleware);
 
 // Mount sub-modules
 aiRoutes.route("/", aiGenerateRoutes);
+aiRoutes.route("/", aiGenerateSmartRoutes); // Fase 8A: POST /ai/generate-smart
 aiRoutes.route("/", aiIngestRoutes);
 aiRoutes.route("/", aiReChunkRoutes);      // Fase 5: POST /ai/re-chunk
 aiRoutes.route("/", aiChatRoutes);
