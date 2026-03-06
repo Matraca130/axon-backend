@@ -18,9 +18,28 @@
 --
 -- DEFAULT ensures existing rows and new inserts from the current
 -- chunker are automatically labelled without code changes.
+--
+-- CHECK constraint enforces valid values at the DB level.
+-- To add a new strategy in the future:
+--   ALTER TABLE chunks DROP CONSTRAINT chk_chunk_strategy;
+--   ALTER TABLE chunks ADD CONSTRAINT chk_chunk_strategy
+--     CHECK (chunk_strategy IN ('recursive', 'semantic', 'new_value'));
 
 ALTER TABLE chunks
   ADD COLUMN IF NOT EXISTS chunk_strategy TEXT NOT NULL DEFAULT 'recursive';
+
+-- ADD CONSTRAINT is NOT idempotent, so we guard with DO block
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'chk_chunk_strategy'
+  ) THEN
+    ALTER TABLE chunks
+      ADD CONSTRAINT chk_chunk_strategy
+      CHECK (chunk_strategy IN ('recursive', 'semantic'));
+  END IF;
+END
+$$;
 
 COMMENT ON COLUMN chunks.chunk_strategy IS
   'Splitting algorithm that produced this chunk: recursive | semantic';
@@ -44,12 +63,11 @@ COMMENT ON COLUMN summaries.last_chunked_at IS
 
 -- ── 3. Index for "needs re-chunking" queries ────────────────────────
 --
--- The auto-ingest cron/trigger will query:
---   SELECT id FROM summaries
---   WHERE last_chunked_at IS NULL OR last_chunked_at < updated_at
---
--- A partial index on NULL values is most efficient since most
--- summaries will eventually have a non-NULL last_chunked_at.
+-- Partial index covering the NULL case (initial bulk chunking).
+-- For ongoing re-chunking (last_chunked_at < updated_at), consider
+-- a trigger that resets last_chunked_at to NULL on content_markdown
+-- update — this way the partial index covers both cases.
+-- (Planned for auto-ingest sub-task 5.5/5.6)
 
 CREATE INDEX IF NOT EXISTS idx_summaries_needs_chunking
   ON summaries (id)
