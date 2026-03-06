@@ -4,13 +4,15 @@
  * Mounts all content sub-modules into a single Hono router.
  * Replaces the old monolithic routes-content.tsx (17KB).
  *
- * IMPORTANT: keywordSearchRoutes is mounted BEFORE contentCrudRoutes
- * so that `/keyword-search` is registered before the CRUD factory's
- * `/keywords/:id`. While the flat naming already avoids collision,
+ * IMPORTANT: keywordSearchRoutes and subtopicsBatchRoutes are mounted
+ * BEFORE contentCrudRoutes so that `/keyword-search` and `/subtopics-batch`
+ * are registered before the CRUD factory's `/keywords/:id` and
+ * `/subtopics/:id`. While the flat naming already avoids collision,
  * this order provides defense-in-depth.
  *
  * Sub-modules:
  *   keyword-search.ts      — GET /keyword-search (cross-summary search, RPC)
+ *   subtopics-batch.ts     — GET /subtopics-batch (H-1: batch load by keyword_ids)
  *   crud.ts               — 10 registerCrud calls (courses→subtopics)
  *   keyword-connections.ts — manual CRUD for keyword_connections (V2: +type)
  *   prof-notes.ts          — manual CRUD for kw_prof_notes
@@ -21,6 +23,7 @@
 
 import { Hono } from "npm:hono";
 import { keywordSearchRoutes } from "./keyword-search.ts";
+import { subtopicsBatchRoutes } from "./subtopics-batch.ts";
 import { contentCrudRoutes } from "./crud.ts";
 import { keywordConnectionRoutes } from "./keyword-connections.ts";
 import { profNotesRoutes } from "./prof-notes.ts";
@@ -30,8 +33,9 @@ import { flashcardsByTopicRoutes } from "./flashcards-by-topic.ts";
 
 const content = new Hono();
 
-// Search routes FIRST (defense-in-depth against param route collision)
+// Search + batch routes FIRST (defense-in-depth against param route collision)
 content.route("/", keywordSearchRoutes);
+content.route("/", subtopicsBatchRoutes);
 content.route("/", contentCrudRoutes);
 content.route("/", keywordConnectionRoutes);
 content.route("/", profNotesRoutes);
