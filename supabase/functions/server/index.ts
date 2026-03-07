@@ -6,6 +6,7 @@
  * BUG-004 FIX: CORS restricted to specific origins (was wildcard "*").
  *   → MVP: Temporarily reverted to "*" for development flexibility.
  *   → TODO: Re-restrict before production launch.
+ * D57: Health check now reports openai status alongside gemini.
  */
 
 import { Hono } from "npm:hono";
@@ -53,6 +54,7 @@ app.use("*", rateLimitMiddleware);
 
 // ─── Health Check ─────────────────────────────────────────────────
 // PF-10 FIX: Added gemini status (does NOT expose the actual key)
+// D57: Added openai status for embedding migration
 
 app.get(`${PREFIX}/health`, (c) => {
   return c.json({
@@ -61,6 +63,7 @@ app.get(`${PREFIX}/health`, (c) => {
     timestamp: new Date().toISOString(),
     services: {
       gemini: !!Deno.env.get("GEMINI_API_KEY"),
+      openai: !!Deno.env.get("OPENAI_API_KEY"),
     },
   });
 });
