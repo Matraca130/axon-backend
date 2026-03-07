@@ -13,7 +13,7 @@
  *
  * Pre-flight fixes applied:
  *   PF-02 FIX: Added institution scoping + requireInstitutionRole(CONTENT_WRITE_ROLES)
- *   PF-05 FIX: DB query happens before Gemini call (JWT validation)
+ *   PF-05 FIX: DB query happens before API call (JWT validation)
  *   PF-09 FIX: Uses getAdminClient() for embedding UPDATE to bypass RLS
  *
  * Live-audit fixes applied:
@@ -26,6 +26,9 @@
  * Fase 3 additions:
  *   3.4: target="summaries" mode — batch summary embedding via embedSummaryContent()
  *   A2:  Added `skipped` counter for empty-content summaries (audit fix)
+ *
+ * D57-D62: Embedding migration — generateEmbedding now from openai-embeddings.ts
+ *          (OpenAI text-embedding-3-large 1536d). taskType parameter removed.
  */
 
 import { Hono } from "npm:hono";
@@ -37,7 +40,7 @@ import {
   isDenied,
   CONTENT_WRITE_ROLES,
 } from "../../auth-helpers.ts";
-import { generateEmbedding } from "../../gemini.ts";
+import { generateEmbedding } from "../../openai-embeddings.ts";
 import { embedSummaryContent } from "../../auto-ingest.ts";
 
 export const aiIngestRoutes = new Hono();
@@ -60,7 +63,7 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
     return err(c, "institution_id is required (UUID)", 400);
 
   // ⚠️ PF-05: This DB query validates the JWT cryptographically via PostgREST.
-  // It MUST happen before any Gemini API call.
+  // It MUST happen before any embedding API call.
   const roleCheck = await requireInstitutionRole(
     db, user.id, institutionId, CONTENT_WRITE_ROLES,
   );
@@ -185,10 +188,8 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
 
   for (const chunk of chunksToProcess) {
     try {
-      const embedding = await generateEmbedding(
-        chunk.content,
-        "RETRIEVAL_DOCUMENT",
-      );
+      // D57: OpenAI embeddings — no taskType parameter needed
+      const embedding = await generateEmbedding(chunk.content);
 
       // PF-09 FIX: Use adminDb to bypass RLS for embedding updates
       const { error: updateErr } = await adminDb
@@ -204,7 +205,6 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
       }
 
       // Respect rate limits: pause 1s every 10 embeddings
-      // Free tier: 1500 RPM for embeddings, but be conservative
       if (processed > 0 && processed % 10 === 0) {
         await new Promise((r) => setTimeout(r, 1000));
       }
@@ -231,8 +231,7 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
 //
 // Uses embedSummaryContent() from auto-ingest.ts (same function
 // used by the auto-ingest pipeline). This ensures consistent
-// embedding generation (title + content, truncated at 8000 chars,
-// RETRIEVAL_DOCUMENT task type).
+// embedding generation (title + content, truncated at 8000 chars).
 //
 // A2 FIX: Added `skipped` counter. The SQL filter
 // `.not("content_markdown", "is", null)` excludes NULL but not
