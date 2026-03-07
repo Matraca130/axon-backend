@@ -18,6 +18,7 @@
  *   feedback.ts          — PATCH /ai/rag-feedback (T-03)
  *   analytics.ts         — GET   /ai/rag-analytics + /ai/embedding-coverage (T-03)
  *   ingest-pdf.ts        — POST  /ai/ingest-pdf              (Fase 7)
+ *   re-embed-all.ts      — POST  /ai/re-embed-all            (D57: temp migration)
  *
  * INC-3 FIX: Added AI-specific rate limit middleware (20 req/hour).
  * Uses the distributed check_rate_limit() RPC from migration 20260303_02.
@@ -26,6 +27,7 @@
  *
  * P6 FIX: POST /ai/report excluded from rate limit (no Gemini cost).
  * D9 FIX: POST /ai/pre-generate has own rate limit bucket.
+ * D57: POST /ai/re-embed-all excluded from rate limit (admin-only batch job).
  * Fase 7: Added ingest-pdf sub-module (PDF upload + extraction).
  */
 
@@ -43,6 +45,7 @@ import { aiListModelsRoutes } from "./list-models.ts";
 import { aiFeedbackRoutes } from "./feedback.ts";
 import { aiAnalyticsRoutes } from "./analytics.ts";
 import { aiIngestPdfRoutes } from "./ingest-pdf.ts";
+import { aiReEmbedRoutes } from "./re-embed-all.ts";
 import { authenticate, err, getAdminClient, PREFIX } from "../../db.ts";
 
 const aiRoutes = new Hono();
@@ -60,6 +63,8 @@ async function aiRateLimitMiddleware(c: Context, next: Next) {
   if (url.pathname.endsWith("/ai/report")) return next();
   // D9 FIX: Skip /ai/pre-generate (own rate limit bucket)
   if (url.pathname.endsWith("/ai/pre-generate")) return next();
+  // D57: Skip /ai/re-embed-all (admin-only batch migration job)
+  if (url.pathname.endsWith("/ai/re-embed-all")) return next();
 
   try {
     const auth = await authenticate(c);
@@ -108,5 +113,6 @@ aiRoutes.route("/", aiListModelsRoutes);
 aiRoutes.route("/", aiFeedbackRoutes);            // T-03
 aiRoutes.route("/", aiAnalyticsRoutes);            // T-03
 aiRoutes.route("/", aiIngestPdfRoutes);            // Fase 7
+aiRoutes.route("/", aiReEmbedRoutes);             // D57: temp migration
 
 export { aiRoutes };
