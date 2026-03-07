@@ -21,11 +21,15 @@
  *   D28: Temperature 0.8 for reformulations (diversity)
  *   D29: Temperature 0.0 for re-ranking (deterministic scoring)
  *   D30: Temperature 0.3 for HyDE (factual content)
+ *   D57-D62: Embedding migration — generateEmbedding now from openai-embeddings.ts
+ *            (OpenAI text-embedding-3-large 1536d). taskType parameter removed.
  *
  * Audit R1 fix: selectStrategy checks historyLength before wordCount
  */
 
-import { generateText, generateEmbedding, parseGeminiJson } from "./gemini.ts";
+// D57: Embeddings from OpenAI, generation stays in Gemini
+import { generateEmbedding } from "./openai-embeddings.ts";
+import { generateText, parseGeminiJson } from "./gemini.ts";
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -295,15 +299,18 @@ export function mergeSearchResults(
  *
  * Graceful degradation: if multi_query/hyde generation fails,
  * falls back to single original query embedding.
+ *
+ * D57: embedFn signature simplified to (text: string) => Promise<number[]>
+ *      (OpenAI doesn't need taskType). Default uses OpenAI generateEmbedding.
  */
 export async function executeRetrievalEmbedding(
   strategy: RetrievalStrategy,
   searchQuery: string,
-  embedFn: (text: string, taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY") => Promise<number[]> = generateEmbedding,
+  embedFn: (text: string) => Promise<number[]> = generateEmbedding,
 ): Promise<RetrievalEmbeddingOutput> {
   // ── STANDARD: single embedding ───────────────────────────────
   if (strategy === "standard") {
-    const embedding = await embedFn(searchQuery, "RETRIEVAL_QUERY");
+    const embedding = await embedFn(searchQuery);
     return {
       embeddings: [{ query: searchQuery, embedding }],
       strategyMeta: {},
@@ -318,7 +325,7 @@ export async function executeRetrievalEmbedding(
     // D21: Embed all queries in parallel
     const embeddingPromises = allQueries.map(async (q) => {
       try {
-        const embedding = await embedFn(q, "RETRIEVAL_QUERY");
+        const embedding = await embedFn(q);
         return { query: q, embedding };
       } catch (e) {
         console.warn(`[Fase 6] Embedding failed for reformulation: ${(e as Error).message}`);
@@ -349,7 +356,7 @@ export async function executeRetrievalEmbedding(
 
     if (hypothesis.length > 0) {
       // D24: Embed the hypothesis, not the original query
-      const embedding = await embedFn(hypothesis, "RETRIEVAL_DOCUMENT");
+      const embedding = await embedFn(hypothesis);
       return {
         embeddings: [{ query: hypothesis, embedding }],
         strategyMeta: {
@@ -361,7 +368,7 @@ export async function executeRetrievalEmbedding(
 
     // Fallback: HyDE generation failed, use original query
     console.warn("[Fase 6] HyDE produced empty hypothesis, falling back to standard");
-    const embedding = await embedFn(searchQuery, "RETRIEVAL_QUERY");
+    const embedding = await embedFn(searchQuery);
     return {
       embeddings: [{ query: searchQuery, embedding }],
       strategyMeta: { hyde_used: false, hyde_fallback: true },
@@ -369,7 +376,7 @@ export async function executeRetrievalEmbedding(
   }
 
   // Unreachable, but TypeScript exhaustiveness
-  const embedding = await embedFn(searchQuery, "RETRIEVAL_QUERY");
+  const embedding = await embedFn(searchQuery);
   return {
     embeddings: [{ query: searchQuery, embedding }],
     strategyMeta: {},
