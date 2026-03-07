@@ -22,6 +22,9 @@
  * Fase 5, sub-task 5.5 — Issue #30
  * Fase 3, sub-tasks 3.2/3.3 — Summary embeddings (Bloque 2)
  * Bloque A: Semantic chunking integration (#23, #24)
+ *
+ * D57-D62: Embedding migration — generateEmbedding now from openai-embeddings.ts
+ *          (OpenAI text-embedding-3-large 1536d). taskType parameter removed.
  */
 
 import {
@@ -31,7 +34,7 @@ import {
   type ChunkResult,
 } from "./chunker.ts";
 import { chunkSemantic } from "./semantic-chunker.ts";
-import { generateEmbedding } from "./gemini.ts";
+import { generateEmbedding } from "./openai-embeddings.ts";
 import { getAdminClient } from "./db.ts";
 
 // ─── Public Types ───────────────────────────────────────────────────
@@ -69,7 +72,7 @@ export async function embedSummaryContent(
     : contentMarkdown;
 
   const truncated = truncateAtWord(combined, SUMMARY_EMBED_MAX_CHARS);
-  const embedding = await generateEmbedding(truncated, "RETRIEVAL_DOCUMENT");
+  const embedding = await generateEmbedding(truncated);
 
   const { error } = await getAdminClient()
     .from("summaries")
@@ -143,8 +146,8 @@ export async function autoChunkAndEmbed(
   let chunks: ChunkResult[];
 
   if (selectedStrategy === "semantic") {
-    const embedFn = (text: string) =>
-      generateEmbedding(text, "RETRIEVAL_DOCUMENT");
+    // D57: embedFn no longer needs taskType
+    const embedFn = (text: string) => generateEmbedding(text);
     chunks = await chunkSemantic(fullText, embedFn, options);
   } else {
     chunks = chunkMarkdown(fullText, options);
@@ -213,10 +216,8 @@ export async function autoChunkAndEmbed(
 
   for (let i = 0; i < inserted.length; i++) {
     try {
-      const embedding = await generateEmbedding(
-        chunks[i].content,
-        "RETRIEVAL_DOCUMENT",
-      );
+      // D57: No taskType needed for OpenAI embeddings
+      const embedding = await generateEmbedding(chunks[i].content);
 
       const { error: embedErr } = await adminDb
         .from("chunks")

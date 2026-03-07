@@ -1,10 +1,12 @@
 /**
  * gemini.ts — Gemini API helpers for Axon v4.4
  *
- * Three functions:
+ * Two active functions:
  *   generateText()        — Gemini 2.5 Flash for text/JSON generation
- *   generateEmbedding()   — gemini-embedding-001 for vector embeddings
  *   extractTextFromPdf()  — Gemini 2.5 Flash multimodal PDF text extraction (Fase 7)
+ *
+ * One DEPRECATED function:
+ *   generateEmbedding()   — DEPRECATED: Use openai-embeddings.ts instead (D57)
  *
  * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
  *
@@ -16,6 +18,7 @@
  *           (separate quota bucket, avoids free tier exhaustion)
  * D-18 FIX: Export GENERATE_MODEL so _meta always reports correct model
  * D45-D49: PDF extraction via Gemini multimodal (Fase 7)
+ * D57-D62: Embedding function deprecated — migrated to OpenAI (openai-embeddings.ts)
  */
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -145,14 +148,25 @@ export async function generateText(
   };
 }
 
-// ─── Embeddings ─────────────────────────────────────────────────
+// ─── Embeddings (DEPRECATED — D57) ──────────────────────────────
+//
+// @deprecated Use generateEmbedding() from ./openai-embeddings.ts instead.
+// This function is kept temporarily for reference but is no longer imported
+// by any production code. Will be removed in a future cleanup.
+//
+// Migration: D57 (text-embedding-3-large 1536d via OpenAI)
+// Old model: gemini-embedding-001 (768d)
 
-const EMBEDDING_DIMENSIONS = 768;
+const _DEPRECATED_EMBEDDING_DIMENSIONS = 768;
 
+/** @deprecated Use openai-embeddings.ts generateEmbedding() instead */
 export async function generateEmbedding(
   text: string,
   taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY" = "RETRIEVAL_QUERY",
 ): Promise<number[]> {
+  console.warn(
+    "[DEPRECATED] gemini.ts generateEmbedding() called. Use openai-embeddings.ts instead.",
+  );
   const key = getApiKey();
   const model = "gemini-embedding-001";
   const url = `${GEMINI_BASE}/${model}:embedContent?key=${key}`;
@@ -166,7 +180,7 @@ export async function generateEmbedding(
         model: `models/${model}`,
         content: { parts: [{ text }] },
         taskType,
-        outputDimensionality: EMBEDDING_DIMENSIONS,
+        outputDimensionality: _DEPRECATED_EMBEDDING_DIMENSIONS,
       }),
     },
     10_000,
