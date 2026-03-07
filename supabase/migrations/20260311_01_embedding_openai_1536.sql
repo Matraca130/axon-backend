@@ -6,11 +6,12 @@
 -- What this does:
 --   1. Drop HNSW indexes (cannot ALTER vector dimension in-place)
 --   2. NULL existing 768d embeddings (incompatible with new dimensions)
---   3. ALTER columns from vector(768) to vector(1536)
---   4. Recreate rag_hybrid_search with vector(1536) parameter
---   5. Recreate rag_coarse_to_fine_search with vector(1536) parameter
---   6. Recreate HNSW indexes
---   7. Verification block
+--   3. ALTER chunks.embedding from vector(768) to vector(1536)
+--   4. ADD summaries.embedding as vector(1536) (Fase 3 migration was not applied)
+--   5. Recreate rag_hybrid_search with vector(1536) parameter
+--   6. Recreate rag_coarse_to_fine_search with vector(1536) parameter
+--   7. Recreate HNSW indexes
+--   8. Verification block
 --
 -- IMPORTANT: After running this migration, existing chunks and summaries
 -- will have NULL embeddings. Re-embed via:
@@ -23,31 +24,37 @@
 -- ============================================================================
 
 -- ════════════════════════════════════════════════════════════════════
--- 1. Drop HNSW indexes
+-- 1. Drop HNSW indexes (safe: IF EXISTS)
 -- ════════════════════════════════════════════════════════════════════
 
 DROP INDEX IF EXISTS idx_chunks_embedding;
 DROP INDEX IF EXISTS idx_summaries_embedding_hnsw;
 
 -- ════════════════════════════════════════════════════════════════════
--- 2. NULL existing embeddings (768d incompatible with 1536d)
+-- 2. NULL existing embeddings in chunks (768d incompatible with 1536d)
 -- ════════════════════════════════════════════════════════════════════
 
 UPDATE chunks SET embedding = NULL WHERE embedding IS NOT NULL;
-UPDATE summaries SET embedding = NULL WHERE embedding IS NOT NULL;
 
 -- ════════════════════════════════════════════════════════════════════
--- 3. ALTER columns to vector(1536)
+-- 3. ALTER chunks.embedding to vector(1536)
 -- ════════════════════════════════════════════════════════════════════
 
 ALTER TABLE chunks
   ALTER COLUMN embedding TYPE vector(1536);
 
+-- ════════════════════════════════════════════════════════════════════
+-- 4. ADD summaries.embedding as vector(1536)
+--    (Fase 3 migration 20260307_03 was never applied to the DB,
+--     so this column does not exist yet. We create it directly
+--     at the target dimension to avoid a double migration.)
+-- ════════════════════════════════════════════════════════════════════
+
 ALTER TABLE summaries
-  ALTER COLUMN embedding TYPE vector(1536);
+  ADD COLUMN IF NOT EXISTS embedding vector(1536);
 
 -- ════════════════════════════════════════════════════════════════════
--- 4. Recreate rag_hybrid_search with vector(1536)
+-- 5. Recreate rag_hybrid_search with vector(1536)
 -- ════════════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE FUNCTION rag_hybrid_search(
@@ -108,7 +115,7 @@ $$;
 COMMENT ON FUNCTION rag_hybrid_search IS 'RAG hybrid search v4 (D57: OpenAI 1536d).';
 
 -- ════════════════════════════════════════════════════════════════════
--- 5. Recreate rag_coarse_to_fine_search with vector(1536)
+-- 6. Recreate rag_coarse_to_fine_search with vector(1536)
 -- ════════════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE FUNCTION rag_coarse_to_fine_search(
@@ -179,7 +186,7 @@ $$;
 COMMENT ON FUNCTION rag_coarse_to_fine_search IS 'Two-stage RAG search v2 (D57: OpenAI 1536d).';
 
 -- ════════════════════════════════════════════════════════════════════
--- 6. Recreate HNSW indexes
+-- 7. Recreate HNSW indexes
 -- ════════════════════════════════════════════════════════════════════
 
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding
@@ -192,27 +199,25 @@ CREATE INDEX IF NOT EXISTS idx_summaries_embedding_hnsw
   WHERE embedding IS NOT NULL;
 
 -- ════════════════════════════════════════════════════════════════════
--- 7. Verification
+-- 8. Verification
 -- ════════════════════════════════════════════════════════════════════
 
 DO $$
 DECLARE
-  v_chunk_dim TEXT;
-  v_summary_dim TEXT;
+  v_chunk_type TEXT;
+  v_summary_type TEXT;
   v_has_chunk_idx BOOLEAN;
   v_has_summary_idx BOOLEAN;
   v_rpc_hybrid BOOLEAN;
   v_rpc_c2f BOOLEAN;
-  v_null_chunks INT;
-  v_null_summaries INT;
+  v_nonnull_chunks INT;
+  v_nonnull_summaries INT;
 BEGIN
-  SELECT udt_name || '(' || character_maximum_length || ')'
-  INTO v_chunk_dim
+  SELECT data_type INTO v_chunk_type
   FROM information_schema.columns
   WHERE table_name = 'chunks' AND column_name = 'embedding';
 
-  SELECT udt_name || '(' || character_maximum_length || ')'
-  INTO v_summary_dim
+  SELECT data_type INTO v_summary_type
   FROM information_schema.columns
   WHERE table_name = 'summaries' AND column_name = 'embedding';
 
@@ -228,20 +233,19 @@ BEGIN
   SELECT EXISTS(SELECT 1 FROM pg_proc WHERE proname = 'rag_coarse_to_fine_search')
   INTO v_rpc_c2f;
 
-  SELECT count(*) INTO v_null_chunks FROM chunks WHERE embedding IS NOT NULL;
-  SELECT count(*) INTO v_null_summaries FROM summaries WHERE embedding IS NOT NULL;
+  SELECT count(*) INTO v_nonnull_chunks FROM chunks WHERE embedding IS NOT NULL;
+  SELECT count(*) INTO v_nonnull_summaries FROM summaries WHERE embedding IS NOT NULL;
 
-  RAISE NOTICE '══════════════════════════════════════════════════';
-  RAISE NOTICE '  D57 MIGRATION: Gemini 768d -> OpenAI 1536d';
-  RAISE NOTICE '══════════════════════════════════════════════════';
-  RAISE NOTICE '  chunks.embedding type:        %', COALESCE(v_chunk_dim, 'MISSING');
-  RAISE NOTICE '  summaries.embedding type:     %', COALESCE(v_summary_dim, 'MISSING');
+  RAISE NOTICE '';
+  RAISE NOTICE '  D57 MIGRATION COMPLETE';
+  RAISE NOTICE '  chunks.embedding:             % (expect USER-DEFINED)', v_chunk_type;
+  RAISE NOTICE '  summaries.embedding:          % (expect USER-DEFINED)', v_summary_type;
   RAISE NOTICE '  idx_chunks_embedding:         %', CASE WHEN v_has_chunk_idx THEN 'OK' ELSE 'MISSING' END;
   RAISE NOTICE '  idx_summaries_embedding_hnsw: %', CASE WHEN v_has_summary_idx THEN 'OK' ELSE 'MISSING' END;
   RAISE NOTICE '  rag_hybrid_search:            %', CASE WHEN v_rpc_hybrid THEN 'OK' ELSE 'MISSING' END;
   RAISE NOTICE '  rag_coarse_to_fine_search:    %', CASE WHEN v_rpc_c2f THEN 'OK' ELSE 'MISSING' END;
-  RAISE NOTICE '  Non-null chunk embeddings:    % (should be 0)', v_null_chunks;
-  RAISE NOTICE '  Non-null summary embeddings:  % (should be 0)', v_null_summaries;
-  RAISE NOTICE '══════════════════════════════════════════════════';
+  RAISE NOTICE '  Non-null chunk embeddings:    % (expect 0)', v_nonnull_chunks;
+  RAISE NOTICE '  Non-null summary embeddings:  % (expect 0)', v_nonnull_summaries;
+  RAISE NOTICE '';
 END;
 $$;
