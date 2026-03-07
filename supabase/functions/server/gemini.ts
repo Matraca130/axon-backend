@@ -1,25 +1,24 @@
 /**
- * gemini.ts — AI API helpers for Axon v4.5
+ * gemini.ts — Gemini API helpers for Axon v4.4
  *
- * Functions:
+ * Two active functions:
  *   generateText()        — Gemini 2.5 Flash for text/JSON generation
- *   generateEmbedding()   — OpenAI text-embedding-3-large (1536d) for vector embeddings
  *   extractTextFromPdf()  — Gemini 2.5 Flash multimodal PDF text extraction (Fase 7)
  *
- * Environment:
- *   GEMINI_API_KEY  — for generateText() and extractTextFromPdf()
- *   OPENAI_API_KEY  — for generateEmbedding()
+ * One DEPRECATED function:
+ *   generateEmbedding()   — DEPRECATED: Use openai-embeddings.ts instead (D57)
  *
- * History:
- *   LA-02 FIX: Added AbortController timeout (15s generate, 10s embed)
- *   LA-06 FIX: Added retry with exponential backoff for 429/503
- *   D-16 FIX: Use gemini-embedding-001 (correct model name per 2026 docs)
- *   D-17 FIX: Switch from gemini-2.0-flash to gemini-2.5-flash
- *   D-18 FIX: Export GENERATE_MODEL so _meta always reports correct model
- *   D45-D49: PDF extraction via Gemini multimodal (Fase 7)
- *   D57: Migrate embeddings to OpenAI text-embedding-3-large (1536d)
- *   D59: Retry with exponential backoff for OpenAI embedding calls
- *   D60: Centralized EMBEDDING_DIMENSIONS constant
+ * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
+ *
+ * LA-02 FIX: Added AbortController timeout (15s generate, 10s embed)
+ * LA-06 FIX: Added retry with exponential backoff for 429/503
+ * D-16 FIX: Use gemini-embedding-001 (correct model name per 2026 docs)
+ *           + truncate to 768 dims to match DB vector column
+ * D-17 FIX: Switch from gemini-2.0-flash to gemini-2.5-flash
+ *           (separate quota bucket, avoids free tier exhaustion)
+ * D-18 FIX: Export GENERATE_MODEL so _meta always reports correct model
+ * D45-D49: PDF extraction via Gemini multimodal (Fase 7)
+ * D57-D62: Embedding function deprecated — migrated to OpenAI (openai-embeddings.ts)
  */
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -27,20 +26,9 @@ const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 // D-17 + D-18: Single source of truth for the generation model name
 export const GENERATE_MODEL = "gemini-2.5-flash";
 
-// ─── D57 + D60: OpenAI Embedding Config (centralized) ──────────
-export const EMBEDDING_MODEL = "text-embedding-3-large";
-export const EMBEDDING_DIMENSIONS = 1536;
-const OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings";
-
 function getApiKey(): string {
   const key = Deno.env.get("GEMINI_API_KEY");
   if (!key) throw new Error("[Axon Fatal] GEMINI_API_KEY not configured in secrets");
-  return key;
-}
-
-function getOpenAiKey(): string {
-  const key = Deno.env.get("OPENAI_API_KEY");
-  if (!key) throw new Error("[Axon Fatal] OPENAI_API_KEY not configured in secrets");
   return key;
 }
 
@@ -65,7 +53,7 @@ async function fetchWithRetry(
       if ((res.status === 429 || res.status === 503) && attempt < maxRetries) {
         const delay = Math.min(1000 * 2 ** attempt, 8000);
         console.warn(
-          `[AI API] ${res.status}, retry ${attempt + 1}/${maxRetries} in ${delay}ms`,
+          `[Gemini] ${res.status}, retry ${attempt + 1}/${maxRetries} in ${delay}ms`,
         );
         await new Promise((r) => setTimeout(r, delay));
         continue;
@@ -76,13 +64,13 @@ async function fetchWithRetry(
       clearTimeout(timer);
       if (e instanceof DOMException && e.name === "AbortError") {
         throw new Error(
-          `AI API timeout after ${timeoutMs}ms (attempt ${attempt + 1})`,
+          `Gemini API timeout after ${timeoutMs}ms (attempt ${attempt + 1})`,
         );
       }
       if (attempt < maxRetries) {
         const delay = Math.min(1000 * 2 ** attempt, 8000);
         console.warn(
-          `[AI API] Network error, retry ${attempt + 1}/${maxRetries} in ${delay}ms: ${(e as Error).message}`,
+          `[Gemini] Network error, retry ${attempt + 1}/${maxRetries} in ${delay}ms: ${(e as Error).message}`,
         );
         await new Promise((r) => setTimeout(r, delay));
         continue;
@@ -90,10 +78,10 @@ async function fetchWithRetry(
       throw e;
     }
   }
-  throw new Error("AI API: max retries exceeded");
+  throw new Error("Gemini: max retries exceeded");
 }
 
-// ─── Text Generation (Gemini) ───────────────────────────────────
+// ─── Text Generation ────────────────────────────────────────────
 
 interface GeminiGenerateOpts {
   prompt: string;
@@ -160,36 +148,39 @@ export async function generateText(
   };
 }
 
-// ─── Embeddings (OpenAI text-embedding-3-large) ─────────────────
+// ─── Embeddings (DEPRECATED — D57) ──────────────────────────────
 //
-// D57: Migrated from Gemini embedding-001 (768d) to OpenAI
-//      text-embedding-3-large with Matryoshka truncation to 1536d.
+// @deprecated Use generateEmbedding() from ./openai-embeddings.ts instead.
+// This function is kept temporarily for reference but is no longer imported
+// by any production code. Will be removed in a future cleanup.
 //
-// The taskType parameter is kept for backward compatibility with
-// all callers (auto-ingest.ts, retrieval-strategies.ts, ingest.ts)
-// but is NOT used by OpenAI — their embedding model handles
-// query vs document distinction internally.
-//
-// G5 FIX: Validates output dimension matches EMBEDDING_DIMENSIONS.
+// Migration: D57 (text-embedding-3-large 1536d via OpenAI)
+// Old model: gemini-embedding-001 (768d)
 
+const _DEPRECATED_EMBEDDING_DIMENSIONS = 768;
+
+/** @deprecated Use openai-embeddings.ts generateEmbedding() instead */
 export async function generateEmbedding(
   text: string,
-  _taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY" = "RETRIEVAL_QUERY",
+  taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY" = "RETRIEVAL_QUERY",
 ): Promise<number[]> {
-  const key = getOpenAiKey();
+  console.warn(
+    "[DEPRECATED] gemini.ts generateEmbedding() called. Use openai-embeddings.ts instead.",
+  );
+  const key = getApiKey();
+  const model = "gemini-embedding-001";
+  const url = `${GEMINI_BASE}/${model}:embedContent?key=${key}`;
 
   const res = await fetchWithRetry(
-    OPENAI_EMBEDDINGS_URL,
+    url,
     {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${key}`,
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: EMBEDDING_MODEL,
-        input: text,
-        dimensions: EMBEDDING_DIMENSIONS,
+        model: `models/${model}`,
+        content: { parts: [{ text }] },
+        taskType,
+        outputDimensionality: _DEPRECATED_EMBEDDING_DIMENSIONS,
       }),
     },
     10_000,
@@ -197,25 +188,17 @@ export async function generateEmbedding(
 
   if (!res.ok) {
     const errBody = await res.text();
-    throw new Error(`OpenAI Embedding error ${res.status}: ${errBody}`);
+    throw new Error(`Gemini Embedding error ${res.status}: ${errBody}`);
   }
 
   const data = await res.json();
-  const values = data.data?.[0]?.embedding;
+  const values = data.embedding?.values;
   if (!values || !Array.isArray(values)) {
-    throw new Error("No embedding values returned from OpenAI");
+    throw new Error(`No embedding values returned`);
   }
   if (values.length === 0) {
-    throw new Error("Empty embedding vector returned from OpenAI");
+    throw new Error(`Empty embedding vector returned`);
   }
-
-  // G5: Dimension validation guard
-  if (values.length !== EMBEDDING_DIMENSIONS) {
-    throw new Error(
-      `[Axon] Embedding dimension mismatch: expected ${EMBEDDING_DIMENSIONS}, got ${values.length}`,
-    );
-  }
-
   return values;
 }
 
