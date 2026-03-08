@@ -15,12 +15,12 @@
  *
  * Flow (count=1, legacy):
  *   1. RPC get_smart_generate_target() → top targets
- *   2. Dedup check: skip keywords with recent AI content (2h window)
+ *   2. Dedup check: skip subtopics with recent AI content (2h window)
  *   3. Pick best target → build adaptive prompt → Gemini → insert → return
  *
  * Flow (count>1, Fase 8E bulk):
  *   1. RPC get_smart_generate_target(p_limit=count+5) → targets with buffer
- *   2. Dedup check: filter out recently generated keywords
+ *   2. Dedup check: filter out recently generated subtopics
  *   3. Pre-fetch shared context (summary, institution, profile)
  *   4. Sequential Gemini calls per target (D15 pattern from pre-generate)
  *   5. Partial-success response (D16 pattern from pre-generate)
@@ -36,6 +36,11 @@
  *   - summary_id: scopes RPC to one summary (for same-summary adaptive quiz)
  *   - count: generates up to 10 items in one request (sequential Gemini calls)
  *   - quiz_id: auto-links generated quiz_questions to a quiz entity
+ *
+ * Dedup granularity (Fase 8F):
+ *   - Primary: subtopic_id (most targets have one after v2 migration)
+ *   - Fallback: keyword_id (for targets without subtopic_id)
+ *   - This ensures one generated subtopic doesn't block sibling subtopics
  *
  * Architectural decisions: D1, D2, D3, D8, D10-D13
  * Error prevention: E1, E2, E7, E8, E9
@@ -193,25 +198,61 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
     return err(c, scopeMsg, 404);
   }
 
-  // ── Step 3: Dedup check (D3, D11: by keyword_id, 2h window) ─
-  const targetKeywordIds = (targets as SmartTarget[]).map(
-    (t) => t.keyword_id,
-  );
+  // ── Step 3: Dedup check (Fase 8F: subtopic-level, 2h window) ─
+  // Subtopic-level dedup: prevents blocking all subtopics of a keyword
+  // when only one was recently generated. Falls back to keyword_id
+  // for targets without subtopic_id.
   const twoHoursAgo = new Date(Date.now() - 2 * 3600_000).toISOString();
   const dedupTable =
     action === "quiz_question" ? "quiz_questions" : "flashcards";
 
-  const { data: recentItems } = await db
-    .from(dedupTable)
-    .select("keyword_id")
-    .eq("created_by", user.id)
-    .eq("source", "ai")
-    .gte("created_at", twoHoursAgo)
-    .in("keyword_id", targetKeywordIds);
+  // Primary: subtopic-level dedup (most targets have subtopic_id after v2)
+  const targetSubtopicIds = (targets as SmartTarget[])
+    .map((t) => t.subtopic_id)
+    .filter((id): id is string => id !== null);
 
-  const recentKeywordIds = new Set(
-    recentItems?.map((r: { keyword_id: string }) => r.keyword_id) ?? [],
-  );
+  const recentSubtopicIds = new Set<string>();
+  if (targetSubtopicIds.length > 0) {
+    const { data: recentBySubtopic } = await db
+      .from(dedupTable)
+      .select("subtopic_id")
+      .eq("created_by", user.id)
+      .eq("source", "ai")
+      .gte("created_at", twoHoursAgo)
+      .in("subtopic_id", targetSubtopicIds);
+
+    for (const r of recentBySubtopic ?? []) {
+      if (r.subtopic_id) recentSubtopicIds.add(r.subtopic_id as string);
+    }
+  }
+
+  // Fallback: keyword-level dedup (for targets without subtopic_id)
+  const keywordsWithoutSubtopic = [...new Set(
+    (targets as SmartTarget[])
+      .filter((t) => !t.subtopic_id)
+      .map((t) => t.keyword_id),
+  )];
+
+  const recentKeywordIds = new Set<string>();
+  if (keywordsWithoutSubtopic.length > 0) {
+    const { data: recentByKeyword } = await db
+      .from(dedupTable)
+      .select("keyword_id")
+      .eq("created_by", user.id)
+      .eq("source", "ai")
+      .gte("created_at", twoHoursAgo)
+      .in("keyword_id", keywordsWithoutSubtopic);
+
+    for (const r of recentByKeyword ?? []) {
+      if (r.keyword_id) recentKeywordIds.add(r.keyword_id as string);
+    }
+  }
+
+  // Unified dedup helper: subtopic if available, keyword fallback
+  const isTargetDeduped = (t: SmartTarget): boolean => {
+    if (t.subtopic_id) return recentSubtopicIds.has(t.subtopic_id);
+    return recentKeywordIds.has(t.keyword_id);
+  };
 
   // ════════════════════════════════════════════════════════════
   // SINGLE-ITEM PATH (count=1) — Legacy behavior preserved
@@ -221,7 +262,7 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
     // Fallback to targets[0] if ALL have recent content.
     const chosen: SmartTarget =
       (targets as SmartTarget[]).find(
-        (t) => !recentKeywordIds.has(t.keyword_id),
+        (t) => !isTargetDeduped(t),
       ) ?? (targets[0] as SmartTarget);
 
     // ── Step 4: Institution scoping (PF-05, BUG-3) ─────────
@@ -407,7 +448,7 @@ Responde en JSON con este schema exacto:
               p_know: pKnow,
               need_score: Number(chosen.need_score),
               primary_reason: chosen.primary_reason,
-              was_deduped: recentKeywordIds.has(chosen.keyword_id),
+              was_deduped: isTargetDeduped(chosen),
               candidates_evaluated: (targets as SmartTarget[]).length,
             },
           },
@@ -448,7 +489,7 @@ Responde en JSON con este schema exacto:
               p_know: pKnow,
               need_score: Number(chosen.need_score),
               primary_reason: chosen.primary_reason,
-              was_deduped: recentKeywordIds.has(chosen.keyword_id),
+              was_deduped: isTargetDeduped(chosen),
               candidates_evaluated: (targets as SmartTarget[]).length,
             },
           },
@@ -469,7 +510,7 @@ Responde en JSON con este schema exacto:
   // Select targets: prefer non-deduped, take up to `count`
   const allTargets = targets as SmartTarget[];
   const freshTargets = allTargets.filter(
-    (t) => !recentKeywordIds.has(t.keyword_id),
+    (t) => !isTargetDeduped(t),
   );
   // Use fresh targets first; if not enough, pad with deduped ones (graceful)
   const selectedTargets = freshTargets.length >= count
@@ -477,7 +518,7 @@ Responde en JSON con este schema exacto:
     : [
         ...freshTargets,
         ...allTargets
-          .filter((t) => recentKeywordIds.has(t.keyword_id))
+          .filter((t) => isTargetDeduped(t))
           .slice(0, count - freshTargets.length),
       ];
 
