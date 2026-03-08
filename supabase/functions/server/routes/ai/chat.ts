@@ -50,6 +50,13 @@
  *
  * Fase 4 additions:
  *   T-03: Query logging with latency, similarity metrics, and log_id for feedback
+ *
+ * SEC-01 FIX:
+ *   SECURITY: Changed SECURITY DEFINER RPC calls (rag_hybrid_search,
+ *   rag_coarse_to_fine_search) from user client (db) to admin client
+ *   (getAdminClient()) to support REVOKE EXECUTE FROM authenticated.
+ *   This closes a cross-tenant data exfiltration vector via PostgREST RPC.
+ *   See: https://github.com/Matraca130/axon-backend/issues/45
  */
 
 import { Hono } from "npm:hono";
@@ -406,6 +413,15 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   // ── T-03: Start latency timer ────────────────────────────
   const t0 = Date.now();
 
+  // ── SEC-01 FIX: Admin client for SECURITY DEFINER RPCs ─────
+  // rag_hybrid_search and rag_coarse_to_fine_search are SECURITY DEFINER
+  // (bypass RLS). Using adminDb allows REVOKE EXECUTE FROM authenticated,
+  // closing cross-tenant data leak via PostgREST RPC.
+  // Other RPCs (resolve_parent_institution, get_student_knowledge_context)
+  // and table reads (memberships, chunks) keep using db (user RLS).
+  // See: https://github.com/Matraca130/axon-backend/issues/45
+  const adminDb = getAdminClient();
+
   // ── Phase 5: Build augmented search query ───────────────────
   const { query: searchQuery, wasAugmented } = buildAugmentedQuery(message, history);
 
@@ -439,7 +455,8 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
 
       if (summaryId) {
         // ── SCOPED: Hybrid search within specific summary ──────
-        const { data } = await db.rpc("rag_hybrid_search", {
+        // SEC-01: Uses adminDb (service_role) — function is SECURITY DEFINER
+        const { data } = await adminDb.rpc("rag_hybrid_search", {
           p_query_embedding: queryEmbeddingJson,
           p_query_text: message,
           p_institution_id: institutionId,
@@ -451,7 +468,8 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
         searchType = "hybrid";
       } else {
         // ── BROAD: Coarse-to-fine search (Fase 3) ──────────────
-        const { data: c2fData, error: c2fErr } = await db.rpc(
+        // SEC-01: Uses adminDb (service_role) — function is SECURITY DEFINER
+        const { data: c2fData, error: c2fErr } = await adminDb.rpc(
           "rag_coarse_to_fine_search",
           {
             p_query_embedding: queryEmbeddingJson,
@@ -474,7 +492,8 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
             );
           }
 
-          const { data: hybridData } = await db.rpc("rag_hybrid_search", {
+          // SEC-01: Uses adminDb (service_role) — function is SECURITY DEFINER
+          const { data: hybridData } = await adminDb.rpc("rag_hybrid_search", {
             p_query_embedding: queryEmbeddingJson,
             p_query_text: message,
             p_institution_id: institutionId,
