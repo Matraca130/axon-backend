@@ -8,6 +8,8 @@
  *   summary_id: UUID (optional, Fase 8E: scopes to one summary)
  *   count: number (optional, Fase 8E: 1-10, default 1)
  *   quiz_id: UUID (optional, Fase 8E: auto-link questions to quiz)
+ *   auto_create_quiz: boolean (optional, Fase 8G: server-side quiz creation)
+ *   quiz_title: string (optional, Fase 8G: title for auto-created quiz)
  *
  * Unlike POST /ai/generate which requires the client to provide
  * summary_id + keyword_id, this endpoint AUTO-SELECTS the best
@@ -25,22 +27,15 @@
  *   4. Sequential Gemini calls per target (D15 pattern from pre-generate)
  *   5. Partial-success response (D16 pattern from pre-generate)
  *
- * Key differences from /ai/generate:
- *   - Client sends NO content IDs — the server chooses the best target
- *   - Prompt includes NeedScore context (why this concept was chosen)
- *   - Temperature is adaptive (lower for low mastery, higher for high)
- *   - No wrong_answer/block_id support (those are manual-generate features)
- *   - Response includes _smart metadata (target selection info)
- *
- * Fase 8E additions:
- *   - summary_id: scopes RPC to one summary (for same-summary adaptive quiz)
- *   - count: generates up to 10 items in one request (sequential Gemini calls)
- *   - quiz_id: auto-links generated quiz_questions to a quiz entity
+ * Fase 8G: auto_create_quiz
+ *   When auto_create_quiz=true, action=quiz_question, and summary_id is
+ *   provided, the server creates a quiz entity before generating questions.
+ *   This bypasses the CRUD factory's CONTENT_WRITE_ROLES check, allowing
+ *   students to create adaptive quizzes without professor-level permissions.
  *
  * Dedup granularity (Fase 8F):
  *   - Primary: subtopic_id (most targets have one after v2 migration)
  *   - Fallback: keyword_id (for targets without subtopic_id)
- *   - This ensures one generated subtopic doesn't block sibling subtopics
  *
  * Architectural decisions: D1, D2, D3, D8, D10-D13
  * Error prevention: E1, E2, E7, E8, E9
@@ -167,9 +162,42 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
     count = Math.min(body.count as number, MAX_BULK_COUNT);
   }
 
-  const quizId = isUuid(body.quiz_id)
+  let quizId = isUuid(body.quiz_id)
     ? (body.quiz_id as string)
     : null;
+
+  // ── Fase 8G: Auto-create quiz entity server-side ─────────────
+  // Students can't POST /quizzes (CRUD factory requires CONTENT_WRITE_ROLES).
+  // When auto_create_quiz=true, we create the quiz entity here using the
+  // authenticated DB client (bypasses CRUD role checks).
+  const autoCreateQuiz = body.auto_create_quiz === true;
+
+  if (autoCreateQuiz && !quizId && action === "quiz_question" && summaryId) {
+    const quizTitle =
+      typeof body.quiz_title === "string" && body.quiz_title.trim()
+        ? body.quiz_title.trim()
+        : `Quiz Adaptativo — ${new Date().toISOString().substring(0, 16).replace("T", " ")}`;
+
+    const { data: newQuiz, error: quizCreateErr } = await db
+      .from("quizzes")
+      .insert({
+        summary_id: summaryId,
+        title: quizTitle,
+        description: `Quiz generado por IA (${count} preguntas)`,
+        source: "ai",
+        created_by: user.id,
+      })
+      .select("id")
+      .single();
+
+    if (quizCreateErr) {
+      console.error("[GenerateSmart] Auto-create quiz failed:", quizCreateErr.message);
+      return err(c, `Auto-create quiz failed: ${quizCreateErr.message}`, 500);
+    }
+
+    quizId = newQuiz!.id as string;
+    console.log(`[GenerateSmart] Auto-created quiz ${quizId} for student ${user.id}`);
+  }
 
   // ── Step 2: RPC get_smart_generate_target ───────────────────
   // Fase 8E: Pass p_summary_id and p_limit (with dedup buffer)
@@ -427,7 +455,7 @@ Responde en JSON con este schema exacto:
             difficulty: g.difficulty || "medium",
             source: "ai",
             created_by: user.id,
-            ...(quizId && { quiz_id: quizId }), // Fase 8E
+            ...(quizId && { quiz_id: quizId }), // Fase 8E + 8G
           })
           .select()
           .single();
@@ -442,6 +470,7 @@ Responde en JSON con este schema exacto:
             _meta: {
               model: GENERATE_MODEL,
               tokens: result.tokensUsed,
+              ...(quizId && { quiz_id: quizId }),
             },
             _smart: {
               target_keyword: chosen.keyword_name,
