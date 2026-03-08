@@ -1,5 +1,5 @@
 /**
- * routes/ai/chat.ts — RAG Chat with adaptive context
+ * routes/ai/chat.ts - RAG Chat with adaptive context
  *
  * POST /ai/rag-chat
  *   message: string (required, max 2000 chars)
@@ -21,25 +21,25 @@
  *
  * Phase 5 additions:
  *   - History-augmented search: uses last 2 user messages to improve follow-up recall
- *   - Adjacent chunk expansion: fetches ±1 order_index chunks for better context
- *   - Smart context assembly: orders by summary→order_index, deduplicates
+ *   - Adjacent chunk expansion: fetches +/-1 order_index chunks for better context
+ *   - Smart context assembly: orders by summary->order_index, deduplicates
  *
  * Fase 3 additions:
- *   - Coarse-to-fine search: two-level vector search (summary → chunk)
+ *   - Coarse-to-fine search: two-level vector search (summary -> chunk)
  *   - normalizeCoarseToFineResults(): adapter for MatchedChunk compatibility
- *   - Fallback chain: coarse-to-fine → hybrid (unscoped) → empty context
+ *   - Fallback chain: coarse-to-fine -> hybrid (unscoped) -> empty context
  *   - search_type logging: hybrid | coarse_to_fine | hybrid_fallback (+ _augmented)
  *
  * Fase 6 additions:
  *   - Strategy selection: selectStrategy() or client override via body.strategy
- *   - Multi-Query: Gemini reformulates query → 3 embeddings → merge results
- *   - HyDE: Gemini generates hypothetical answer → embed hypothesis
+ *   - Multi-Query: Gemini reformulates query -> 3 embeddings -> merge results
+ *   - HyDE: Gemini generates hypothetical answer -> embed hypothesis
  *   - Re-ranking: Gemini scores chunk relevance, blends with original score
  *   - New log columns: retrieval_strategy, rerank_applied
  *   - Response _search metadata extended with strategy info
  *
  * Pre-flight fixes applied:
- *   PF-01 FIX: Changed 'institution_members' → 'memberships' + is_active filter
+ *   PF-01 FIX: Changed 'institution_members' -> 'memberships' + is_active filter
  *   PF-05 FIX: DB queries happen before Gemini calls (JWT validation)
  *
  * Live-audit fixes applied:
@@ -50,6 +50,13 @@
  *
  * Fase 4 additions:
  *   T-03: Query logging with latency, similarity metrics, and log_id for feedback
+ *
+ * SEC-01 FIX:
+ *   SECURITY: Changed SECURITY DEFINER RPC calls (rag_hybrid_search,
+ *   rag_coarse_to_fine_search) from user client (db) to admin client
+ *   (getAdminClient()) to support REVOKE EXECUTE FROM authenticated.
+ *   This closes a cross-tenant data exfiltration vector via PostgREST RPC.
+ *   See: https://github.com/Matraca130/axon-backend/issues/45
  */
 
 import { Hono } from "npm:hono";
@@ -76,15 +83,15 @@ import {
 
 export const aiChatRoutes = new Hono();
 
-// ─── Phase 5: History-augmented search query builder ────────────
+// --- Phase 5: History-augmented search query builder ----------------
 // Concatenates the last 2 user messages with the current query.
 // This improves recall for follow-up questions like:
-//   User: "Explain mitosis"  → embed("mitosis")
-//   User: "What about the phases?" → embed("mitosis phases") instead of just "phases"
+//   User: "Explain mitosis"  -> embed("mitosis")
+//   User: "What about the phases?" -> embed("mitosis phases") instead of just "phases"
 //
 // Each historical message is capped at 200 chars to keep the
 // embedding focused. The augmented query is used ONLY for the
-// embedding — the original message is what goes to Gemini.
+// embedding - the original message is what goes to Gemini.
 
 const MAX_HISTORY_CHARS_FOR_SEARCH = 200;
 
@@ -108,13 +115,9 @@ function buildAugmentedQuery(
   return { query: augmented, wasAugmented: true };
 }
 
-// ─── Phase 5: Adjacent chunk expansion ────────────────────────────
-// For each matched chunk, fetch chunks with order_index ±1 from the
+// --- Phase 5: Adjacent chunk expansion ----------------------------
+// For each matched chunk, fetch chunks with order_index +/-1 from the
 // same summary. This gives the LLM better context continuity.
-//
-// Example: If chunk #3 matches about "cell division", we also fetch
-// chunk #2 (intro context) and chunk #4 (continuation), so the LLM
-// sees the full explanation instead of just one fragment.
 
 interface ContextChunk {
   id: string;
@@ -158,9 +161,6 @@ async function fetchAdjacentChunks(
     if (adjacentPairs.size === 0) return [];
 
     // Fetch adjacent chunks
-    // We need to query by (summary_id, order_index) pairs.
-    // Since Supabase doesn't support tuple IN, we use OR filters.
-    // Group by summary_id for efficiency.
     const summaryGroups = new Map<string, number[]>();
     for (const pair of adjacentPairs) {
       const [sumId, orderStr] = pair.split(":");
@@ -207,7 +207,7 @@ async function fetchAdjacentChunks(
       }
     }
 
-    // Sort by summary_id → order_index for coherent reading
+    // Sort by summary_id -> order_index for coherent reading
     allContextChunks.sort((a, b) => {
       if (a.summary_id !== b.summary_id) return a.summary_id.localeCompare(b.summary_id);
       return a.order_index - b.order_index;
@@ -220,9 +220,7 @@ async function fetchAdjacentChunks(
   }
 }
 
-// ─── Phase 5: Smart context assembly ──────────────────────────────
-// Assembles chunks into a coherent reading context, respecting
-// character limits and maintaining reading order.
+// --- Phase 5: Smart context assembly ------------------------------
 
 const MAX_CONTEXT_CHARS = 3000;
 
@@ -242,7 +240,6 @@ function assembleContext(
 
   // If we have expanded context chunks, use them (ordered)
   if (contextChunks.length > 0) {
-    // Build a map of summary_id → title for labeling
     const titleMap = new Map<string, string>();
     for (const m of matches) {
       titleMap.set(m.summary_id, m.summary_title);
@@ -254,7 +251,6 @@ function assembleContext(
     let chunksIncluded = 0;
 
     for (const chunk of contextChunks) {
-      // Add summary header when switching summaries
       if (chunk.summary_id !== currentSummary) {
         const title = titleMap.get(chunk.summary_id) || "Material";
         const header = `\n[De "${title}"]:\n`;
@@ -264,11 +260,9 @@ function assembleContext(
         currentSummary = chunk.summary_id;
       }
 
-      // Add chunk content
       const separator = chunk.is_primary ? "" : "";
       const text = `${separator}${chunk.content}\n`;
       if (charCount + text.length > MAX_CONTEXT_CHARS) {
-        // Add truncated version if we have room for at least 100 chars
         const remaining = MAX_CONTEXT_CHARS - charCount;
         if (remaining > 100) {
           context += text.slice(0, remaining) + "...\n";
@@ -299,15 +293,7 @@ function assembleContext(
   return { ragContext, sourcesUsed, contextChunksCount: matches.length };
 }
 
-// ─── Fase 3: Coarse-to-Fine result normalizer ─────────────────────
-// Converts the rag_coarse_to_fine_search() RPC result into the
-// MatchedChunk[] shape that fetchAdjacentChunks() and assembleContext()
-// already expect. This avoids duplicating downstream logic.
-//
-// Mapping:
-//   chunk_similarity  → similarity (primary metric for ordering)
-//   0                 → text_rank  (no FTS in coarse-to-fine)
-//   combined_score    → combined_score (0.3*sum + 0.7*chunk from RPC)
+// --- Fase 3: Coarse-to-Fine result normalizer ---------------------
 
 interface CoarseToFineRow {
   chunk_id: string;
@@ -333,11 +319,11 @@ function normalizeCoarseToFineResults(
   }));
 }
 
-// ─── Fase 6: Valid strategy values for client override ────────────
+// --- Fase 6: Valid strategy values for client override ------------
 
 const VALID_STRATEGIES = ["auto", "standard", "multi_query", "hyde"] as const;
 
-// ─── Main route ─────────────────────────────────────────────────
+// --- Main route --------------------------------------------------
 
 aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -348,7 +334,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   if (!body?.message || typeof body.message !== "string")
     return err(c, "message is required (string)", 400);
 
-  // ── LA-03 FIX: Validate message length ──────────────────────
+  // -- LA-03 FIX: Validate message length ----------------------
   const message = (body.message as string).trim();
   if (message.length === 0)
     return err(c, "message cannot be empty", 400);
@@ -357,7 +343,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
 
   const summaryId = isUuid(body.summary_id) ? (body.summary_id as string) : null;
 
-  // ── LA-03 FIX: Truncate each history entry to 500 chars ─────
+  // -- LA-03 FIX: Truncate each history entry to 500 chars -----
   const history = Array.isArray(body.history)
     ? body.history.slice(-6).map((h: Record<string, string>) => ({
         role: h.role,
@@ -365,13 +351,13 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
       }))
     : [];
 
-  // ── Fase 6: Parse strategy override (D22) ───────────────────
+  // -- Fase 6: Parse strategy override (D22) -------------------
   const requestedStrategy = typeof body.strategy === "string" ? body.strategy : "auto";
   const strategyParam = VALID_STRATEGIES.includes(requestedStrategy as typeof VALID_STRATEGIES[number])
     ? requestedStrategy
     : "auto";
 
-  // ── Resolve institution ──────────────────────────────
+  // -- Resolve institution ------------------------------------
   // PF-05: These DB queries validate the JWT cryptographically.
   // They MUST happen before any Gemini API call.
   let institutionId: string | null = null;
@@ -403,18 +389,27 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   if (isDenied(roleCheck))
     return err(c, roleCheck.message, roleCheck.status);
 
-  // ── T-03: Start latency timer ────────────────────────────
+  // -- T-03: Start latency timer ------------------------------
   const t0 = Date.now();
 
-  // ── Phase 5: Build augmented search query ───────────────────
+  // -- SEC-01 FIX: Admin client for SECURITY DEFINER RPCs -----
+  // rag_hybrid_search and rag_coarse_to_fine_search are SECURITY DEFINER
+  // (bypass RLS). Using adminDb allows REVOKE EXECUTE FROM authenticated,
+  // closing cross-tenant data leak via PostgREST RPC.
+  // Other RPCs (resolve_parent_institution, get_student_knowledge_context)
+  // and table reads (memberships, chunks) keep using db (user RLS).
+  // See: https://github.com/Matraca130/axon-backend/issues/45
+  const adminDb = getAdminClient();
+
+  // -- Phase 5: Build augmented search query -------------------
   const { query: searchQuery, wasAugmented } = buildAugmentedQuery(message, history);
 
-  // ── Fase 6: Select retrieval strategy ──────────────────────
+  // -- Fase 6: Select retrieval strategy ----------------------
   const strategy: RetrievalStrategy = strategyParam === "auto"
     ? selectStrategy(message, summaryId, history.length)
     : strategyParam as RetrievalStrategy;
 
-  // ── RAG: embed, search, merge, re-rank ─────────────────────
+  // -- RAG: embed, search, merge, re-rank ---------------------
   let ragContext = "";
   let sourcesUsed: Array<{ chunk_id: string; summary_title: string; similarity: number }> = [];
   let contextChunksCount = 0;
@@ -423,13 +418,13 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   let strategyMeta: Record<string, unknown> = {};
 
   try {
-    // ── Fase 6: Execute strategy-specific embedding(s) ────────
+    // -- Fase 6: Execute strategy-specific embedding(s) --------
     const embeddingOutput = await executeRetrievalEmbedding(
       strategy, searchQuery,
     );
     strategyMeta = embeddingOutput.strategyMeta;
 
-    // ── Fase 6: Run search for each embedding, collect all results ──
+    // -- Fase 6: Run search for each embedding, collect all results --
     const allResultSets: MatchedChunk[][] = [];
 
     for (const { embedding } of embeddingOutput.embeddings) {
@@ -438,8 +433,9 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
       let matches: MatchedChunk[] = [];
 
       if (summaryId) {
-        // ── SCOPED: Hybrid search within specific summary ──────
-        const { data } = await db.rpc("rag_hybrid_search", {
+        // -- SCOPED: Hybrid search within specific summary ------
+        // SEC-01: Uses adminDb (service_role) - function is SECURITY DEFINER
+        const { data } = await adminDb.rpc("rag_hybrid_search", {
           p_query_embedding: queryEmbeddingJson,
           p_query_text: message,
           p_institution_id: institutionId,
@@ -450,8 +446,9 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
         matches = (data || []) as MatchedChunk[];
         searchType = "hybrid";
       } else {
-        // ── BROAD: Coarse-to-fine search (Fase 3) ──────────────
-        const { data: c2fData, error: c2fErr } = await db.rpc(
+        // -- BROAD: Coarse-to-fine search (Fase 3) --------------
+        // SEC-01: Uses adminDb (service_role) - function is SECURITY DEFINER
+        const { data: c2fData, error: c2fErr } = await adminDb.rpc(
           "rag_coarse_to_fine_search",
           {
             p_query_embedding: queryEmbeddingJson,
@@ -466,7 +463,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
           matches = normalizeCoarseToFineResults(c2fData as CoarseToFineRow[]);
           searchType = "coarse_to_fine";
         } else {
-          // ── FALLBACK: hybrid search (unscoped) ───────────────
+          // -- FALLBACK: hybrid search (unscoped) ---------------
           if (c2fErr) {
             console.warn(
               "[RAG Chat] Coarse-to-fine RPC failed, using hybrid fallback:",
@@ -474,7 +471,8 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
             );
           }
 
-          const { data: hybridData } = await db.rpc("rag_hybrid_search", {
+          // SEC-01: Uses adminDb (service_role) - function is SECURITY DEFINER
+          const { data: hybridData } = await adminDb.rpc("rag_hybrid_search", {
             p_query_embedding: queryEmbeddingJson,
             p_query_text: message,
             p_institution_id: institutionId,
@@ -490,10 +488,10 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
       allResultSets.push(matches);
     }
 
-    // ── Fase 6: Merge results from all embeddings (dedup) ───────
+    // -- Fase 6: Merge results from all embeddings (dedup) -------
     let mergedMatches = mergeSearchResults(allResultSets);
 
-    // ── Fase 6: Re-rank via Gemini-as-Judge (D20: always apply) ──
+    // -- Fase 6: Re-rank via Gemini-as-Judge (D20: always apply) --
     if (mergedMatches.length > 1) {
       try {
         mergedMatches = await rerankWithGemini(message, mergedMatches, 5);
@@ -518,7 +516,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     console.warn("[RAG Chat] Search failed, continuing without context:", e);
   }
 
-  // ── Fetch student profile ──────────────────────────────
+  // -- Fetch student profile ----------------------------------
   let profileContext = "";
   try {
     const { data: profile } = await db.rpc("get_student_knowledge_context", {
@@ -532,7 +530,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     // Profile not available, continue without it
   }
 
-  // ── Build conversation ───────────────────────────────
+  // -- Build conversation -------------------------------------
   const systemPrompt = `Eres un tutor educativo amable y preciso.
 Responde basandote en el contexto proporcionado del material de estudio.
 Si no tienes informacion suficiente, dilo honestamente.
@@ -545,7 +543,7 @@ Responde en espanol.${profileContext}`;
 
   const userPrompt = `${conversationHistory ? `Conversacion previa:\n${conversationHistory}\n\n` : ""}Alumno: ${message}${ragContext}`;
 
-  // ── Generate response ────────────────────────────────
+  // -- Generate response --------------------------------------
   try {
     const result = await generateText({
       prompt: userPrompt,
@@ -554,7 +552,7 @@ Responde en espanol.${profileContext}`;
       maxTokens: 1500,
     });
 
-    // ── T-03 + Fase 3 + Fase 6: Compute metrics and log query ──
+    // -- T-03 + Fase 3 + Fase 6: Compute metrics and log query --
     const latencyMs = Date.now() - t0;
     const sims = sourcesUsed.map((s) => s.similarity);
     const logId = crypto.randomUUID();
