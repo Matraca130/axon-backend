@@ -24,6 +24,9 @@
  *
  * Coherence fixes applied:
  *   INC-6 FIX: Include kw_prof_notes in prompt for better pedagogical quality
+ *
+ * Normalization fixes applied:
+ *   NORM-1 FIX: normalizeDifficulty() + normalizeQuestionType() from shared ai-normalizers.ts
  */
 
 import { Hono } from "npm:hono";
@@ -36,6 +39,7 @@ import {
   ALL_ROLES,
 } from "../../auth-helpers.ts";
 import { generateText, parseGeminiJson, GENERATE_MODEL } from "../../gemini.ts";
+import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
 
 export const aiGenerateRoutes = new Hono();
 
@@ -74,7 +78,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
   const related = body.related !== false;
 
   // ── BUG-3 FIX: Institution scoping ─────────────────────
-  // ⚠️ PF-05: This Supabase query MUST happen before the Gemini API call.
+  // \u26a0\ufe0f PF-05: This Supabase query MUST happen before the Gemini API call.
   // authenticate() only decodes the JWT locally. The cryptographic signature
   // is validated by PostgREST when this RPC executes. Moving the Gemini call
   // before this point would allow forged JWTs to consume API credits.
@@ -198,7 +202,7 @@ Responde SOLO con JSON valido, sin explicaciones adicionales.`;
 
     userPrompt = `Genera UNA pregunta de quiz sobre:
 Tema: ${summary.title}
-Keyword: ${keyword?.name || "general"} — ${keyword?.definition || ""}
+Keyword: ${keyword?.name || "general"} \u2014 ${keyword?.definition || ""}
 ${subtopicName ? `Subtema: ${subtopicName}` : ""}
 ${blockContext}
 Contenido relevante: ${contentSnippet}
@@ -208,13 +212,15 @@ ${wrongCtx}
 
 Responde en JSON con este schema exacto:
 {
-  "question_type": "multiple_choice",
+  "question_type": "mcq",
   "question": "texto de la pregunta",
   "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
   "correct_answer": "A",
   "explanation": "por que es correcta",
-  "difficulty": "easy|medium|hard"
-}`;
+  "difficulty": 1
+}
+Nota: question_type debe ser "mcq", "true_false", "fill_blank" o "open".
+Nota: difficulty debe ser un entero: 1 (facil), 2 (medio), 3 (dificil).`;
   } else {
     // flashcard
     const scope = related
@@ -222,7 +228,7 @@ Responde en JSON con este schema exacto:
       : `Genera una flashcard GENERAL del resumen "${summary.title}".`;
 
     userPrompt = `${scope}
-Keyword: ${keyword?.name || "general"} — ${keyword?.definition || ""}
+Keyword: ${keyword?.name || "general"} \u2014 ${keyword?.definition || ""}
 ${subtopicName ? `Subtema: ${subtopicName}` : ""}
 ${blockContext}
 Contenido relevante: ${contentSnippet}
@@ -256,12 +262,12 @@ Responde en JSON con este schema exacto:
           summary_id: summaryId,
           keyword_id: keywordId,
           subtopic_id: subtopicId,
-          question_type: g.question_type || "multiple_choice",
+          question_type: normalizeQuestionType(g.question_type),
           question: g.question,
           options: g.options || null,
           correct_answer: g.correct_answer,
           explanation: g.explanation || null,
-          difficulty: g.difficulty || "medium",
+          difficulty: normalizeDifficulty(g.difficulty),
           source: "ai",
           created_by: user.id,  // BUG-1 FIX
         })

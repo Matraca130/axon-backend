@@ -43,6 +43,9 @@
  *   BUG-1: created_by = user.id on all inserts.
  *   BUG-3: Institution scoping via resolve_parent_institution().
  *
+ * Normalization fixes applied:
+ *   NORM-1 FIX: normalizeDifficulty() + normalizeQuestionType() from shared ai-normalizers.ts
+ *
  * Rate limit architecture:
  *   index.ts middleware → skips /ai/pre-generate (like /ai/report)
  *   This endpoint → calls check_rate_limit() internally with its own key.
@@ -59,6 +62,7 @@ import {
   CONTENT_WRITE_ROLES,
 } from "../../auth-helpers.ts";
 import { generateText, parseGeminiJson, GENERATE_MODEL } from "../../gemini.ts";
+import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
 
 export const aiPreGenerateRoutes = new Hono();
 
@@ -270,7 +274,7 @@ aiPreGenerateRoutes.post(
         if (action === "quiz_question") {
           userPrompt = `Genera UNA pregunta de quiz sobre:
 Tema: ${summary.title}
-Keyword: ${kw.name}${kw.definition ? ` — ${kw.definition}` : ""}
+Keyword: ${kw.name}${kw.definition ? ` \u2014 ${kw.definition}` : ""}
 ${profNotesContext}
 Contenido relevante: ${contentSnippet}
 
@@ -278,18 +282,20 @@ Genera una pregunta de dificultad media, clara y educativa.
 
 Responde en JSON con este schema exacto:
 {
-  "question_type": "multiple_choice",
+  "question_type": "mcq",
   "question": "texto de la pregunta",
   "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
   "correct_answer": "A",
   "explanation": "por que es correcta",
-  "difficulty": "medium"
-}`;
+  "difficulty": 2
+}
+Nota: question_type debe ser "mcq", "true_false", "fill_blank" o "open".
+Nota: difficulty debe ser un entero: 1 (facil), 2 (medio), 3 (dificil).`;
         } else {
           userPrompt = `Genera una flashcard sobre el keyword "${kw.name}".
 
 Tema: ${summary.title}
-Keyword: ${kw.name}${kw.definition ? ` — ${kw.definition}` : ""}
+Keyword: ${kw.name}${kw.definition ? ` \u2014 ${kw.definition}` : ""}
 ${profNotesContext}
 Contenido relevante: ${contentSnippet}
 
@@ -318,18 +324,19 @@ Responde en JSON con este schema exacto:
         totalTokensOutput += result.tokensUsed.output;
 
         // 7d. Insert into DB (BUG-1: created_by = user.id)
+        // NORM-1 FIX: Use shared normalizers for type safety
         if (action === "quiz_question") {
           const { data: inserted, error: insertErr } = await db
             .from("quiz_questions")
             .insert({
               summary_id: summaryId,
               keyword_id: kw.id,
-              question_type: g.question_type || "multiple_choice",
+              question_type: normalizeQuestionType(g.question_type),
               question: g.question,
               options: g.options || null,
               correct_answer: g.correct_answer,
               explanation: g.explanation || null,
-              difficulty: g.difficulty || "medium",
+              difficulty: normalizeDifficulty(g.difficulty),
               source: "ai",
               created_by: user.id,
             })

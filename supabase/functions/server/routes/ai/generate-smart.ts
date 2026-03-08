@@ -52,6 +52,7 @@ import {
   ALL_ROLES,
 } from "../../auth-helpers.ts";
 import { generateText, parseGeminiJson, GENERATE_MODEL } from "../../gemini.ts";
+import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
 
 export const aiGenerateSmartRoutes = new Hono();
 
@@ -94,27 +95,6 @@ function adaptiveTemperature(pKnow: number): number {
   if (pKnow < 0.3) return 0.5;
   if (pKnow < 0.7) return 0.7;
   return 0.85;
-}
-
-// ── Normalizers: Gemini output → DB-safe values ───────────────
-// Gemini may return difficulty as "easy"/"medium"/"hard" (strings)
-// but the DB column is INTEGER (1/2/3). This mapper ensures safety.
-const DIFFICULTY_MAP: Record<string, number> = { easy: 1, medium: 2, hard: 3 };
-function normalizeDifficulty(d: unknown): number {
-  if (typeof d === "number" && [1, 2, 3].includes(d)) return d;
-  if (typeof d === "string") return DIFFICULTY_MAP[d.toLowerCase()] ?? 2;
-  return 2; // default medium
-}
-
-// Gemini may return "multiple_choice" but DB expects "mcq" | "true_false" | "fill_blank" | "open"
-function normalizeQuestionType(qt: unknown): string {
-  if (typeof qt !== "string") return "mcq";
-  const lower = qt.toLowerCase().replace(/\s+/g, "_");
-  if (lower === "multiple_choice" || lower === "mcq") return "mcq";
-  if (lower === "true_false") return "true_false";
-  if (lower === "fill_blank" || lower === "fill_in_the_blank") return "fill_blank";
-  if (lower === "open" || lower === "open_ended") return "open";
-  return "mcq"; // default
 }
 
 // ── RPC result type ───────────────────────────────────────────
@@ -197,7 +177,7 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
     const quizTitle =
       typeof body.quiz_title === "string" && body.quiz_title.trim()
         ? body.quiz_title.trim()
-        : `Quiz Adaptativo — ${new Date().toISOString().substring(0, 16).replace("T", " ")}`;
+        : `Quiz Adaptativo \u2014 ${new Date().toISOString().substring(0, 16).replace("T", " ")}`;
 
     const { data: newQuiz, error: quizCreateErr } = await db
       .from("quizzes")
@@ -400,7 +380,7 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
 Seleccion automatica: ${reasonText}
 
 Tema: ${chosen.summary_title}
-Keyword: ${chosen.keyword_name}${chosen.keyword_def ? ` — ${chosen.keyword_def}` : ""}
+Keyword: ${chosen.keyword_name}${chosen.keyword_def ? ` \u2014 ${chosen.keyword_def}` : ""}
 ${chosen.subtopic_name ? `Subtema: ${chosen.subtopic_name}` : ""}
 ${profNotesContext}
 Contenido relevante: ${contentSnippet}
@@ -432,7 +412,7 @@ Nota: difficulty debe ser un entero: 1 (facil), 2 (medio), 3 (dificil).`;
 
 Seleccion automatica: ${reasonText}
 
-Keyword: ${chosen.keyword_name}${chosen.keyword_def ? ` — ${chosen.keyword_def}` : ""}
+Keyword: ${chosen.keyword_name}${chosen.keyword_def ? ` \u2014 ${chosen.keyword_def}` : ""}
 ${chosen.subtopic_name ? `Subtema: ${chosen.subtopic_name}` : ""}
 ${profNotesContext}
 Contenido relevante: ${contentSnippet}
@@ -686,7 +666,7 @@ Responde en JSON con este schema exacto:
 Seleccion automatica: ${reasonText}
 
 Tema: ${target.summary_title}
-Keyword: ${target.keyword_name}${target.keyword_def ? ` — ${target.keyword_def}` : ""}
+Keyword: ${target.keyword_name}${target.keyword_def ? ` \u2014 ${target.keyword_def}` : ""}
 ${target.subtopic_name ? `Subtema: ${target.subtopic_name}` : ""}
 ${profNotesContext}
 Contenido relevante: ${contentSnippet}
@@ -718,7 +698,7 @@ Nota: difficulty debe ser un entero: 1 (facil), 2 (medio), 3 (dificil).`;
 
 Seleccion automatica: ${reasonText}
 
-Keyword: ${target.keyword_name}${target.keyword_def ? ` — ${target.keyword_def}` : ""}
+Keyword: ${target.keyword_name}${target.keyword_def ? ` \u2014 ${target.keyword_def}` : ""}
 ${target.subtopic_name ? `Subtema: ${target.subtopic_name}` : ""}
 ${profNotesContext}
 Contenido relevante: ${contentSnippet}
