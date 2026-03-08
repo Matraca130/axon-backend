@@ -1,19 +1,29 @@
 /**
- * routes/ai/generate-smart.ts — Adaptive AI content generation (Fase 8A)
+ * routes/ai/generate-smart.ts — Adaptive AI content generation (Fase 8A + 8E)
  *
  * POST /ai/generate-smart
  *   action: "quiz_question" | "flashcard" (required)
  *   institution_id: UUID (optional, scopes to one institution)
  *   related: boolean (optional, default true, for flashcards)
+ *   summary_id: UUID (optional, Fase 8E: scopes to one summary)
+ *   count: number (optional, Fase 8E: 1-10, default 1)
+ *   quiz_id: UUID (optional, Fase 8E: auto-link questions to quiz)
  *
  * Unlike POST /ai/generate which requires the client to provide
  * summary_id + keyword_id, this endpoint AUTO-SELECTS the best
  * concept to study based on the student's BKT mastery profile.
  *
- * Flow:
- *   1. RPC get_smart_generate_target() → top 5 keyword targets
+ * Flow (count=1, legacy):
+ *   1. RPC get_smart_generate_target() → top targets
  *   2. Dedup check: skip keywords with recent AI content (2h window)
  *   3. Pick best target → build adaptive prompt → Gemini → insert → return
+ *
+ * Flow (count>1, Fase 8E bulk):
+ *   1. RPC get_smart_generate_target(p_limit=count+5) → targets with buffer
+ *   2. Dedup check: filter out recently generated keywords
+ *   3. Pre-fetch shared context (summary, institution, profile)
+ *   4. Sequential Gemini calls per target (D15 pattern from pre-generate)
+ *   5. Partial-success response (D16 pattern from pre-generate)
  *
  * Key differences from /ai/generate:
  *   - Client sends NO content IDs — the server chooses the best target
@@ -21,6 +31,11 @@
  *   - Temperature is adaptive (lower for low mastery, higher for high)
  *   - No wrong_answer/block_id support (those are manual-generate features)
  *   - Response includes _smart metadata (target selection info)
+ *
+ * Fase 8E additions:
+ *   - summary_id: scopes RPC to one summary (for same-summary adaptive quiz)
+ *   - count: generates up to 10 items in one request (sequential Gemini calls)
+ *   - quiz_id: auto-links generated quiz_questions to a quiz entity
  *
  * Architectural decisions: D1, D2, D3, D8, D10-D13
  * Error prevention: E1, E2, E7, E8, E9
@@ -30,7 +45,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
-import { isUuid, isOneOf } from "../../validate.ts";
+import { isUuid, isOneOf, isNonNegInt } from "../../validate.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -42,8 +57,10 @@ export const aiGenerateSmartRoutes = new Hono();
 
 const ACTIONS = ["quiz_question", "flashcard"] as const;
 
+// Fase 8E: Max items per bulk request
+const MAX_BULK_COUNT = 10;
+
 // ── D12: Local truncateAtWord (Fase 3 not yet on main) ────────
-// LA-07 pattern: truncate respecting word boundaries.
 function truncateAtWord(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
   const truncated = text.substring(0, maxLen);
@@ -73,9 +90,6 @@ function reasonToText(reason: string, pKnow: number): string {
 }
 
 // ── D10: Adaptive temperature based on mastery ────────────────
-// Low mastery → clearer, more deterministic (0.5)
-// Medium mastery → balanced (0.7)
-// High mastery → creative, challenging (0.85)
 function adaptiveTemperature(pKnow: number): number {
   if (pKnow < 0.3) return 0.5;
   if (pKnow < 0.7) return 0.7;
@@ -97,6 +111,27 @@ interface SmartTarget {
   primary_reason: string;
 }
 
+// ── Fase 8E: Bulk response types ─────────────────────────────
+interface BulkGeneratedItem {
+  type: string;
+  id: string;
+  keyword_id: string;
+  keyword_name: string;
+  summary_id: string;
+  _smart: {
+    p_know: number;
+    need_score: number;
+    primary_reason: string;
+    target_subtopic: string | null;
+  };
+}
+
+interface BulkErrorItem {
+  keyword_id: string;
+  keyword_name: string;
+  error: string;
+}
+
 aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => {
   // ── Step 1: Auth (PF-05: must happen before Gemini) ────────
   const auth = await authenticate(c);
@@ -115,12 +150,32 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
     : null;
   const related = body.related !== false;
 
-  // ── Step 2: RPC get_smart_generate_target (D1: top 5) ──────
+  // ── Fase 8E: New optional params ─────────────────────────────
+  const summaryId = isUuid(body.summary_id)
+    ? (body.summary_id as string)
+    : null;
+
+  let count = 1;
+  if (body.count !== undefined) {
+    if (!isNonNegInt(body.count) || (body.count as number) < 1)
+      return err(c, `count must be an integer between 1 and ${MAX_BULK_COUNT}`, 400);
+    count = Math.min(body.count as number, MAX_BULK_COUNT);
+  }
+
+  const quizId = isUuid(body.quiz_id)
+    ? (body.quiz_id as string)
+    : null;
+
+  // ── Step 2: RPC get_smart_generate_target ───────────────────
+  // Fase 8E: Pass p_summary_id and p_limit (with dedup buffer)
+  const rpcLimit = Math.min(count + 5, 20);
   const { data: targets, error: rpcError } = await db.rpc(
     "get_smart_generate_target",
     {
       p_student_id: user.id,
       p_institution_id: institutionId,
+      p_summary_id: summaryId,
+      p_limit: rpcLimit,
     },
   );
 
@@ -129,18 +184,16 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
     return err(c, `Smart target selection failed: ${rpcError.message}`, 500);
   }
 
-  // E2 + E8: No targets available (no memberships or empty institution)
+  // E2 + E8: No targets available
   if (!targets || targets.length === 0) {
-    return err(
-      c,
-      "No study material available. Ensure you have an active membership " +
-        "and your courses contain summaries with keywords.",
-      404,
-    );
+    const scopeMsg = summaryId
+      ? "No keywords found for this summary."
+      : "No study material available. Ensure you have an active membership " +
+        "and your courses contain summaries with keywords.";
+    return err(c, scopeMsg, 404);
   }
 
   // ── Step 3: Dedup check (D3, D11: by keyword_id, 2h window) ─
-  // Avoid generating content for a concept that was recently generated.
   const targetKeywordIds = (targets as SmartTarget[]).map(
     (t) => t.keyword_id,
   );
@@ -160,103 +213,97 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
     recentItems?.map((r: { keyword_id: string }) => r.keyword_id) ?? [],
   );
 
-  // Pick the first target that hasn't been generated recently.
-  // Fallback to targets[0] if ALL have recent content (graceful degradation).
-  const chosen: SmartTarget =
-    (targets as SmartTarget[]).find(
-      (t) => !recentKeywordIds.has(t.keyword_id),
-    ) ?? (targets[0] as SmartTarget);
+  // ════════════════════════════════════════════════════════════
+  // SINGLE-ITEM PATH (count=1) — Legacy behavior preserved
+  // ════════════════════════════════════════════════════════════
+  if (count === 1) {
+    // Pick the first target that hasn't been generated recently.
+    // Fallback to targets[0] if ALL have recent content.
+    const chosen: SmartTarget =
+      (targets as SmartTarget[]).find(
+        (t) => !recentKeywordIds.has(t.keyword_id),
+      ) ?? (targets[0] as SmartTarget);
 
-  // ── Step 4: Institution scoping (PF-05, BUG-3 pattern) ─────
-  // ⚠️ This DB call MUST happen before the Gemini API call.
-  // authenticate() decodes JWT locally; the RPC validates the
-  // cryptographic signature via PostgREST.
-  const { data: resolvedInstId } = await db.rpc(
-    "resolve_parent_institution",
-    {
-      p_table: "summaries",
-      p_id: chosen.summary_id,
-    },
-  );
-  if (!resolvedInstId)
-    return err(c, "Summary not found or inaccessible", 404);
+    // ── Step 4: Institution scoping (PF-05, BUG-3) ─────────
+    const { data: resolvedInstId } = await db.rpc(
+      "resolve_parent_institution",
+      { p_table: "summaries", p_id: chosen.summary_id },
+    );
+    if (!resolvedInstId)
+      return err(c, "Summary not found or inaccessible", 404);
 
-  const roleCheck = await requireInstitutionRole(
-    db,
-    user.id,
-    resolvedInstId as string,
-    ALL_ROLES,
-  );
-  if (isDenied(roleCheck))
-    return err(c, roleCheck.message, roleCheck.status);
+    const roleCheck = await requireInstitutionRole(
+      db,
+      user.id,
+      resolvedInstId as string,
+      ALL_ROLES,
+    );
+    if (isDenied(roleCheck))
+      return err(c, roleCheck.message, roleCheck.status);
 
-  // ── Step 5: Fetch context for prompt ───────────────────────
-  // 5a. Summary content (for the prompt snippet)
-  const { data: summary } = await db
-    .from("summaries")
-    .select("content_markdown")
-    .eq("id", chosen.summary_id)
-    .single();
+    // ── Step 5: Fetch context for prompt ─────────────────────
+    const { data: summary } = await db
+      .from("summaries")
+      .select("content_markdown")
+      .eq("id", chosen.summary_id)
+      .single();
 
-  const contentSnippet = truncateAtWord(
-    summary?.content_markdown || "",
-    1500,
-  );
+    const contentSnippet = truncateAtWord(
+      summary?.content_markdown || "",
+      1500,
+    );
 
-  // 5b. Professor notes (INC-6 pattern from generate.ts)
-  let profNotesContext = "";
-  const { data: profNotes } = await db
-    .from("kw_prof_notes")
-    .select("note")
-    .eq("keyword_id", chosen.keyword_id)
-    .limit(3);
+    let profNotesContext = "";
+    const { data: profNotes } = await db
+      .from("kw_prof_notes")
+      .select("note")
+      .eq("keyword_id", chosen.keyword_id)
+      .limit(3);
 
-  if (profNotes && profNotes.length > 0) {
-    profNotesContext =
-      "\nNotas del profesor: " +
-      profNotes.map((n: { note: string }) => n.note).join("; ");
-  }
-
-  // 5c. Student knowledge profile
-  let profileContext = "";
-  const { data: profile } = await db.rpc("get_student_knowledge_context", {
-    p_student_id: user.id,
-    p_institution_id: resolvedInstId as string,
-  });
-  if (profile) {
-    profileContext = `\nPerfil del alumno: ${JSON.stringify(profile)}`;
-  }
-
-  // 5d. BKT state for this subtopic (if available)
-  let bktContext = "";
-  if (chosen.subtopic_id) {
-    const { data: bkt } = await db
-      .from("bkt_states")
-      .select("p_know, total_attempts, correct_attempts")
-      .eq("student_id", user.id)
-      .eq("subtopic_id", chosen.subtopic_id)
-      .maybeSingle();
-    if (bkt) {
-      bktContext = `\nBKT del subtema: p_know=${bkt.p_know}, intentos=${bkt.total_attempts}, correctos=${bkt.correct_attempts}`;
+    if (profNotes && profNotes.length > 0) {
+      profNotesContext =
+        "\nNotas del profesor: " +
+        profNotes.map((n: { note: string }) => n.note).join("; ");
     }
-  }
 
-  // ── Step 6: Build adaptive prompt ──────────────────────────
-  const reasonText = reasonToText(
-    chosen.primary_reason,
-    Number(chosen.p_know),
-  );
-  const pKnow = Number(chosen.p_know);
+    let profileContext = "";
+    const { data: profile } = await db.rpc("get_student_knowledge_context", {
+      p_student_id: user.id,
+      p_institution_id: resolvedInstId as string,
+    });
+    if (profile) {
+      profileContext = `\nPerfil del alumno: ${JSON.stringify(profile)}`;
+    }
 
-  const systemPrompt =
-    "Eres un tutor educativo adaptativo. Genera contenido " +
-    "personalizado segun el nivel de dominio del alumno.\n" +
-    "Responde SOLO con JSON valido, sin explicaciones adicionales.";
+    let bktContext = "";
+    if (chosen.subtopic_id) {
+      const { data: bkt } = await db
+        .from("bkt_states")
+        .select("p_know, total_attempts, correct_attempts")
+        .eq("student_id", user.id)
+        .eq("subtopic_id", chosen.subtopic_id)
+        .maybeSingle();
+      if (bkt) {
+        bktContext = `\nBKT del subtema: p_know=${bkt.p_know}, intentos=${bkt.total_attempts}, correctos=${bkt.correct_attempts}`;
+      }
+    }
 
-  let userPrompt = "";
+    // ── Step 6: Build adaptive prompt ────────────────────────
+    const reasonText = reasonToText(
+      chosen.primary_reason,
+      Number(chosen.p_know),
+    );
+    const pKnow = Number(chosen.p_know);
 
-  if (action === "quiz_question") {
-    userPrompt = `Genera UNA pregunta de quiz adaptada al nivel del alumno.
+    const systemPrompt =
+      "Eres un tutor educativo adaptativo. Genera contenido " +
+      "personalizado segun el nivel de dominio del alumno.\n" +
+      "Responde SOLO con JSON valido, sin explicaciones adicionales.";
+
+    let userPrompt = "";
+
+    if (action === "quiz_question") {
+      userPrompt = `Genera UNA pregunta de quiz adaptada al nivel del alumno.
 
 Seleccion automatica: ${reasonText}
 
@@ -282,13 +329,12 @@ Responde en JSON con este schema exacto:
   "explanation": "por que es correcta",
   "difficulty": "easy|medium|hard"
 }`;
-  } else {
-    // flashcard
-    const scope = related
-      ? `Genera una flashcard RELACIONADA al keyword "${chosen.keyword_name}".`
-      : `Genera una flashcard GENERAL del resumen "${chosen.summary_title}".`;
+    } else {
+      const scope = related
+        ? `Genera una flashcard RELACIONADA al keyword "${chosen.keyword_name}".`
+        : `Genera una flashcard GENERAL del resumen "${chosen.summary_title}".`;
 
-    userPrompt = `${scope}
+      userPrompt = `${scope}
 
 Seleccion automatica: ${reasonText}
 
@@ -308,118 +354,428 @@ Responde en JSON con este schema exacto:
   "front": "pregunta o concepto",
   "back": "respuesta o explicacion"
 }`;
-  }
-
-  // ── Step 7: Gemini call + insert ───────────────────────────
-  try {
-    const result = await generateText({
-      prompt: userPrompt,
-      systemPrompt,
-      jsonMode: true,
-      temperature: adaptiveTemperature(pKnow), // D10
-      maxTokens: 1024,
-    });
-
-    const generated = parseGeminiJson(result.text);
-
-    // ── Step 8: Insert into DB ─────────────────────────────
-    if (action === "quiz_question") {
-      const g = generated as Record<string, unknown>;
-      const { data: inserted, error: insertErr } = await db
-        .from("quiz_questions")
-        .insert({
-          summary_id: chosen.summary_id,
-          keyword_id: chosen.keyword_id,
-          subtopic_id: chosen.subtopic_id,
-          question_type: g.question_type || "multiple_choice",
-          question: g.question,
-          options: g.options || null,
-          correct_answer: g.correct_answer,
-          explanation: g.explanation || null,
-          difficulty: g.difficulty || "medium",
-          source: "ai",
-          created_by: user.id, // BUG-1 pattern
-        })
-        .select()
-        .single();
-
-      if (insertErr)
-        return err(
-          c,
-          `Insert quiz_question failed: ${insertErr.message}`,
-          500,
-        );
-
-      return ok(
-        c,
-        {
-          ...inserted,
-          _meta: {
-            model: GENERATE_MODEL, // D-18 pattern
-            tokens: result.tokensUsed,
-          },
-          _smart: {
-            target_keyword: chosen.keyword_name,
-            target_summary: chosen.summary_title,
-            target_subtopic: chosen.subtopic_name,
-            p_know: pKnow,
-            need_score: Number(chosen.need_score),
-            primary_reason: chosen.primary_reason,
-            was_deduped: recentKeywordIds.has(chosen.keyword_id),
-            candidates_evaluated: (targets as SmartTarget[]).length,
-          },
-        },
-        201,
-      );
-    } else {
-      // flashcard
-      const g = generated as Record<string, unknown>;
-      const { data: inserted, error: insertErr } = await db
-        .from("flashcards")
-        .insert({
-          summary_id: chosen.summary_id,
-          keyword_id: chosen.keyword_id,
-          subtopic_id: chosen.subtopic_id,
-          front: g.front,
-          back: g.back,
-          source: "ai",
-          created_by: user.id, // BUG-1 pattern
-        })
-        .select()
-        .single();
-
-      if (insertErr)
-        return err(
-          c,
-          `Insert flashcard failed: ${insertErr.message}`,
-          500,
-        );
-
-      return ok(
-        c,
-        {
-          ...inserted,
-          _meta: {
-            model: GENERATE_MODEL, // D-18 pattern
-            tokens: result.tokensUsed,
-            related,
-          },
-          _smart: {
-            target_keyword: chosen.keyword_name,
-            target_summary: chosen.summary_title,
-            target_subtopic: chosen.subtopic_name,
-            p_know: pKnow,
-            need_score: Number(chosen.need_score),
-            primary_reason: chosen.primary_reason,
-            was_deduped: recentKeywordIds.has(chosen.keyword_id),
-            candidates_evaluated: (targets as SmartTarget[]).length,
-          },
-        },
-        201,
-      );
     }
-  } catch (e) {
-    console.error("[GenerateSmart] Gemini error:", e);
-    return err(c, `AI generation failed: ${(e as Error).message}`, 500);
+
+    // ── Step 7: Gemini call + insert ─────────────────────────
+    try {
+      const result = await generateText({
+        prompt: userPrompt,
+        systemPrompt,
+        jsonMode: true,
+        temperature: adaptiveTemperature(pKnow),
+        maxTokens: 1024,
+      });
+
+      const generated = parseGeminiJson(result.text);
+
+      if (action === "quiz_question") {
+        const g = generated as Record<string, unknown>;
+        const { data: inserted, error: insertErr } = await db
+          .from("quiz_questions")
+          .insert({
+            summary_id: chosen.summary_id,
+            keyword_id: chosen.keyword_id,
+            subtopic_id: chosen.subtopic_id,
+            question_type: g.question_type || "multiple_choice",
+            question: g.question,
+            options: g.options || null,
+            correct_answer: g.correct_answer,
+            explanation: g.explanation || null,
+            difficulty: g.difficulty || "medium",
+            source: "ai",
+            created_by: user.id,
+            ...(quizId && { quiz_id: quizId }), // Fase 8E
+          })
+          .select()
+          .single();
+
+        if (insertErr)
+          return err(c, `Insert quiz_question failed: ${insertErr.message}`, 500);
+
+        return ok(
+          c,
+          {
+            ...inserted,
+            _meta: {
+              model: GENERATE_MODEL,
+              tokens: result.tokensUsed,
+            },
+            _smart: {
+              target_keyword: chosen.keyword_name,
+              target_summary: chosen.summary_title,
+              target_subtopic: chosen.subtopic_name,
+              p_know: pKnow,
+              need_score: Number(chosen.need_score),
+              primary_reason: chosen.primary_reason,
+              was_deduped: recentKeywordIds.has(chosen.keyword_id),
+              candidates_evaluated: (targets as SmartTarget[]).length,
+            },
+          },
+          201,
+        );
+      } else {
+        const g = generated as Record<string, unknown>;
+        const { data: inserted, error: insertErr } = await db
+          .from("flashcards")
+          .insert({
+            summary_id: chosen.summary_id,
+            keyword_id: chosen.keyword_id,
+            subtopic_id: chosen.subtopic_id,
+            front: g.front,
+            back: g.back,
+            source: "ai",
+            created_by: user.id,
+          })
+          .select()
+          .single();
+
+        if (insertErr)
+          return err(c, `Insert flashcard failed: ${insertErr.message}`, 500);
+
+        return ok(
+          c,
+          {
+            ...inserted,
+            _meta: {
+              model: GENERATE_MODEL,
+              tokens: result.tokensUsed,
+              related,
+            },
+            _smart: {
+              target_keyword: chosen.keyword_name,
+              target_summary: chosen.summary_title,
+              target_subtopic: chosen.subtopic_name,
+              p_know: pKnow,
+              need_score: Number(chosen.need_score),
+              primary_reason: chosen.primary_reason,
+              was_deduped: recentKeywordIds.has(chosen.keyword_id),
+              candidates_evaluated: (targets as SmartTarget[]).length,
+            },
+          },
+          201,
+        );
+      }
+    } catch (e) {
+      console.error("[GenerateSmart] Gemini error:", e);
+      return err(c, `AI generation failed: ${(e as Error).message}`, 500);
+    }
   }
+
+  // ════════════════════════════════════════════════════════════
+  // BULK PATH (count > 1) — Fase 8E
+  // Sequential Gemini calls with partial-success (D15, D16)
+  // ════════════════════════════════════════════════════════════
+
+  // Select targets: prefer non-deduped, take up to `count`
+  const allTargets = targets as SmartTarget[];
+  const freshTargets = allTargets.filter(
+    (t) => !recentKeywordIds.has(t.keyword_id),
+  );
+  // Use fresh targets first; if not enough, pad with deduped ones (graceful)
+  const selectedTargets = freshTargets.length >= count
+    ? freshTargets.slice(0, count)
+    : [
+        ...freshTargets,
+        ...allTargets
+          .filter((t) => recentKeywordIds.has(t.keyword_id))
+          .slice(0, count - freshTargets.length),
+      ];
+
+  // ── Pre-fetch shared context ───────────────────────────────
+  // Cache summary content and institution IDs by summary_id.
+  // When summary_id is provided, all targets share one summary → 1 fetch.
+  // When global, targets may span multiple summaries → fetch per unique.
+  const summaryContentCache = new Map<string, string>(); // summary_id -> content_markdown
+  const institutionIdCache = new Map<string, string>();   // summary_id -> institution_id
+
+  const uniqueSummaryIds = [...new Set(selectedTargets.map((t) => t.summary_id))];
+
+  for (const sid of uniqueSummaryIds) {
+    // PF-05: Institution check BEFORE any Gemini call
+    const { data: instId } = await db.rpc("resolve_parent_institution", {
+      p_table: "summaries",
+      p_id: sid,
+    });
+    if (!instId) {
+      return err(c, `Summary ${sid} not found or inaccessible`, 404);
+    }
+
+    const roleCheck = await requireInstitutionRole(
+      db,
+      user.id,
+      instId as string,
+      ALL_ROLES,
+    );
+    if (isDenied(roleCheck)) {
+      return err(c, roleCheck.message, roleCheck.status);
+    }
+
+    institutionIdCache.set(sid, instId as string);
+
+    const { data: summaryData } = await db
+      .from("summaries")
+      .select("content_markdown")
+      .eq("id", sid)
+      .single();
+
+    summaryContentCache.set(
+      sid,
+      truncateAtWord(summaryData?.content_markdown || "", 1500),
+    );
+  }
+
+  // Fetch student profile once (same student for all targets)
+  let sharedProfileContext = "";
+  const firstInstId = institutionIdCache.values().next().value;
+  if (firstInstId) {
+    const { data: profile } = await db.rpc("get_student_knowledge_context", {
+      p_student_id: user.id,
+      p_institution_id: firstInstId,
+    });
+    if (profile) {
+      sharedProfileContext = `\nPerfil del alumno: ${JSON.stringify(profile)}`;
+    }
+  }
+
+  // ── Sequential generation loop (D15, D16) ──────────────────
+  const generatedItems: BulkGeneratedItem[] = [];
+  const bulkErrors: BulkErrorItem[] = [];
+  let totalTokensInput = 0;
+  let totalTokensOutput = 0;
+
+  const systemPrompt =
+    "Eres un tutor educativo adaptativo. Genera contenido " +
+    "personalizado segun el nivel de dominio del alumno.\n" +
+    "Responde SOLO con JSON valido, sin explicaciones adicionales.";
+
+  for (const target of selectedTargets) {
+    try {
+      const pKnow = Number(target.p_know);
+      const reasonText = reasonToText(target.primary_reason, pKnow);
+      const contentSnippet = summaryContentCache.get(target.summary_id) || "";
+
+      // Per-target: professor notes
+      let profNotesContext = "";
+      const { data: profNotes } = await db
+        .from("kw_prof_notes")
+        .select("note")
+        .eq("keyword_id", target.keyword_id)
+        .limit(3);
+
+      if (profNotes && profNotes.length > 0) {
+        profNotesContext =
+          "\nNotas del profesor: " +
+          profNotes.map((n: { note: string }) => n.note).join("; ");
+      }
+
+      // Per-target: BKT state
+      let bktContext = "";
+      if (target.subtopic_id) {
+        const { data: bkt } = await db
+          .from("bkt_states")
+          .select("p_know, total_attempts, correct_attempts")
+          .eq("student_id", user.id)
+          .eq("subtopic_id", target.subtopic_id)
+          .maybeSingle();
+        if (bkt) {
+          bktContext = `\nBKT del subtema: p_know=${bkt.p_know}, intentos=${bkt.total_attempts}, correctos=${bkt.correct_attempts}`;
+        }
+      }
+
+      // Build prompt (same structure as single path)
+      let userPrompt = "";
+
+      if (action === "quiz_question") {
+        userPrompt = `Genera UNA pregunta de quiz adaptada al nivel del alumno.
+
+Seleccion automatica: ${reasonText}
+
+Tema: ${target.summary_title}
+Keyword: ${target.keyword_name}${target.keyword_def ? ` — ${target.keyword_def}` : ""}
+${target.subtopic_name ? `Subtema: ${target.subtopic_name}` : ""}
+${profNotesContext}
+Contenido relevante: ${contentSnippet}
+${sharedProfileContext}
+${bktContext}
+
+Adapta la dificultad segun el dominio (${Math.round(pKnow * 100)}%):
+- Dominio bajo (<30%): preguntas conceptuales basicas, definiciones
+- Dominio medio (30-70%): preguntas de aplicacion y relacion entre conceptos
+- Dominio alto (>70%): preguntas de analisis, sintesis o casos limite
+
+Responde en JSON con este schema exacto:
+{
+  "question_type": "multiple_choice",
+  "question": "texto de la pregunta",
+  "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
+  "correct_answer": "A",
+  "explanation": "por que es correcta",
+  "difficulty": "easy|medium|hard"
+}`;
+      } else {
+        const scope = related
+          ? `Genera una flashcard RELACIONADA al keyword "${target.keyword_name}".`
+          : `Genera una flashcard GENERAL del resumen "${target.summary_title}".`;
+
+        userPrompt = `${scope}
+
+Seleccion automatica: ${reasonText}
+
+Keyword: ${target.keyword_name}${target.keyword_def ? ` — ${target.keyword_def}` : ""}
+${target.subtopic_name ? `Subtema: ${target.subtopic_name}` : ""}
+${profNotesContext}
+Contenido relevante: ${contentSnippet}
+${sharedProfileContext}
+
+Adapta el contenido segun el dominio (${Math.round(pKnow * 100)}%):
+- Dominio bajo: definiciones claras y conceptos fundamentales
+- Dominio medio: relaciones entre conceptos y comparaciones
+- Dominio alto: excepciones, casos limite y aplicaciones avanzadas
+
+Responde en JSON con este schema exacto:
+{
+  "front": "pregunta o concepto",
+  "back": "respuesta o explicacion"
+}`;
+      }
+
+      // Gemini call with adaptive temperature per target (D10)
+      const result = await generateText({
+        prompt: userPrompt,
+        systemPrompt,
+        jsonMode: true,
+        temperature: adaptiveTemperature(pKnow),
+        maxTokens: 1024,
+      });
+
+      const generated = parseGeminiJson(result.text);
+      const g = generated as Record<string, unknown>;
+
+      totalTokensInput += result.tokensUsed.input;
+      totalTokensOutput += result.tokensUsed.output;
+
+      // Insert into DB
+      if (action === "quiz_question") {
+        const { data: inserted, error: insertErr } = await db
+          .from("quiz_questions")
+          .insert({
+            summary_id: target.summary_id,
+            keyword_id: target.keyword_id,
+            subtopic_id: target.subtopic_id,
+            question_type: g.question_type || "multiple_choice",
+            question: g.question,
+            options: g.options || null,
+            correct_answer: g.correct_answer,
+            explanation: g.explanation || null,
+            difficulty: g.difficulty || "medium",
+            source: "ai",
+            created_by: user.id,
+            ...(quizId && { quiz_id: quizId }),
+          })
+          .select("id")
+          .single();
+
+        if (insertErr) {
+          bulkErrors.push({
+            keyword_id: target.keyword_id,
+            keyword_name: target.keyword_name,
+            error: `Insert failed: ${insertErr.message}`,
+          });
+          continue;
+        }
+
+        generatedItems.push({
+          type: "quiz_question",
+          id: inserted!.id as string,
+          keyword_id: target.keyword_id,
+          keyword_name: target.keyword_name,
+          summary_id: target.summary_id,
+          _smart: {
+            p_know: pKnow,
+            need_score: Number(target.need_score),
+            primary_reason: target.primary_reason,
+            target_subtopic: target.subtopic_name,
+          },
+        });
+      } else {
+        const { data: inserted, error: insertErr } = await db
+          .from("flashcards")
+          .insert({
+            summary_id: target.summary_id,
+            keyword_id: target.keyword_id,
+            subtopic_id: target.subtopic_id,
+            front: g.front,
+            back: g.back,
+            source: "ai",
+            created_by: user.id,
+          })
+          .select("id")
+          .single();
+
+        if (insertErr) {
+          bulkErrors.push({
+            keyword_id: target.keyword_id,
+            keyword_name: target.keyword_name,
+            error: `Insert failed: ${insertErr.message}`,
+          });
+          continue;
+        }
+
+        generatedItems.push({
+          type: "flashcard",
+          id: inserted!.id as string,
+          keyword_id: target.keyword_id,
+          keyword_name: target.keyword_name,
+          summary_id: target.summary_id,
+          _smart: {
+            p_know: pKnow,
+            need_score: Number(target.need_score),
+            primary_reason: target.primary_reason,
+            target_subtopic: target.subtopic_name,
+          },
+        });
+      }
+    } catch (e) {
+      // D16: Partial success — log error, continue with next target
+      console.error(
+        `[GenerateSmart Bulk] Failed for keyword ${target.keyword_name}:`,
+        (e as Error).message,
+      );
+      bulkErrors.push({
+        keyword_id: target.keyword_id,
+        keyword_name: target.keyword_name,
+        error: (e as Error).message,
+      });
+    }
+  }
+
+  // ── Bulk response (D16 partial-success pattern) ─────────────
+  const status = generatedItems.length > 0
+    ? 201
+    : bulkErrors.length > 0
+      ? 207
+      : 200;
+
+  return ok(
+    c,
+    {
+      items: generatedItems,
+      errors: bulkErrors,
+      _meta: {
+        model: GENERATE_MODEL,
+        action,
+        ...(summaryId && { summary_id: summaryId }),
+        ...(quizId && { quiz_id: quizId }),
+        total_attempted: selectedTargets.length,
+        total_generated: generatedItems.length,
+        total_failed: bulkErrors.length,
+        total_targets_available: allTargets.length,
+        tokens: {
+          input: totalTokensInput,
+          output: totalTokensOutput,
+        },
+      },
+    },
+    status,
+  );
 });
