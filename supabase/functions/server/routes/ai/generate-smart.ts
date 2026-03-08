@@ -96,6 +96,27 @@ function adaptiveTemperature(pKnow: number): number {
   return 0.85;
 }
 
+// ── Normalizers: Gemini output → DB-safe values ───────────────
+// Gemini may return difficulty as "easy"/"medium"/"hard" (strings)
+// but the DB column is INTEGER (1/2/3). This mapper ensures safety.
+const DIFFICULTY_MAP: Record<string, number> = { easy: 1, medium: 2, hard: 3 };
+function normalizeDifficulty(d: unknown): number {
+  if (typeof d === "number" && [1, 2, 3].includes(d)) return d;
+  if (typeof d === "string") return DIFFICULTY_MAP[d.toLowerCase()] ?? 2;
+  return 2; // default medium
+}
+
+// Gemini may return "multiple_choice" but DB expects "mcq" | "true_false" | "fill_blank" | "open"
+function normalizeQuestionType(qt: unknown): string {
+  if (typeof qt !== "string") return "mcq";
+  const lower = qt.toLowerCase().replace(/\s+/g, "_");
+  if (lower === "multiple_choice" || lower === "mcq") return "mcq";
+  if (lower === "true_false") return "true_false";
+  if (lower === "fill_blank" || lower === "fill_in_the_blank") return "fill_blank";
+  if (lower === "open" || lower === "open_ended") return "open";
+  return "mcq"; // default
+}
+
 // ── RPC result type ───────────────────────────────────────────
 interface SmartTarget {
   subtopic_id: string | null;
@@ -393,13 +414,15 @@ Adapta la dificultad segun el dominio (${Math.round(pKnow * 100)}%):
 
 Responde en JSON con este schema exacto:
 {
-  "question_type": "multiple_choice",
+  "question_type": "mcq",
   "question": "texto de la pregunta",
   "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
   "correct_answer": "A",
   "explanation": "por que es correcta",
-  "difficulty": "easy|medium|hard"
-}`;
+  "difficulty": 1
+}
+Nota: question_type debe ser "mcq", "true_false", "fill_blank" o "open".
+Nota: difficulty debe ser un entero: 1 (facil), 2 (medio), 3 (dificil).`;
     } else {
       const scope = related
         ? `Genera una flashcard RELACIONADA al keyword "${chosen.keyword_name}".`
@@ -447,12 +470,12 @@ Responde en JSON con este schema exacto:
             summary_id: chosen.summary_id,
             keyword_id: chosen.keyword_id,
             subtopic_id: chosen.subtopic_id,
-            question_type: g.question_type || "multiple_choice",
+            question_type: normalizeQuestionType(g.question_type),
             question: g.question,
             options: g.options || null,
             correct_answer: g.correct_answer,
             explanation: g.explanation || null,
-            difficulty: g.difficulty || "medium",
+            difficulty: normalizeDifficulty(g.difficulty),
             source: "ai",
             created_by: user.id,
             ...(quizId && { quiz_id: quizId }), // Fase 8E + 8G
@@ -677,13 +700,15 @@ Adapta la dificultad segun el dominio (${Math.round(pKnow * 100)}%):
 
 Responde en JSON con este schema exacto:
 {
-  "question_type": "multiple_choice",
+  "question_type": "mcq",
   "question": "texto de la pregunta",
   "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
   "correct_answer": "A",
   "explanation": "por que es correcta",
-  "difficulty": "easy|medium|hard"
-}`;
+  "difficulty": 1
+}
+Nota: question_type debe ser "mcq", "true_false", "fill_blank" o "open".
+Nota: difficulty debe ser un entero: 1 (facil), 2 (medio), 3 (dificil).`;
       } else {
         const scope = related
           ? `Genera una flashcard RELACIONADA al keyword "${target.keyword_name}".`
@@ -734,12 +759,12 @@ Responde en JSON con este schema exacto:
             summary_id: target.summary_id,
             keyword_id: target.keyword_id,
             subtopic_id: target.subtopic_id,
-            question_type: g.question_type || "multiple_choice",
+            question_type: normalizeQuestionType(g.question_type),
             question: g.question,
             options: g.options || null,
             correct_answer: g.correct_answer,
             explanation: g.explanation || null,
-            difficulty: g.difficulty || "medium",
+            difficulty: normalizeDifficulty(g.difficulty),
             source: "ai",
             created_by: user.id,
             ...(quizId && { quiz_id: quizId }),
