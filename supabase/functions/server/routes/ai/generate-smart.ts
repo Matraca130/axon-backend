@@ -207,9 +207,11 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
     action === "quiz_question" ? "quiz_questions" : "flashcards";
 
   // Primary: subtopic-level dedup (most targets have subtopic_id after v2)
-  const targetSubtopicIds = (targets as SmartTarget[])
-    .map((t) => t.subtopic_id)
-    .filter((id): id is string => id !== null);
+  const targetSubtopicIds = [...new Set(
+    (targets as SmartTarget[])
+      .map((t) => t.subtopic_id)
+      .filter((id): id is string => id !== null),
+  )];
 
   const recentSubtopicIds = new Set<string>();
   if (targetSubtopicIds.length > 0) {
