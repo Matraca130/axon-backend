@@ -4,8 +4,10 @@
  * Typed wrapper around Meta Graph API v21.0 for sending WhatsApp messages.
  * All send* functions are fire-and-forget safe (log errors, never throw).
  *
- * AUDIT F8: Uses own fetchWithTimeout because gemini.ts fetchWithRetry
- * is module-private. Meta API has 99.95% SLA, simple timeout is sufficient.
+ * P2 FIX: Uses own fetchWithTimeout (simpler, no retry) rather than
+ * gemini.ts fetchWithRetry (exported since N3, but includes retry logic
+ * inappropriate for Meta API — Meta has 99.95% SLA and retrying sends
+ * could cause duplicate messages).
  *
  * @see https://developers.facebook.com/docs/whatsapp/cloud-api/reference/messages
  */
@@ -28,7 +30,7 @@ function getAccessToken(): string {
   return token;
 }
 
-// ─── Fetch with Timeout (AUDIT F8) ────────────────────────
+// ─── Fetch with Timeout ──────────────────────────────────
 
 async function fetchWithTimeout(
   url: string,
@@ -101,10 +103,6 @@ async function sendMessage(body: Record<string, unknown>): Promise<void> {
 
 // ─── Public API ──────────────────────────────────────────
 
-/**
- * Send a plain text message.
- * Max body length: 4096 chars (WhatsApp limit).
- */
 export async function sendText(phone: string, text: string): Promise<void> {
   await sendMessage({
     to: phone,
@@ -113,12 +111,6 @@ export async function sendText(phone: string, text: string): Promise<void> {
   });
 }
 
-/**
- * Send an interactive message with up to 3 reply buttons.
- * WhatsApp enforces max 3 buttons; this function validates.
- *
- * FC-04: Flashcard ratings use exactly 3 buttons [Fail / Good / Easy].
- */
 export async function sendInteractiveButtons(
   phone: string,
   body: string,
@@ -148,10 +140,6 @@ export async function sendInteractiveButtons(
   });
 }
 
-/**
- * Send an interactive list message.
- * Good for browse_content, get_schedule, etc.
- */
 export async function sendInteractiveList(
   phone: string,
   body: string,
@@ -179,10 +167,6 @@ export async function sendInteractiveList(
   });
 }
 
-/**
- * Send an image message with optional caption.
- * FC-06: Used for flashcards with images.
- */
 export async function sendImage(
   phone: string,
   imageUrl: string,
@@ -198,11 +182,6 @@ export async function sendImage(
   });
 }
 
-/**
- * Send a pre-approved template message.
- * WA-15: Used for proactive notifications (study reminders, etc.).
- * Template must be approved in Meta Business Manager first.
- */
 export async function sendTemplate(
   phone: string,
   templateName: string,
@@ -227,16 +206,9 @@ export async function sendTemplate(
   });
 }
 
-/**
- * Download media from WhatsApp (voice messages, images, etc.).
- * Two-step process: get download URL, then fetch the actual bytes.
- *
- * AUDIT-12: Used by handle_voice_message tool for STT.
- */
 export async function downloadMedia(mediaId: string): Promise<MediaDownloadResult> {
   const token = getAccessToken();
 
-  // Step 1: Get the download URL
   const metaRes = await fetchWithTimeout(
     `${META_BASE_URL}/${mediaId}`,
     { headers: { Authorization: `Bearer ${token}` } },
@@ -248,11 +220,10 @@ export async function downloadMedia(mediaId: string): Promise<MediaDownloadResul
 
   const meta = await metaRes.json() as { url: string; mime_type: string };
 
-  // Step 2: Download the actual media bytes
   const dataRes = await fetchWithTimeout(
     meta.url,
     { headers: { Authorization: `Bearer ${token}` } },
-    30_000, // Voice/image can be large, allow 30s
+    30_000,
   );
 
   if (!dataRes.ok) {
@@ -265,13 +236,6 @@ export async function downloadMedia(mediaId: string): Promise<MediaDownloadResul
   };
 }
 
-/**
- * Hash a phone number with a salt using SHA-256.
- * Returns hex string. Used for PII protection (AUDIT-05).
- *
- * The raw phone number is NEVER stored in the database.
- * Only hash + salt are persisted in whatsapp_links.
- */
 export async function hashPhone(phone: string, salt: string): Promise<string> {
   const encoder = new TextEncoder();
   const data = encoder.encode(phone + salt);
@@ -281,10 +245,6 @@ export async function hashPhone(phone: string, salt: string): Promise<string> {
     .join("");
 }
 
-/**
- * Generate a cryptographically random salt for phone hashing.
- * 32 bytes (256 bits) of randomness, hex-encoded.
- */
 export function generateSalt(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);

@@ -16,6 +16,7 @@
  *   C4: Rate limit message sent only on first_block
  *   C5: Dedup record inserted for rate-limited messages
  *   C6: Raw phone hashed before rate limit Map key
+ *   P1: Raw phone masked in console logs
  */
 
 import type { Context } from "npm:hono";
@@ -56,6 +57,14 @@ interface WhatsAppWebhookBody {
       field: string;
     }>;
   }>;
+}
+
+// ─── PII Helpers ─────────────────────────────────────────
+
+/** P1 FIX: Mask phone for logging — show country code + first digits only */
+function maskPhone(phone: string): string {
+  if (phone.length <= 4) return "****";
+  return phone.slice(0, 4) + "****";
 }
 
 // ─── HMAC Verification (AUDIT F3) ─────────────────────
@@ -266,8 +275,9 @@ export async function handleIncoming(c: Context): Promise<Response> {
       textContent = `[Unsupported: ${messageType}]`;
   }
 
+  // P1 FIX: Mask phone number in logs to prevent PII exposure
   console.log(
-    `[WA-Webhook] ${contactName} (${from}): type=${messageType}, ` +
+    `[WA-Webhook] ${contactName} (${maskPhone(from)}): type=${messageType}, ` +
     `text="${textContent.slice(0, 80)}"`,
   );
 
@@ -323,35 +333,35 @@ export async function handleIncoming(c: Context): Promise<Response> {
         if (result.success) {
           await sendText(
             from,
-            "¡Vinculado! Ya podés estudiar por WhatsApp \ud83c\udf89\n\n" +
-            "Probá enviando:\n" +
-            "\u2022 \"Qué debo estudiar?\"\n" +
-            "\u2022 \"Cómo voy en mis cursos?\"\n" +
-            "\u2022 O cualquier pregunta académica",
+            "\u00a1Vinculado! Ya pod\u00e9s estudiar por WhatsApp \ud83c\udf89\n\n" +
+            "Prob\u00e1 enviando:\n" +
+            "\u2022 \"Qu\u00e9 debo estudiar?\"\n" +
+            "\u2022 \"C\u00f3mo voy en mis cursos?\"\n" +
+            "\u2022 O cualquier pregunta acad\u00e9mica",
           );
         } else {
           await sendText(
             from,
-            "Código inválido o expirado. \u274c\n\n" +
-            "Generá uno nuevo desde la app en Configuración > WhatsApp.",
+            "C\u00f3digo inv\u00e1lido o expirado. \u274c\n\n" +
+            "Gener\u00e1 uno nuevo desde la app en Configuraci\u00f3n > WhatsApp.",
           );
         }
       } else {
         await sendText(
           from,
           "\u00a1Hola! Soy Axon, tu asistente de estudio. \ud83d\udcda\n\n" +
-          "Para empezar, vinculá tu cuenta:\n" +
-          "1\ufe0f\u20e3 Abrí axon.app/settings\n" +
-          "2\ufe0f\u20e3 Tocá \"Vincular WhatsApp\"\n" +
-          "3\ufe0f\u20e3 Enviáme el código de 6 dígitos acá\n\n" +
-          "\u00a1Listo! Después podés preguntarme cualquier cosa.",
+          "Para empezar, vincul\u00e1 tu cuenta:\n" +
+          "1\ufe0f\u20e3 Abr\u00ed axon.app/settings\n" +
+          "2\ufe0f\u20e3 Toc\u00e1 \"Vincular WhatsApp\"\n" +
+          "3\ufe0f\u20e3 Envi\u00e1me el c\u00f3digo de 6 d\u00edgitos ac\u00e1\n\n" +
+          "\u00a1Listo! Despu\u00e9s pod\u00e9s preguntarme cualquier cosa.",
         );
       }
     }
   } catch (e) {
     console.error(`[WA-Webhook] Processing error: ${(e as Error).message}`);
     try {
-      await sendText(from, "Algo salió mal. Intentá de nuevo. \ud83d\ude14");
+      await sendText(from, "Algo sali\u00f3 mal. Intent\u00e1 de nuevo. \ud83d\ude14");
     } catch { /* can't send error message */ }
   }
 
