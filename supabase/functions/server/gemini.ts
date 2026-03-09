@@ -5,8 +5,12 @@
  *   generateText()        — Gemini 2.5 Flash for text/JSON generation
  *   extractTextFromPdf()  — Gemini 2.5 Flash multimodal PDF text extraction (Fase 7)
  *
- * One DEPRECATED function:
- *   generateEmbedding()   — DEPRECATED: Use openai-embeddings.ts instead (D57)
+ * One REMOVED function:
+ *   generateEmbedding()   — HARD ERROR: Use openai-embeddings.ts instead (D57)
+ *     W7-RAG01 FIX: Now throws immediately instead of silently generating
+ *     768d Gemini vectors. The pipeline uses 1536d OpenAI vectors.
+ *     Calling this function would insert wrong-dimension vectors into
+ *     pgvector columns, causing silent search degradation.
  *
  * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
  *
@@ -141,51 +145,34 @@ export async function generateText(
   };
 }
 
-// ─── Embeddings (DEPRECATED — D57) ──────────────────────────────
+// ─── Embeddings (REMOVED — W7-RAG01) ────────────────────────────
+//
+// Previously: generateEmbedding() used Gemini embedding-001 (768d).
+// Problem: The pipeline now uses OpenAI text-embedding-3-large (1536d).
+// If anyone called this function, they'd insert 768d vectors into
+// 1536d pgvector columns, causing silent search degradation.
+//
+// W7-RAG01 FIX: Function now throws immediately with a clear error.
+// The export is preserved so any stale import gets a hard failure
+// at call-time instead of a silent dimension mismatch.
 
-const _DEPRECATED_EMBEDDING_DIMENSIONS = 768;
-
-/** @deprecated Use openai-embeddings.ts generateEmbedding() instead */
+/**
+ * @deprecated REMOVED — Use openai-embeddings.ts generateEmbedding() instead.
+ * This function now throws immediately to prevent dimension mismatch.
+ * The Axon pipeline uses OpenAI text-embedding-3-large (1536d).
+ * Gemini embedding-001 produces 768d vectors which are INCOMPATIBLE.
+ */
 export async function generateEmbedding(
-  text: string,
-  taskType: "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY" = "RETRIEVAL_QUERY",
-): Promise<number[]> {
-  console.warn(
-    "[DEPRECATED] gemini.ts generateEmbedding() called. Use openai-embeddings.ts instead.",
+  _text: string,
+  _taskType?: string,
+): Promise<never> {
+  throw new Error(
+    "[Axon Fatal] gemini.ts generateEmbedding() is REMOVED. " +
+    "Use openai-embeddings.ts generateEmbedding() instead. " +
+    "Gemini produces 768d vectors; the pipeline uses 1536d OpenAI vectors. " +
+    "Mixing dimensions corrupts pgvector search silently. " +
+    "See: W7-RAG01, D57.",
   );
-  const key = getApiKey();
-  const model = "gemini-embedding-001";
-  const url = `${GEMINI_BASE}/${model}:embedContent?key=${key}`;
-
-  const res = await fetchWithRetry(
-    url,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: `models/${model}`,
-        content: { parts: [{ text }] },
-        taskType,
-        outputDimensionality: _DEPRECATED_EMBEDDING_DIMENSIONS,
-      }),
-    },
-    10_000,
-  );
-
-  if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`Gemini Embedding error ${res.status}: ${errBody}`);
-  }
-
-  const data = await res.json();
-  const values = data.embedding?.values;
-  if (!values || !Array.isArray(values)) {
-    throw new Error(`No embedding values returned`);
-  }
-  if (values.length === 0) {
-    throw new Error(`Empty embedding vector returned`);
-  }
-  return values;
 }
 
 // ─── PDF Text Extraction (Fase 7, D45-D49) ─────────────────────

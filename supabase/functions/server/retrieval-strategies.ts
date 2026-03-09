@@ -25,6 +25,7 @@
  *            (OpenAI text-embedding-3-large 1536d). taskType parameter removed.
  *
  * Audit R1 fix: selectStrategy checks historyLength before wordCount
+ * W7-RAG02 FIX: Removed unreachable default return in selectStrategy()
  */
 
 // D57: Embeddings from OpenAI, generation stays in Gemini
@@ -66,11 +67,13 @@ export interface RetrievalEmbeddingOutput {
  *   2. historyLength > 2    → "multi_query" (deep conversation → reformulations)
  *   3. wordCount ≤ 5        → "hyde" (short factual questions benefit most)
  *   4. wordCount > 5        → "multi_query" (complex questions → reformulations)
- *   5. Default              → "standard"
  *
  * Audit R1 fix: historyLength checked before wordCount.
  * Rationale: multi-turn dialog benefits more from query reformulation
  * than from a hypothetical answer, even when the latest message is short.
+ *
+ * W7-RAG02 FIX: The old code had an unreachable `return "standard"` after
+ * exhaustive if/else branches. Replaced with explicit else for clarity.
  */
 export function selectStrategy(
   message: string,
@@ -89,10 +92,9 @@ export function selectStrategy(
   // Short questions → HyDE (hypothetical answer embedding)
   if (wordCount <= 5) return "hyde";
 
+  // W7-RAG02 FIX: Explicit else instead of unreachable default.
   // Long/complex questions → Multi-Query (reformulations)
-  if (wordCount > 5) return "multi_query";
-
-  return "standard";
+  return "multi_query";
 }
 
 // ─── Multi-Query: Gemini generates reformulations ─────────────────
@@ -351,34 +353,27 @@ export async function executeRetrievalEmbedding(
   }
 
   // ── HYDE: embed hypothetical document ────────────────────────
-  if (strategy === "hyde") {
-    const hypothesis = await generateHypotheticalDocument(searchQuery);
+  // W7-RAG02 FIX: This is now the final branch (was `if` with unreachable default).
+  // TypeScript knows strategy is "hyde" here due to exhaustive checks above.
+  const hypothesis = await generateHypotheticalDocument(searchQuery);
 
-    if (hypothesis.length > 0) {
-      // D24: Embed the hypothesis, not the original query
-      const embedding = await embedFn(hypothesis);
-      return {
-        embeddings: [{ query: hypothesis, embedding }],
-        strategyMeta: {
-          hyde_used: true,
-          hypothesis_length: hypothesis.length,
-        },
-      };
-    }
-
-    // Fallback: HyDE generation failed, use original query
-    console.warn("[Fase 6] HyDE produced empty hypothesis, falling back to standard");
-    const embedding = await embedFn(searchQuery);
+  if (hypothesis.length > 0) {
+    // D24: Embed the hypothesis, not the original query
+    const embedding = await embedFn(hypothesis);
     return {
-      embeddings: [{ query: searchQuery, embedding }],
-      strategyMeta: { hyde_used: false, hyde_fallback: true },
+      embeddings: [{ query: hypothesis, embedding }],
+      strategyMeta: {
+        hyde_used: true,
+        hypothesis_length: hypothesis.length,
+      },
     };
   }
 
-  // Unreachable, but TypeScript exhaustiveness
+  // Fallback: HyDE generation failed, use original query
+  console.warn("[Fase 6] HyDE produced empty hypothesis, falling back to standard");
   const embedding = await embedFn(searchQuery);
   return {
     embeddings: [{ query: searchQuery, embedding }],
-    strategyMeta: {},
+    strategyMeta: { hyde_used: false, hyde_fallback: true },
   };
 }
