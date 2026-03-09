@@ -19,6 +19,7 @@
  *   reorder.ts             — PUT /reorder (bulk reorder)
  *   content-tree.ts        — GET /content-tree (nested hierarchy)
  *   flashcards-by-topic.ts — GET /flashcards-by-topic (PERF C1: batch load)
+ *   flashcard-mappings.ts  — GET /flashcard-mappings (P0: lightweight id→subtopic mapping)
  */
 
 import { Hono } from "npm:hono";
@@ -30,6 +31,7 @@ import { profNotesRoutes } from "./prof-notes.ts";
 import { reorderRoutes } from "./reorder.ts";
 import { contentTreeRoutes } from "./content-tree.ts";
 import { flashcardsByTopicRoutes } from "./flashcards-by-topic.ts";
+import { flashcardMappingRoutes } from "./flashcard-mappings.ts";
 
 const content = new Hono();
 
@@ -42,5 +44,6 @@ content.route("/", profNotesRoutes);
 content.route("/", reorderRoutes);
 content.route("/", contentTreeRoutes);
 content.route("/", flashcardsByTopicRoutes);
+content.route("/", flashcardMappingRoutes);
 
 export { content };
