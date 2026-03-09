@@ -10,17 +10,25 @@
  *   - timing-safe comparison to prevent timing attacks (AUDIT F3)
  *   - Deduplication by Meta message ID (AUDIT F7)
  *
- * Pattern precedent: routes/mux/webhook.ts (Mux HMAC verification)
+ * Message routing (S09):
+ *   - Linked users → handleMessage() from handler.ts
+ *   - Unlinked users + 6-digit code → verifyLinkCode() from link.ts
+ *   - Unlinked users + other → onboarding message
+ *
+ * AUDIT F12: Processing is inline (await handleMessage before return 200).
+ * Meta allows up to 5s for response. Most ops complete in <3s.
+ * Slow ops (generate_content, weekly_report) are handled by tools.ts
+ * returning isAsync=true, which sends an immediate response to user.
  *
  * @see https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/components
- * @see AUDIT F3: HMAC hex parsing + timingSafeEqual
- * @see AUDIT F7: Dedup via wa_message_id (works for linked AND unlinked users)
- * @see AUDIT-03: Immediate 200 response to prevent Meta retransmissions
  */
 
 import type { Context } from "npm:hono";
-import { ok, err, getAdminClient } from "../../db.ts";
+import { err, getAdminClient } from "../../db.ts";
 import { timingSafeEqual } from "../../timing-safe.ts";
+import { sendText, hashPhone } from "./wa-client.ts";
+import { handleMessage } from "./handler.ts";
+import { verifyLinkCode, isLinkingCode } from "./link.ts";
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -57,16 +65,6 @@ interface WhatsAppWebhookBody {
 
 // ─── HMAC Verification (AUDIT F3) ─────────────────────────
 
-/**
- * Verify Meta webhook signature using HMAC-SHA256.
- *
- * Meta sends the header as: X-Hub-Signature-256: sha256=HEXSTRING
- * We compute our own HMAC and compare using timingSafeEqual.
- *
- * @param rawBody - The raw request body string
- * @param signatureHeader - The X-Hub-Signature-256 header value
- * @returns true if signature is valid
- */
 async function verifyMetaSignature(
   rawBody: string,
   signatureHeader: string | null,
@@ -79,7 +77,6 @@ async function verifyMetaSignature(
     return false;
   }
 
-  // Strip "sha256=" prefix to get expected hex
   const expectedHex = signatureHeader.startsWith("sha256=")
     ? signatureHeader.slice(7)
     : signatureHeader;
@@ -91,8 +88,6 @@ async function verifyMetaSignature(
 
   try {
     const encoder = new TextEncoder();
-
-    // Import the secret key for HMAC-SHA256
     const key = await crypto.subtle.importKey(
       "raw",
       encoder.encode(secret),
@@ -100,34 +95,19 @@ async function verifyMetaSignature(
       false,
       ["sign"],
     );
-
-    // Compute HMAC of the raw body
-    const signature = await crypto.subtle.sign(
-      "HMAC",
-      key,
-      encoder.encode(rawBody),
-    );
-
-    // Convert to hex string
+    const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(rawBody));
     const computedHex = Array.from(new Uint8Array(signature))
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
-
-    // Timing-safe comparison (prevents timing attacks)
     return timingSafeEqual(computedHex, expectedHex);
   } catch (e) {
-    console.error(`[WA-Webhook] HMAC verification error: ${(e as Error).message}`);
+    console.error(`[WA-Webhook] HMAC error: ${(e as Error).message}`);
     return false;
   }
 }
 
 // ─── Deduplication (AUDIT F7) ─────────────────────────────
 
-/**
- * Check if we've already processed this Meta message ID.
- * Uses whatsapp_message_log.wa_message_id index.
- * Works for ALL users (linked and unlinked).
- */
 async function isDuplicate(waMessageId: string): Promise<boolean> {
   const admin = getAdminClient();
   const { data } = await admin
@@ -135,55 +115,48 @@ async function isDuplicate(waMessageId: string): Promise<boolean> {
     .select("id")
     .eq("wa_message_id", waMessageId)
     .limit(1);
-
   return (data?.length ?? 0) > 0;
 }
 
-// ─── Logging ─────────────────────────────────────────────
+// ─── Phone Lookup ───────────────────────────────────────
 
-/** Fire-and-forget log entry to whatsapp_message_log */
-function logMessage(params: {
-  phoneHash: string;
-  userId?: string;
-  waMessageId?: string;
-  direction: "in" | "out";
-  messageType: string;
-  success: boolean;
-  latencyMs?: number;
-  errorMessage?: string;
-}): void {
+/**
+ * Look up a linked user by phone number.
+ * Must iterate through all links and re-hash because each link has its own salt.
+ * This is O(n) on active links, but n is small (each user has max 1 link).
+ */
+async function lookupLinkedUser(
+  phoneNumber: string,
+): Promise<{ userId: string; phoneHash: string } | null> {
   const admin = getAdminClient();
-  admin
-    .from("whatsapp_message_log")
-    .insert({
-      phone_hash: params.phoneHash,
-      user_id: params.userId ?? null,
-      wa_message_id: params.waMessageId ?? null,
-      direction: params.direction,
-      message_type: params.messageType,
-      success: params.success,
-      latency_ms: params.latencyMs ?? null,
-      error_message: params.errorMessage ?? null,
-    })
-    .then(({ error }) => {
-      if (error) console.warn(`[WA-Webhook] Log insert failed: ${error.message}`);
-    });
+
+  const { data: links } = await admin
+    .from("whatsapp_links")
+    .select("user_id, phone_hash, phone_salt")
+    .eq("is_active", true);
+
+  if (!links || links.length === 0) return null;
+
+  // Try each salt until we find a matching hash
+  for (const link of links) {
+    const computedHash = await hashPhone(phoneNumber, link.phone_salt);
+    if (computedHash === link.phone_hash) {
+      return { userId: link.user_id, phoneHash: link.phone_hash };
+    }
+  }
+
+  return null;
 }
 
 // ─── Handlers ────────────────────────────────────────────
 
 /**
  * GET /webhooks/whatsapp — Meta verification challenge.
- *
- * Called once when you register the webhook URL in Meta Dashboard.
- * Meta sends hub.mode, hub.verify_token, hub.challenge.
- * We verify the token and echo back the challenge.
  */
 export async function handleVerification(c: Context): Promise<Response> {
   const mode = c.req.query("hub.mode");
   const token = c.req.query("hub.verify_token");
   const challenge = c.req.query("hub.challenge");
-
   const expectedToken = Deno.env.get("WHATSAPP_VERIFY_TOKEN");
 
   if (mode === "subscribe" && token && token === expectedToken) {
@@ -191,30 +164,21 @@ export async function handleVerification(c: Context): Promise<Response> {
     return c.text(challenge ?? "", 200);
   }
 
-  console.warn(`[WA-Webhook] Verification failed: mode=${mode}, token_match=${token === expectedToken}`);
+  console.warn(`[WA-Webhook] Verification failed: mode=${mode}`);
   return c.text("Forbidden", 403);
 }
 
 /**
  * POST /webhooks/whatsapp — Incoming messages from Meta.
  *
- * Flow:
- *   1. Validate HMAC-SHA256 signature (AUDIT F3)
- *   2. Parse webhook body, extract messages
- *   3. Filter out status updates (delivery receipts)
- *   4. Deduplicate by wa_message_id (AUDIT F7)
- *   5. Log the incoming message
- *   6. Process message (TODO S07: call handler.ts)
- *   7. Return 200 OK
- *
- * AUDIT F12: For Phase 0, processing is inline (just logging).
- * In S09, this will be updated to call handleMessage() for fast ops
- * and enqueue via pgmq for slow ops.
+ * AUDIT F12: Processing is INLINE (await before return).
+ * Meta allows 5s before retransmitting. Most ops complete in <3s.
+ * Slow ops are handled at the tools layer (return isAsync=true + immediate user response).
  */
 export async function handleIncoming(c: Context): Promise<Response> {
   const startMs = Date.now();
 
-  // ── Step 1: HMAC-SHA256 validation (AUDIT F3) ──
+  // ── Step 1: HMAC validation ──
   const signatureHeader = c.req.header("x-hub-signature-256") ?? null;
   const rawBody = await c.req.text();
 
@@ -229,44 +193,38 @@ export async function handleIncoming(c: Context): Promise<Response> {
   try {
     body = JSON.parse(rawBody);
   } catch {
-    return err(c, "Invalid JSON in webhook body", 400);
+    return err(c, "Invalid JSON", 400);
   }
 
-  // Verify it's a WhatsApp webhook
   if (body.object !== "whatsapp_business_account") {
     return c.text("Not a WhatsApp event", 200);
   }
 
-  // ── Step 3: Extract messages (filter status updates) ──
-  const entry = body.entry?.[0];
-  const change = entry?.changes?.[0];
-  const value = change?.value;
-  const messages = value?.messages;
+  // ── Step 3: Extract messages ──
+  const messages = body.entry?.[0]?.changes?.[0]?.value?.messages;
+  const contacts = body.entry?.[0]?.changes?.[0]?.value?.contacts;
 
-  // Status updates (delivery receipts, read receipts) → acknowledge, don't process
   if (!messages || messages.length === 0) {
-    return c.text("OK", 200);
+    return c.text("OK", 200); // Status update, no message
   }
 
   const message = messages[0];
-  const from = message.from; // Phone number (e.g., "5215512345678")
-  const waMessageId = message.id; // Meta message ID (e.g., "wamid.xxx")
-  const messageType = message.type; // "text", "audio", "interactive", "image"
-  const contactName = value?.contacts?.[0]?.profile?.name ?? "Unknown";
+  const from = message.from;
+  const waMessageId = message.id;
+  const messageType = message.type;
+  const contactName = contacts?.[0]?.profile?.name ?? "Unknown";
 
-  // ── Step 4: Deduplication (AUDIT F7) ──
+  // ── Step 4: Dedup ──
   try {
-    const dup = await isDuplicate(waMessageId);
-    if (dup) {
-      console.log(`[WA-Webhook] Duplicate message ${waMessageId}, ignoring`);
+    if (await isDuplicate(waMessageId)) {
+      console.log(`[WA-Webhook] Duplicate ${waMessageId}, ignoring`);
       return c.text("OK", 200);
     }
   } catch (e) {
-    // Dedup check failed — proceed anyway (better to process twice than drop)
     console.warn(`[WA-Webhook] Dedup check failed: ${(e as Error).message}`);
   }
 
-  // ── Step 5: Extract message content ──
+  // ── Step 5: Extract content ──
   let textContent = "";
   let buttonPayload: string | undefined;
   let audioMediaId: string | undefined;
@@ -294,34 +252,74 @@ export async function handleIncoming(c: Context): Promise<Response> {
       textContent = `[Unsupported: ${messageType}]`;
   }
 
-  // ── Step 6: Process (Phase 0 = log only, S09 connects handler.ts) ──
   console.log(
-    `[WA-Webhook] Message from ${contactName} (${from}): ` +
-    `type=${messageType}, text="${textContent.slice(0, 100)}"` +
-    (buttonPayload ? `, button=${buttonPayload}` : "") +
-    (audioMediaId ? `, audio=${audioMediaId}` : ""),
+    `[WA-Webhook] ${contactName} (${from}): type=${messageType}, ` +
+    `text="${textContent.slice(0, 80)}"`,
   );
 
-  // TODO S09: Replace with handleMessage() call:
-  // await handleMessage({
-  //   phoneHash, userId, messageId: waMessageId,
-  //   messageType, text: textContent,
-  //   buttonPayload, audioMediaId,
-  // });
+  // ── Step 6: Route message (S09) ──
+  try {
+    // Look up linked user
+    const linked = await lookupLinkedUser(from);
 
-  // ── Step 7: Log + return 200 ──
+    if (linked) {
+      // ── LINKED USER: Call handler ──
+      await handleMessage({
+        phone: from,
+        phoneHash: linked.phoneHash,
+        userId: linked.userId,
+        messageId: waMessageId,
+        messageType: messageType as "text" | "audio" | "interactive",
+        text: textContent || undefined,
+        buttonPayload,
+        audioMediaId,
+      });
+    } else {
+      // ── UNLINKED USER ──
+      if (textContent && isLinkingCode(textContent)) {
+        // Attempt to verify linking code
+        const result = await verifyLinkCode(from, textContent.trim());
+        if (result.success) {
+          await sendText(
+            from,
+            "¡Vinculado! Ya podés estudiar por WhatsApp \ud83c\udf89\n\n" +
+            "Probá enviando:\n" +
+            "• \"Qué debo estudiar?\"\n" +
+            "• \"Cómo voy en mis cursos?\"\n" +
+            "• O cualquier pregunta académica",
+          );
+        } else {
+          await sendText(
+            from,
+            "Código inválido o expirado. \u274c\n\n" +
+            "Generá uno nuevo desde la app en Configuración > WhatsApp.",
+          );
+        }
+      } else {
+        // Unknown user, send onboarding
+        await sendText(
+          from,
+          "\u00a1Hola! Soy Axon, tu asistente de estudio. \ud83d\udcda\n\n" +
+          "Para empezar, vinculá tu cuenta:\n" +
+          "1\ufe0f\u20e3 Abrí axon.app/settings\n" +
+          "2\ufe0f\u20e3 Tocá \"Vincular WhatsApp\"\n" +
+          "3\ufe0f\u20e3 Enviáme el código de 6 dígitos acá\n\n" +
+          "\u00a1Listo! Después podés preguntarme cualquier cosa.",
+        );
+      }
+    }
+  } catch (e) {
+    // handleMessage or linking failed — log but don't propagate to Meta
+    console.error(`[WA-Webhook] Processing error: ${(e as Error).message}`);
+    // Best-effort error response
+    try {
+      await sendText(from, "Algo salió mal. Intentá de nuevo. \ud83d\ude14");
+    } catch { /* can't send error message */ }
+  }
+
+  // ── Step 7: Return 200 ──
   const latencyMs = Date.now() - startMs;
-
-  // Fire-and-forget log (Phase 0: phone_hash is just the raw phone for now)
-  // TODO S08: Replace with actual hashed phone after linking
-  logMessage({
-    phoneHash: from, // Temporary: raw phone. Will be hashed after S08.
-    waMessageId,
-    direction: "in",
-    messageType,
-    success: true,
-    latencyMs,
-  });
+  console.log(`[WA-Webhook] Completed in ${latencyMs}ms`);
 
   return c.text("OK", 200);
 }
