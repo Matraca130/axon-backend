@@ -6,6 +6,8 @@
  *        through the normal Agentic Loop (no separate tool call needed).
  *
  * Audit fixes applied: C1, C3, C7, C11, N3
+ * W3-05 FIX: profiles.first_name/last_name → profiles.full_name
+ * W3-06 FIX: course_members → memberships + courses (table doesn't exist)
  */
 
 import { getAdminClient } from "../../db.ts";
@@ -143,9 +145,9 @@ async function transcribeVoiceMessage(audioMediaId: string): Promise<string | nu
       contents: [{
         parts: [
           {
-            text: "Transcrib\u00ed este mensaje de voz en espa\u00f1ol. " +
-              "Retorn\u00e1 SOLO la transcripci\u00f3n textual, sin explicaciones ni prefijos. " +
-              "Si no pod\u00e9s entender el audio, respond\u00e9 '[inaudible]'.",
+            text: "Transcribí este mensaje de voz en español. " +
+              "Retorná SOLO la transcripción textual, sin explicaciones ni prefijos. " +
+              "Si no podés entender el audio, respondé '[inaudible]'.",
           },
           {
             inline_data: {
@@ -240,9 +242,9 @@ async function callGemini(
   if (!candidate?.content?.parts?.[0]) {
     const blockReason = candidate?.finishReason ?? data.promptFeedback?.blockReason;
     if (blockReason && blockReason !== "STOP") {
-      return { text: "No pude procesar tu mensaje. Intent\u00e1 reformularlo." };
+      return { text: "No pude procesar tu mensaje. Intentá reformularlo." };
     }
-    return { text: "No obtuve respuesta. Intent\u00e1 de nuevo." };
+    return { text: "No obtuve respuesta. Intentá de nuevo." };
   }
 
   const part = candidate.content.parts[0];
@@ -258,21 +260,46 @@ async function callGemini(
 }
 
 // ─── Student Context Builder ───────────────────────────
+// W3-05 FIX: profiles.first_name/last_name → profiles.full_name
+// W3-06 FIX: course_members → memberships + courses join
 
 async function buildStudentContext(userId: string): Promise<string> {
   const db = getAdminClient();
   try {
-    const [profileRes, coursesRes] = await Promise.all([
-      db.from("profiles").select("first_name, last_name").eq("id", userId).single(),
-      db.from("course_members").select("courses(name, code)").eq("user_id", userId).limit(5),
-    ]);
-    const name = profileRes.data
-      ? `${profileRes.data.first_name ?? ""} ${profileRes.data.last_name ?? ""}`.trim()
-      : "Alumno";
-    const courses = coursesRes.data?.map((cm) => (cm.courses as { name: string })?.name).filter(Boolean) ?? [];
+    // W3-05 FIX: Use full_name instead of first_name/last_name (columns don't exist)
+    const profileRes = await db
+      .from("profiles")
+      .select("full_name")
+      .eq("id", userId)
+      .single();
+
+    const name = profileRes.data?.full_name ?? "Alumno";
+
+    // W3-06 FIX: course_members table doesn't exist.
+    // Resolve courses via: memberships → institutions → courses
+    const { data: membershipData } = await db
+      .from("memberships")
+      .select("institution_id")
+      .eq("user_id", userId)
+      .eq("is_active", true)
+      .limit(5);
+
+    const institutionIds = membershipData?.map((m) => m.institution_id) ?? [];
+    let courses: string[] = [];
+
+    if (institutionIds.length > 0) {
+      const { data: courseData } = await db
+        .from("courses")
+        .select("name")
+        .in("institution_id", institutionIds)
+        .eq("is_active", true)
+        .limit(10);
+      courses = courseData?.map((c) => c.name as string).filter(Boolean) ?? [];
+    }
+
     return [
       `Nombre: ${name}`,
-      `Cursos: ${courses.length > 0 ? courses.join(", ") : "Ning\u00fan curso inscrito"}`,
+      `Cursos: ${courses.length > 0 ? courses.join(", ") : "Ningún curso inscrito"}`,
     ].join("\n");
   } catch (e) {
     console.warn(`[WA-Handler] buildStudentContext failed: ${(e as Error).message}`);
@@ -328,21 +355,21 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
     // ── Step 3: Build user message (S14: voice transcription) ──
     let userMessage = text ?? "";
     if (messageType === "interactive" && buttonPayload) {
-      userMessage = `[Bot\u00f3n seleccionado: ${buttonPayload}]`;
+      userMessage = `[Botón seleccionado: ${buttonPayload}]`;
     } else if (messageType === "audio" && audioMediaId) {
-      await sendText(phone, "Transcribiendo tu audio... \ud83c\udfa4");
+      await sendText(phone, "Transcribiendo tu audio... \uD83C\uDFA4");
       const transcription = await transcribeVoiceMessage(audioMediaId);
       if (!transcription) {
-        await sendText(phone, "No pude entender el audio. Prob\u00e1 enviando tu pregunta por texto. \ud83d\ude14");
+        await sendText(phone, "No pude entender el audio. Probá enviando tu pregunta por texto. \uD83D\uDE14");
         updateLogRecord(messageId, ["voice_failed"], Date.now() - startMs);
         return;
       }
       userMessage = transcription;
-      await sendText(phone, `\ud83d\udcdd Escuch\u00e9: \"${transcription.slice(0, 200)}${transcription.length > 200 ? "..." : ""}\"`);
+      await sendText(phone, `\uD83D\uDCDD Escuché: \"${transcription.slice(0, 200)}${transcription.length > 200 ? "..." : ""}\"`);
     }
 
     if (!userMessage.trim()) {
-      await sendText(phone, "No entend\u00ed tu mensaje. Prob\u00e1 escribiendo tu pregunta. \ud83d\ude0a");
+      await sendText(phone, "No entendí tu mensaje. Probá escribiendo tu pregunta. \uD83D\uDE0A");
       return;
     }
 
@@ -383,7 +410,7 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
           processNextJob().catch((e) =>
             console.warn(`[WA-Handler] Background job failed: ${(e as Error).message}`),
           );
-          await sendText(phone, (asyncResult?.message as string) ?? "Procesando... \u23f3");
+          await sendText(phone, (asyncResult?.message as string) ?? "Procesando... \u23F3");
           history.push({
             role: "user",
             parts: [{ functionResponse: { name: toolName, response: { content: toolResult.result } } }],
@@ -450,7 +477,7 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
     const errorMsg = (e as Error).message;
     console.error(`[WA-Handler] Fatal: ${errorMsg}`);
     try {
-      await sendText(phone, "Ups, algo sali\u00f3 mal. Intent\u00e1 de nuevo en unos segundos. \ud83d\ude14");
+      await sendText(phone, "Ups, algo salió mal. Intentá de nuevo en unos segundos. \uD83D\uDE14");
     } catch { /* */ }
 
     const db = getAdminClient();

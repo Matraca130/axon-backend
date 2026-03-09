@@ -18,6 +18,8 @@
  *
  * AUDIT F9: generate_content uses direct DB operations instead of
  * internal HTTP to avoid the service_role_key auth issue (A3).
+ *
+ * W3-12 FIX: front_text/back_text → front/back (correct column names)
  */
 
 import { getAdminClient } from "../../db.ts";
@@ -211,7 +213,7 @@ export async function processNextJob(): Promise<boolean> {
         const phone = await resolvePhone(job.payload);
         await sendText(
           phone,
-          "No pude completar tu solicitud después de varios intentos. Intentá de nuevo más tarde. \ud83d\ude14",
+          "No pude completar tu solicitud después de varios intentos. Intentá de nuevo más tarde. \uD83D\uDE14",
         );
       } catch { /* best-effort */ }
 
@@ -248,6 +250,7 @@ async function executeJob(payload: LegacyJobPayload): Promise<void> {
 }
 
 // ─── Generate Content (flashcard/quiz) ───────────────────
+// W3-12 FIX: front_text/back_text → front/back (correct DB column names)
 
 async function executeGenerateContent(payload: LegacyJobPayload): Promise<void> {
   const db = getAdminClient();
@@ -262,7 +265,7 @@ async function executeGenerateContent(payload: LegacyJobPayload): Promise<void> 
 
   const { data: summary, error: sumErr } = await db
     .from("summaries")
-    .select("title, content")
+    .select("title, content_markdown")
     .eq("id", summary_id)
     .single();
 
@@ -270,7 +273,7 @@ async function executeGenerateContent(payload: LegacyJobPayload): Promise<void> 
     throw new Error(`Summary not found: ${summary_id}`);
   }
 
-  const contentSlice = ((summary.content as string) || "").slice(0, 3000);
+  const contentSlice = ((summary.content_markdown as string) || "").slice(0, 3000);
 
   if (action === "flashcard") {
     const { text } = await generateText({
@@ -289,10 +292,12 @@ async function executeGenerateContent(payload: LegacyJobPayload): Promise<void> 
     try {
       const cards = JSON.parse(text.trim().replace(/^```json\n?/, "").replace(/\n?```$/, ""));
       if (Array.isArray(cards) && cards.length > 0) {
+        // W3-12 FIX: Use correct column names (front/back, not front_text/back_text)
         const rows = cards.slice(0, 10).map((card: { front: string; back: string }) => ({
           summary_id,
-          front_text: (card.front || "").slice(0, 1000),
-          back_text: (card.back || "").slice(0, 2000),
+          front: (card.front || "").slice(0, 1000),   // FIX: was front_text
+          back: (card.back || "").slice(0, 2000),     // FIX: was back_text
+          source: "ai",                                // FIX: was missing
           created_by: user_id,
         }));
 
@@ -305,7 +310,7 @@ async function executeGenerateContent(payload: LegacyJobPayload): Promise<void> 
           phone,
           `\u2705 ¡${rows.length} flashcards generadas!\n\n` +
           `Sobre: "${summary.title}"\n\n` +
-          `Decime "qué debo estudiar" para empezar a repasarlas. \ud83d\udcda`,
+          `Decime "qué debo estudiar" para empezar a repasarlas. \uD83D\uDCDA`,
         );
         return;
       }
@@ -319,7 +324,7 @@ async function executeGenerateContent(payload: LegacyJobPayload): Promise<void> 
     await sendText(
       phone,
       `\u2705 Quiz generado sobre "${summary.title}". ` +
-      `Abrí la app para resolverlo. \ud83d\udcf1`,
+      `Abrí la app para resolverlo. \uD83D\uDCF1`,
     );
   }
 }
@@ -378,10 +383,10 @@ async function executeWeeklyReport(payload: LegacyJobPayload): Promise<void> {
   });
 
   const report =
-    `\ud83d\udcca *Reporte Semanal*\n\n` +
-    `\ud83d\udcd6 ${totalSessions} sesiones\n` +
-    `\ud83c\udccf ${totalReviews} reviews\n` +
-    `\ud83c\udfaf ${accuracy}% precisión\n\n` +
+    `\uD83D\uDCCA *Reporte Semanal*\n\n` +
+    `\uD83D\uDCD6 ${totalSessions} sesiones\n` +
+    `\uD83C\uDCCF ${totalReviews} reviews\n` +
+    `\uD83C\uDFAF ${accuracy}% precisión\n\n` +
     `${analysis}`;
 
   await sendText(phone, report.slice(0, 4096));
