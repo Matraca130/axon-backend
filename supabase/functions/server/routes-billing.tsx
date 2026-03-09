@@ -4,6 +4,10 @@
  * N-10 FIX: Timing-safe Stripe signature verification.
  * O-7 FIX: Webhook idempotency via processed_webhook_events table.
  * W3-11 FIX: subscription-status uses auth user.id (was IDOR via query param)
+ * W7-BILL01 FIX: Webhook handlers now check DB errors and return 500
+ *   to trigger Stripe retry. Previously, INSERT/UPDATE errors were
+ *   silently ignored, causing lost subscriptions.
+ * W7-BILL02 FIX: Metadata UUIDs validated before DB operations.
  */
 
 import { Hono } from "npm:hono";
@@ -208,7 +212,20 @@ billingRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
           break;
         }
 
-        await admin.from("institution_subscriptions").insert({
+        // W7-BILL02 FIX: Validate metadata UUIDs before DB operations.
+        // These come from our own checkout-session creation, but an attacker
+        // could forge a webhook event with malformed UUIDs.
+        if (!isUuid(institutionId) || !isUuid(planId) || !isUuid(userId)) {
+          console.error(
+            `[Stripe Webhook] Invalid UUID in metadata: institution_id=${institutionId}, plan_id=${planId}, user_id=${userId}`,
+          );
+          // Return 200 so Stripe doesn't retry with the same bad data
+          break;
+        }
+
+        // W7-BILL01 FIX: Check INSERT error — throw to trigger Stripe retry.
+        // A failed subscription INSERT means the user paid but has no access.
+        const { error: insertErr } = await admin.from("institution_subscriptions").insert({
           institution_id: institutionId,
           plan_id: planId,
           user_id: userId,
@@ -218,15 +235,30 @@ billingRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
           current_period_start: new Date().toISOString(),
         });
 
-        await admin.from("memberships")
+        if (insertErr) {
+          console.error(`[Stripe Webhook] Insert subscription failed: ${insertErr.message}`);
+          throw new Error(`Insert subscription failed: ${insertErr.message}`);
+        }
+
+        // W7-BILL01 FIX: Check UPDATE error — log but don't throw.
+        // The subscription INSERT succeeded, so the user has access.
+        // Membership plan_id update is secondary and can be retried.
+        const { error: updateErr } = await admin.from("memberships")
           .update({ institution_plan_id: planId, updated_at: new Date().toISOString() })
           .eq("user_id", userId).eq("institution_id", institutionId);
+
+        if (updateErr) {
+          console.error(
+            `[Stripe Webhook] Update membership plan_id failed (non-fatal): ${updateErr.message}`,
+          );
+        }
         break;
       }
 
       case "customer.subscription.updated": {
         const sub = event.data.object;
-        await admin.from("institution_subscriptions").update({
+        // W7-BILL01 FIX: Check UPDATE error — throw to trigger Stripe retry.
+        const { error: updateErr } = await admin.from("institution_subscriptions").update({
           status: sub.status,
           current_period_start: sub.current_period_start ? new Date(sub.current_period_start * 1000).toISOString() : null,
           current_period_end: sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString() : null,
@@ -235,26 +267,43 @@ billingRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
           trial_end: sub.trial_end ? new Date(sub.trial_end * 1000).toISOString() : null,
           updated_at: new Date().toISOString(),
         }).eq("stripe_subscription_id", sub.id);
+
+        if (updateErr) {
+          console.error(`[Stripe Webhook] Update subscription failed: ${updateErr.message}`);
+          throw new Error(`Update subscription failed: ${updateErr.message}`);
+        }
         break;
       }
 
       case "customer.subscription.deleted": {
         const sub = event.data.object;
-        await admin.from("institution_subscriptions").update({
+        // W7-BILL01 FIX: Check UPDATE error — throw to trigger Stripe retry.
+        const { error: deleteErr } = await admin.from("institution_subscriptions").update({
           status: "canceled",
           canceled_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         }).eq("stripe_subscription_id", sub.id);
+
+        if (deleteErr) {
+          console.error(`[Stripe Webhook] Cancel subscription failed: ${deleteErr.message}`);
+          throw new Error(`Cancel subscription failed: ${deleteErr.message}`);
+        }
         break;
       }
 
       case "invoice.payment_failed": {
         const invoice = event.data.object;
         if (invoice.subscription) {
-          await admin.from("institution_subscriptions").update({
+          // W7-BILL01 FIX: Check UPDATE error — throw to trigger Stripe retry.
+          const { error: failErr } = await admin.from("institution_subscriptions").update({
             status: "past_due",
             updated_at: new Date().toISOString(),
           }).eq("stripe_subscription_id", invoice.subscription);
+
+          if (failErr) {
+            console.error(`[Stripe Webhook] Mark past_due failed: ${failErr.message}`);
+            throw new Error(`Mark past_due failed: ${failErr.message}`);
+          }
         }
         break;
       }
