@@ -8,7 +8,7 @@
  *   webhook.ts    — GET  /webhooks/whatsapp (Meta verification challenge)
  *                   POST /webhooks/whatsapp (incoming messages, HMAC verified)
  *   link.ts       — POST /whatsapp/link-code  (generate 6-digit code, JWT required)
- *                   POST /whatsapp/verify-link (verify code from bot, future S08)
+ *                   POST /whatsapp/unlink     (deactivate link, JWT required)
  *
  * Feature flag: WHATSAPP_ENABLED env var.
  *   - Set to "true" to enable all WhatsApp endpoints.
@@ -28,6 +28,7 @@ import { Hono } from "npm:hono";
 import type { Context, Next } from "npm:hono";
 import { PREFIX, err } from "../../db.ts";
 import { handleVerification, handleIncoming } from "./webhook.ts";
+import { generateLinkCode, unlinkPhone } from "./link.ts";
 
 const whatsappRoutes = new Hono();
 
@@ -53,17 +54,12 @@ whatsappRoutes.use(`${PREFIX}/whatsapp/*`, featureFlagMiddleware);
 
 // ─── Webhook Routes (no auth — verified by HMAC) ─────────────
 
-// Meta verification challenge (one-time setup)
 whatsappRoutes.get(`${PREFIX}/webhooks/whatsapp`, handleVerification);
-
-// Incoming messages from WhatsApp users
 whatsappRoutes.post(`${PREFIX}/webhooks/whatsapp`, handleIncoming);
 
-// ─── Link Routes (auth required — future S08) ───────────────
+// ─── Link Routes (JWT auth required) ───────────────────────
 
-// TODO S08: Uncomment when link.ts is created
-// import { generateLinkCode, verifyLinkCode } from "./link.ts";
-// whatsappRoutes.post(`${PREFIX}/whatsapp/link-code`, generateLinkCode);
-// whatsappRoutes.post(`${PREFIX}/whatsapp/verify-link`, verifyLinkCode);
+whatsappRoutes.post(`${PREFIX}/whatsapp/link-code`, generateLinkCode);
+whatsappRoutes.post(`${PREFIX}/whatsapp/unlink`, unlinkPhone);
 
 export { whatsappRoutes };
