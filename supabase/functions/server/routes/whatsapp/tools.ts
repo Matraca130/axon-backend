@@ -10,13 +10,18 @@
  * we use direct DB queries/RPCs for 6 tools and internal HTTP for 2 tools
  * whose logic is too complex to extract (RAG chat: 21KB, generate-smart).
  *
+ * A3 FIX: ask_academic_question now uses direct generateText() + summary
+ * context instead of internal HTTP. The service_role_key JWT has no 'sub'
+ * claim, so authenticate() in chat.ts always returned 401.
+ *
  * @see AUDIT F4: Direct DB queries (handlers are module-private)
  * @see AUDIT F5: Ghost session for submit_review
- * @see AUDIT F9: Internal HTTP for ask_academic_question + generate_content
+ * @see AUDIT F9: Internal HTTP for generate_content (deferred to pgmq)
  */
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { getAdminClient } from "../../db.ts";
+import { generateText } from "../../gemini.ts";
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -232,6 +237,7 @@ REGLAS:
 4. Cuando el alumno quiere estudiar, usa get_study_queue para iniciar sesión
 5. submit_review SOLO durante sesión de flashcards activa
 6. generate_content y generate_weekly_report son operaciones lentas — avisa al alumno que tomará unos segundos
+7. Si ves un functionResponse con status:'queued', la operación está EN PROCESO. No digas que ya se completó.
 
 CONTEXTO DEL ALUMNO:
 {STUDENT_CONTEXT}
@@ -242,7 +248,8 @@ CONTEXTO DEL ALUMNO:
 /**
  * Execute a tool call from Gemini.
  * Uses direct DB queries/RPCs for most tools (AUDIT F4).
- * Uses internal HTTP for ask_academic_question and generate_content (AUDIT F9).
+ * A3 FIX: ask_academic_question uses direct generateText() instead of
+ * internal HTTP (service_role_key JWT has no 'sub' claim).
  */
 export async function executeToolCall(
   name: string,
@@ -391,40 +398,74 @@ export async function executeToolCall(
         return { name, result: { review_id: data?.id, rating } };
       }
 
-      // ─── Internal HTTP tools (2 — AUDIT F9) ─────────────
+      // ─── Academic Question (A3 FIX: direct instead of internal HTTP) ──
 
       case "ask_academic_question": {
-        // AUDIT F9: chat.ts is 21KB with complex RAG logic, can't extract
-        const supabaseUrl = Deno.env.get("SUPABASE_URL");
-        const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+        // A3 FIX: service_role_key JWT has no 'sub' claim, so internal HTTP
+        // to /ai/rag-chat always returned 401. Instead, we do a simplified
+        // RAG: fetch summary content + call generateText() directly.
+        // Full hybrid search (embeddings + FTS) deferred to Phase 2.
 
-        const res = await fetch(`${supabaseUrl}/functions/v1/server/ai/rag-chat`, {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${serviceKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            message: args.question as string,
-            summary_id: (args.summary_id as string) || undefined,
-            history: [],
-          }),
-        });
+        const question = args.question as string;
+        let context = "";
 
-        if (!res.ok) {
-          const errText = await res.text();
-          throw new Error(`rag-chat (${res.status}): ${errText.slice(0, 200)}`);
+        if (args.summary_id) {
+          // Specific summary requested
+          const { data } = await db
+            .from("summaries")
+            .select("title, content")
+            .eq("id", args.summary_id as string)
+            .single();
+          if (data) {
+            context = `Fuente: "${data.title}"\n${((data.content as string) || "").slice(0, 4000)}`;
+          }
+        } else {
+          // No summary_id: fetch recent summaries from student's courses
+          const { data: memberships } = await db
+            .from("course_members")
+            .select("course_id")
+            .eq("user_id", userId)
+            .limit(5);
+
+          if (memberships?.length) {
+            const courseIds = memberships.map((m) => m.course_id);
+            const { data: summaries } = await db
+              .from("summaries")
+              .select("title, content")
+              .in("course_id", courseIds)
+              .order("updated_at", { ascending: false })
+              .limit(3);
+
+            if (summaries?.length) {
+              context = summaries
+                .map((s) => `## ${s.title}\n${((s.content as string) || "").slice(0, 1500)}`)
+                .join("\n\n");
+            }
+          }
         }
 
-        const result = await res.json();
-        return { name, result: { answer: result.data?.answer ?? result.data?.text ?? "Sin respuesta" } };
+        const { text } = await generateText({
+          prompt: context
+            ? `Contexto del curso del alumno:\n${context}\n\n---\nPregunta: ${question}`
+            : `Pregunta académica: ${question}`,
+          systemPrompt:
+            "Eres un tutor universitario experto. Responde de forma clara y concisa en español. " +
+            "Máximo 800 caracteres (es para WhatsApp). Si tienes contexto del curso, basáte en él. " +
+            "Si no tienes suficiente información, dilo honestamente.",
+          temperature: 0.3,
+          maxTokens: 512,
+        });
+
+        return { name, result: { answer: text } };
       }
 
+      // ─── Async tools (2) — enqueue and respond immediately ────
+
       case "generate_content": {
-        // Async operation — enqueue and respond immediately
         return {
           name,
           result: {
+            status: "queued",
             message: "Generando contenido... Te aviso cuando esté listo.",
             action: args.action,
             summary_id: args.summary_id,
@@ -433,12 +474,13 @@ export async function executeToolCall(
         };
       }
 
-      // ─── Async tools (1) ────────────────────────────
-
       case "generate_weekly_report": {
         return {
           name,
-          result: { message: "Generando tu reporte semanal... Te lo envío en unos segundos." },
+          result: {
+            status: "queued",
+            message: "Generando tu reporte semanal... Te lo envío en unos segundos.",
+          },
           isAsync: true,
         };
       }

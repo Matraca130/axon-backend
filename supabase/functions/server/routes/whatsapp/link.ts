@@ -130,11 +130,12 @@ export async function verifyLinkCode(
   const db = getAdminClient();
 
   // Search for a linking session with this code
+  // A5 FIX: increased from limit(50) to limit(200)
   const { data: sessions, error: searchError } = await db
     .from("whatsapp_sessions")
     .select("phone_hash, current_context, expires_at")
     .eq("mode", "linking")
-    .limit(50); // Small table, linking sessions are rare
+    .limit(200);
 
   if (searchError || !sessions) {
     console.error(`[WA-Link] Code search failed: ${searchError?.message}`);

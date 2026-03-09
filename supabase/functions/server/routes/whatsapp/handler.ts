@@ -14,6 +14,10 @@
  * @see AUDIT F10: tool_config with mode: AUTO
  * @see AUDIT F11: Correct multi-turn functionCall/functionResponse format
  * @see AUDIT F12: Inline processing for fast ops, pgmq for slow ops
+ * @see A4 FIX: Async functionResponse includes status:'queued'
+ * @see A6 FIX: buildStudentContext logs errors
+ * @see A9 FIX: Dedup record now inserted by webhook.ts before handleMessage;
+ *              handler.ts updates the existing record instead of inserting new.
  */
 
 import { getAdminClient } from "../../db.ts";
@@ -236,7 +240,9 @@ async function buildStudentContext(userId: string): Promise<string> {
       `Nombre: ${name}`,
       `Cursos: ${courses.length > 0 ? courses.join(", ") : "Ningún curso inscrito"}`,
     ].join("\n");
-  } catch {
+  } catch (e) {
+    // A6 FIX: Log the error instead of silencing it
+    console.warn(`[WA-Handler] buildStudentContext failed: ${(e as Error).message}`);
     return "No se pudo cargar el contexto del alumno.";
   }
 }
@@ -338,9 +344,11 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
         // Handle async tools (generate_content, weekly_report)
         if (toolResult.isAsync) {
           // TODO: Enqueue in pgmq for background processing
-          await sendText(phone, toolResult.result?.toString() ?? "Procesando... ⏳");
+          const asyncResult = toolResult.result as Record<string, unknown>;
+          await sendText(phone, (asyncResult?.message as string) ?? "Procesando... ⏳");
 
-          // AUDIT F11: Add functionResponse to history
+          // A4 FIX: functionResponse includes status:'queued' to help
+          // Gemini distinguish from completed results on next turn
           history.push({
             role: "user",
             parts: [{ functionResponse: { name: toolName, response: { content: toolResult.result } } }],
@@ -414,22 +422,18 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
       console.warn(`[WA-Handler] Session update failed (concurrent modification), message still processed`);
     }
 
-    // ── Step 7: Log (fire-and-forget) ──
+    // ── Step 7: Update log record (A9 FIX: record was pre-inserted by webhook.ts) ──
     const latencyMs = Date.now() - startMs;
     const db = getAdminClient();
     db.from("whatsapp_message_log")
-      .insert({
-        phone_hash: phoneHash,
-        user_id: userId,
-        wa_message_id: messageId,
-        direction: "in",
-        message_type: messageType,
+      .update({
         tool_called: toolsUsed.length > 0 ? toolsUsed.join(",") : null,
         latency_ms: latencyMs,
         success: true,
       })
+      .eq("wa_message_id", messageId)
       .then(({ error }) => {
-        if (error) console.warn(`[WA-Handler] Log failed: ${error.message}`);
+        if (error) console.warn(`[WA-Handler] Log update failed: ${error.message}`);
       });
 
     console.log(
@@ -447,19 +451,15 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
       // Can't even send error message — nothing to do
     }
 
-    // Log the error
+    // Update the pre-inserted log record with error info (A9 FIX)
     const db = getAdminClient();
     db.from("whatsapp_message_log")
-      .insert({
-        phone_hash: phoneHash,
-        user_id: userId,
-        wa_message_id: messageId,
-        direction: "in",
-        message_type: messageType,
+      .update({
         success: false,
         error_message: errorMsg.slice(0, 500),
         latency_ms: Date.now() - startMs,
       })
+      .eq("wa_message_id", messageId)
       .then(() => {});
   }
 }

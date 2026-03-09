@@ -20,6 +20,9 @@
  * Slow ops (generate_content, weekly_report) are handled by tools.ts
  * returning isAsync=true, which sends an immediate response to user.
  *
+ * A9 FIX: Dedup record is now inserted BEFORE processing to close the
+ * race condition window where Meta retransmissions could bypass dedup.
+ *
  * @see https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/components
  */
 
@@ -106,7 +109,7 @@ async function verifyMetaSignature(
   }
 }
 
-// ─── Deduplication (AUDIT F7) ─────────────────────────────
+// ─── Deduplication (AUDIT F7 + A9 FIX) ────────────────────
 
 async function isDuplicate(waMessageId: string): Promise<boolean> {
   const admin = getAdminClient();
@@ -116,6 +119,34 @@ async function isDuplicate(waMessageId: string): Promise<boolean> {
     .eq("wa_message_id", waMessageId)
     .limit(1);
   return (data?.length ?? 0) > 0;
+}
+
+/**
+ * A9 FIX: Insert a preliminary dedup record BEFORE processing.
+ * This closes the race condition where Meta retransmissions could
+ * arrive during the 2-5s processing window and bypass the dedup check.
+ * handler.ts will UPDATE this record with tool_called, latency, etc.
+ */
+async function insertDedupRecord(
+  waMessageId: string,
+  phoneHash: string,
+  userId: string | null,
+  messageType: string,
+): Promise<void> {
+  const admin = getAdminClient();
+  try {
+    await admin.from("whatsapp_message_log").insert({
+      wa_message_id: waMessageId,
+      phone_hash: phoneHash,
+      user_id: userId,
+      direction: "in",
+      message_type: messageType,
+      success: true, // Optimistic; handler.ts updates if fails
+    });
+  } catch (e) {
+    // Non-fatal: dedup is best-effort
+    console.warn(`[WA-Webhook] Dedup record insert failed: ${(e as Error).message}`);
+  }
 }
 
 // ─── Phone Lookup ───────────────────────────────────────
@@ -172,8 +203,7 @@ export async function handleVerification(c: Context): Promise<Response> {
  * POST /webhooks/whatsapp — Incoming messages from Meta.
  *
  * AUDIT F12: Processing is INLINE (await before return).
- * Meta allows 5s before retransmitting. Most ops complete in <3s.
- * Slow ops are handled at the tools layer (return isAsync=true + immediate user response).
+ * A9 FIX: Dedup record inserted BEFORE processing to prevent duplicates.
  */
 export async function handleIncoming(c: Context): Promise<Response> {
   const startMs = Date.now();
@@ -214,7 +244,7 @@ export async function handleIncoming(c: Context): Promise<Response> {
   const messageType = message.type;
   const contactName = contacts?.[0]?.profile?.name ?? "Unknown";
 
-  // ── Step 4: Dedup ──
+  // ── Step 4: Dedup check ──
   try {
     if (await isDuplicate(waMessageId)) {
       console.log(`[WA-Webhook] Duplicate ${waMessageId}, ignoring`);
@@ -263,6 +293,9 @@ export async function handleIncoming(c: Context): Promise<Response> {
     const linked = await lookupLinkedUser(from);
 
     if (linked) {
+      // A9 FIX: Insert dedup record BEFORE processing
+      await insertDedupRecord(waMessageId, linked.phoneHash, linked.userId, messageType);
+
       // ── LINKED USER: Call handler ──
       await handleMessage({
         phone: from,
@@ -275,6 +308,9 @@ export async function handleIncoming(c: Context): Promise<Response> {
         audioMediaId,
       });
     } else {
+      // A9 FIX: Insert dedup record for unlinked users too
+      await insertDedupRecord(waMessageId, from, null, messageType);
+
       // ── UNLINKED USER ──
       if (textContent && isLinkingCode(textContent)) {
         // Attempt to verify linking code
