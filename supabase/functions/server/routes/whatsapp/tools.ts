@@ -7,6 +7,9 @@
  *   S14: handle_voice_message now uses Gemini multimodal STT
  *   S15: ask_academic_question uses full RAG pipeline
  *        (embeddings + hybrid search + re-ranking)
+ *
+ * N8 FIX: Integrated formatters for check_progress, get_schedule,
+ *         browse_content. Gemini gets pre-formatted WhatsApp text.
  */
 
 import { getAdminClient } from "../../db.ts";
@@ -19,6 +22,11 @@ import {
   mergeSearchResults,
   type MatchedChunk,
 } from "../../retrieval-strategies.ts";
+import {
+  formatProgressSummary,
+  formatScheduleSummary,
+  formatBrowseContent,
+} from "./formatter.ts";
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -152,7 +160,7 @@ export const WHATSAPP_TOOLS: GeminiFunctionDeclaration[] = [
   },
 ];
 
-// ─── System Prompt ───────────────────────────────────────
+// ─── System Prompt ──────────────────────────────────────
 
 export const WHATSAPP_SYSTEM_PROMPT = `Eres Axon, un asistente de estudio inteligente que ayuda a estudiantes universitarios por WhatsApp.
 
@@ -176,6 +184,7 @@ REGLAS:
 4. submit_review SOLO durante sesi\u00f3n de flashcards activa
 5. generate_content y generate_weekly_report son lentas \u2014 avisa al alumno
 6. Si ves functionResponse con status:'queued', la operaci\u00f3n est\u00e1 EN PROCESO
+7. Cuando recibes un functionResponse con formatted_text, usa ESE texto como base de tu respuesta (ya est\u00e1 optimizado para WhatsApp). Pod\u00e9s ajustarlo levemente pero no lo reescribas desde cero.
 
 CONTEXTO DEL ALUMNO:
 {STUDENT_CONTEXT}
@@ -186,19 +195,6 @@ CONTEXTO DEL ALUMNO:
 const RAG_MAX_CONTEXT_CHARS = 4000;
 const RAG_TOP_K = 5;
 
-/**
- * S15: Full RAG pipeline for WhatsApp ask_academic_question.
- *
- * Pipeline:
- *   1. selectStrategy() picks standard/multi_query/hyde
- *   2. executeRetrievalEmbedding() generates embeddings
- *   3. For each embedding, call rag_hybrid_search RPC
- *   4. mergeSearchResults() deduplicates
- *   5. rerankWithGemini() re-ranks by relevance
- *   6. Build context string from top chunks
- *
- * Returns formatted context string, or "" if no results.
- */
 async function ragSearch(
   question: string,
   userId: string,
@@ -207,7 +203,6 @@ async function ragSearch(
   const db = getAdminClient();
 
   try {
-    // Get user's course IDs for scoping
     const { data: memberships } = await db
       .from("course_members")
       .select("course_id")
@@ -219,17 +214,13 @@ async function ragSearch(
       return { context: "", sources: [], strategy: "no_courses" };
     }
 
-    // 1. Select retrieval strategy
     const strategy = summaryId ? "standard" : selectStrategy(question, summaryId ?? null, 0);
-
-    // 2. Generate embeddings
     const { embeddings } = await executeRetrievalEmbedding(strategy, question);
 
-    // 3. Run hybrid search for each embedding
     const searchPromises = embeddings.map(async ({ embedding }) => {
       const { data, error } = await db.rpc("rag_hybrid_search", {
         p_embedding: `[${embedding.join(",")}]`,
-        p_match_count: RAG_TOP_K * 2, // fetch extra for re-ranking
+        p_match_count: RAG_TOP_K * 2,
         p_full_text_weight: 0.3,
         p_semantic_weight: 0.7,
         p_rrf_k: 60,
@@ -244,25 +235,20 @@ async function ragSearch(
     });
 
     const resultSets = await Promise.all(searchPromises);
-
-    // 4. Merge results from all embeddings
     let merged = mergeSearchResults(resultSets);
 
     if (merged.length === 0) {
       return { context: "", sources: [], strategy: `${strategy}_empty` };
     }
 
-    // 5. Re-rank with Gemini
     merged = await rerankWithGemini(question, merged, RAG_TOP_K);
 
-    // 6. Build context string
     let contextChars = 0;
     const contextParts: string[] = [];
     const sources: string[] = [];
 
     for (const chunk of merged) {
       if (contextChars + chunk.content.length > RAG_MAX_CONTEXT_CHARS) {
-        // Add partial if we have space
         const remaining = RAG_MAX_CONTEXT_CHARS - contextChars;
         if (remaining > 200) {
           contextParts.push(
@@ -329,14 +315,25 @@ export async function executeToolCall(
           ? (data!.reduce((sum, r) => sum + (r.mastery_level ?? 0), 0) / total).toFixed(1)
           : "0";
         const weakTopics = data?.filter((r) => (r.mastery_level ?? 0) < 0.5) ?? [];
+
+        const resultData = {
+          total_topics: total,
+          average_mastery: avgMastery,
+          weak_topics: weakTopics.slice(0, 5).map((t) => t.topic_name),
+          details: data?.slice(0, 10),
+        };
+
+        // N8 FIX: Inject pre-formatted WhatsApp text
+        const formatted = formatProgressSummary(resultData as {
+          total_topics: number;
+          average_mastery: string;
+          weak_topics: string[];
+          details: Array<{ topic_name: string; course_name: string; mastery_level: number }>;
+        });
+
         return {
           name,
-          result: {
-            total_topics: total,
-            average_mastery: avgMastery,
-            weak_topics: weakTopics.slice(0, 5).map((t) => t.topic_name),
-            details: data?.slice(0, 10),
-          },
+          result: { ...resultData, formatted_text: formatted },
         };
       }
 
@@ -356,18 +353,31 @@ export async function executeToolCall(
           .order("due_date", { ascending: true })
           .limit(20);
         if (error) throw new Error(`study_plan_tasks: ${error.message}`);
+
+        const resultData = {
+          period,
+          tasks: data ?? [],
+          pending: data?.filter((t) => !t.is_completed).length ?? 0,
+          completed: data?.filter((t) => t.is_completed).length ?? 0,
+        };
+
+        // N8 FIX: Inject pre-formatted WhatsApp text
+        const formatted = formatScheduleSummary(resultData as {
+          period: string;
+          tasks: Array<{ title: string; due_date: string; is_completed: boolean; description?: string }>;
+          pending: number;
+          completed: number;
+        });
+
         return {
           name,
-          result: {
-            period,
-            tasks: data ?? [],
-            pending: data?.filter((t) => !t.is_completed).length ?? 0,
-            completed: data?.filter((t) => t.is_completed).length ?? 0,
-          },
+          result: { ...resultData, formatted_text: formatted },
         };
       }
 
       case "browse_content": {
+        let browseResult: { level: string; items: unknown[] };
+
         if (args.section_id) {
           const { data, error } = await db
             .from("keywords")
@@ -376,23 +386,34 @@ export async function executeToolCall(
             .order("position", { ascending: true })
             .limit(30);
           if (error) throw new Error(`keywords: ${error.message}`);
-          return { name, result: { level: "keywords", items: data } };
-        }
-        if (args.course_id) {
+          browseResult = { level: "keywords", items: data ?? [] };
+        } else if (args.course_id) {
           const { data, error } = await db
             .from("sections")
             .select("id, name, position")
             .eq("course_id", args.course_id as string)
             .order("position", { ascending: true });
           if (error) throw new Error(`sections: ${error.message}`);
-          return { name, result: { level: "sections", items: data } };
+          browseResult = { level: "sections", items: data ?? [] };
+        } else {
+          const { data, error } = await db
+            .from("course_members")
+            .select("courses(id, name, code)")
+            .eq("user_id", userId);
+          if (error) throw new Error(`courses: ${error.message}`);
+          browseResult = { level: "courses", items: data?.map((cm) => cm.courses) ?? [] };
         }
-        const { data, error } = await db
-          .from("course_members")
-          .select("courses(id, name, code)")
-          .eq("user_id", userId);
-        if (error) throw new Error(`courses: ${error.message}`);
-        return { name, result: { level: "courses", items: data?.map((cm) => cm.courses) } };
+
+        // N8 FIX: Inject pre-formatted WhatsApp text
+        const formatted = formatBrowseContent(browseResult as {
+          level: "courses" | "sections" | "keywords";
+          items: Array<Record<string, unknown>>;
+        });
+
+        return {
+          name,
+          result: { ...browseResult, formatted_text: formatted },
+        };
       }
 
       case "submit_review": {
@@ -423,7 +444,6 @@ export async function executeToolCall(
         const question = args.question as string;
         const summaryId = args.summary_id as string | undefined;
 
-        // S15: Use full RAG pipeline (embeddings + hybrid search + reranking)
         const { context, sources, strategy } = await ragSearch(
           question,
           userId,
@@ -435,7 +455,6 @@ export async function executeToolCall(
           `context=${context.length} chars`,
         );
 
-        // Fallback: if RAG returned nothing, try direct summary fetch
         let finalContext = context;
         if (!finalContext && summaryId) {
           const { data } = await db
@@ -497,7 +516,6 @@ export async function executeToolCall(
         };
       }
 
-      // S14: Voice message handling (transcription done in handler.ts now)
       case "handle_voice_message": {
         return {
           name,
