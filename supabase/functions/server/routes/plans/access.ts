@@ -5,6 +5,10 @@
  * GET /usage-today      — Today's quiz, flashcard, AI usage counts
  *
  * P-8 FIX: usage-today uses proper tomorrow boundary.
+ *
+ * W7-SEC01 FIX: Both endpoints now use auth user.id instead of
+ * c.req.query("user_id"). The old pattern allowed any authenticated
+ * user to query any other user's subscription and usage data (IDOR).
  */
 
 import { Hono } from "npm:hono";
@@ -19,9 +23,9 @@ accessRoutes.get(`${PREFIX}/content-access`, async (c: Context) => {
   if (auth instanceof Response) return auth;
   const { user, db } = auth;
 
-  const userId = c.req.query("user_id");
+  // W7-SEC01 FIX: Use authenticated user.id instead of query param
+  const userId = user.id;
   const institutionId = c.req.query("institution_id");
-  if (!isUuid(userId)) return err(c, "user_id must be a valid UUID", 400);
   if (!isUuid(institutionId)) return err(c, "institution_id must be a valid UUID", 400);
 
   const { data: sub, error: subErr } = await db
@@ -59,11 +63,12 @@ accessRoutes.get(`${PREFIX}/content-access`, async (c: Context) => {
 accessRoutes.get(`${PREFIX}/usage-today`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  // W7-SEC01 FIX: Destructure user (was missing) to use user.id
+  const { user, db } = auth;
 
-  const userId = c.req.query("user_id");
+  // W7-SEC01 FIX: Use authenticated user.id instead of query param
+  const userId = user.id;
   const institutionId = c.req.query("institution_id");
-  if (!isUuid(userId)) return err(c, "user_id must be a valid UUID", 400);
   if (!isUuid(institutionId)) return err(c, "institution_id must be a valid UUID", 400);
 
   const todayDate = new Date();

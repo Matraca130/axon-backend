@@ -4,11 +4,22 @@
  * POST /mux/track-view — UPSERT video_views, BKT/FSRS signal on first completion.
  * N-7 FIX: Uses upsert_video_view() DB function for atomic view_count.
  * Fallback: old read+write pattern if migration not yet applied.
+ *
+ * W7-SEC03 FIX: institution_id is no longer accepted from the request body.
+ * It is resolved server-side from video→summary→resolve_parent_institution.
+ * This prevents an attacker from associating view data with arbitrary
+ * institutions or tracking views against videos they don't have access to.
  */
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { PREFIX, authenticate, safeJson, ok, err } from "../../db.ts";
+import { isUuid } from "../../validate.ts";
+import {
+  requireInstitutionRole,
+  isDenied,
+  ALL_ROLES,
+} from "../../auth-helpers.ts";
 import { fireFirstCompletionSignal } from "./helpers.ts";
 
 export const muxTrackingRoutes = new Hono();
@@ -22,13 +33,36 @@ muxTrackingRoutes.post(`${PREFIX}/mux/track-view`, async (c: Context) => {
   if (!body) return err(c, "Invalid or missing JSON body", 400);
 
   const {
-    video_id, institution_id,
+    video_id,
+    // W7-SEC03 FIX: institution_id removed from body destructuring
     watch_time_seconds = 0, total_watch_time_seconds = 0,
     completion_percentage = 0, completed = false, last_position_seconds = 0,
   } = body;
 
-  if (typeof video_id !== "string" || typeof institution_id !== "string")
-    return err(c, "video_id and institution_id are required strings", 400);
+  if (!isUuid(video_id)) return err(c, "video_id must be a valid UUID", 400);
+
+  // W7-SEC03 FIX: Resolve institution server-side from video→summary chain.
+  // This also validates the video exists and user has access.
+  const { data: videoRow, error: videoErr } = await db
+    .from("videos").select("summary_id")
+    .eq("id", video_id).single();
+
+  if (videoErr || !videoRow)
+    return err(c, "Video not found", 404);
+
+  const { data: instId } = await db.rpc("resolve_parent_institution", {
+    p_table: "summaries",
+    p_id: videoRow.summary_id,
+  });
+  if (!instId) return err(c, "Cannot resolve video institution", 404);
+
+  const institution_id = instId as string;
+
+  // Verify user has membership in this institution
+  const roleCheck = await requireInstitutionRole(
+    db, user.id, institution_id, ALL_ROLES,
+  );
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   // ── Primary: atomic DB function (N-7 FIX) ──
   const { data: rpcData, error: rpcError } = await db.rpc("upsert_video_view", {
