@@ -2,37 +2,25 @@
  * routes/whatsapp/index.ts — WhatsApp module combiner
  *
  * Mounts all WhatsApp sub-modules into a single Hono router.
- * Follows the same pattern as routes/ai/index.ts and routes/mux/index.ts.
  *
  * Sub-modules:
- *   webhook.ts    — GET  /webhooks/whatsapp (Meta verification challenge)
- *                   POST /webhooks/whatsapp (incoming messages, HMAC verified)
- *   link.ts       — POST /whatsapp/link-code  (generate 6-digit code, JWT required)
- *                   POST /whatsapp/unlink     (deactivate link, JWT required)
+ *   webhook.ts    — GET/POST /webhooks/whatsapp
+ *   link.ts       — POST /whatsapp/link-code, /whatsapp/unlink
+ *   async-queue   — POST /whatsapp/process-queue (C3 FIX)
  *
  * Feature flag: WHATSAPP_ENABLED env var.
- *   - Set to "true" to enable all WhatsApp endpoints.
- *   - Any other value (or unset) → all endpoints return 503.
- *   - This allows safe deployment: merge code to main with flag off,
- *     enable in staging first, then production.
- *
- * How to activate:
- *   supabase secrets set WHATSAPP_ENABLED=true
- *   supabase secrets set WHATSAPP_VERIFY_TOKEN=<random-string>
- *   supabase secrets set WHATSAPP_APP_SECRET=<from-meta-dashboard>
- *   supabase secrets set WHATSAPP_PHONE_NUMBER_ID=<your-business-phone-id>
- *   supabase secrets set WHATSAPP_ACCESS_TOKEN=<permanent-or-system-user-token>
  */
 
 import { Hono } from "npm:hono";
 import type { Context, Next } from "npm:hono";
-import { PREFIX, err } from "../../db.ts";
+import { PREFIX, err, ok, getAdminClient } from "../../db.ts";
 import { handleVerification, handleIncoming } from "./webhook.ts";
 import { generateLinkCode, unlinkPhone } from "./link.ts";
+import { processPendingJobs } from "./async-queue.ts";
 
 const whatsappRoutes = new Hono();
 
-// ─── Feature Flag Middleware ────────────────────────────────
+// ─── Feature Flag Middleware ────────────────────────────
 
 const WHATSAPP_ENABLED = Deno.env.get("WHATSAPP_ENABLED") === "true";
 
@@ -47,19 +35,37 @@ async function featureFlagMiddleware(c: Context, next: Next) {
   return next();
 }
 
-// Apply feature flag to all WhatsApp routes
 whatsappRoutes.use(`${PREFIX}/webhooks/whatsapp`, featureFlagMiddleware);
 whatsappRoutes.use(`${PREFIX}/webhooks/whatsapp/*`, featureFlagMiddleware);
 whatsappRoutes.use(`${PREFIX}/whatsapp/*`, featureFlagMiddleware);
 
-// ─── Webhook Routes (no auth — verified by HMAC) ─────────────
+// ─── Webhook Routes (no auth — verified by HMAC) ────────
 
 whatsappRoutes.get(`${PREFIX}/webhooks/whatsapp`, handleVerification);
 whatsappRoutes.post(`${PREFIX}/webhooks/whatsapp`, handleIncoming);
 
-// ─── Link Routes (JWT auth required) ───────────────────────
+// ─── Link Routes (JWT auth required) ────────────────────
 
 whatsappRoutes.post(`${PREFIX}/whatsapp/link-code`, generateLinkCode);
 whatsappRoutes.post(`${PREFIX}/whatsapp/unlink`, unlinkPhone);
+
+// ─── Queue Processing (C3 FIX) ──────────────────────────
+// Called by pg_cron every 10 seconds:
+//   SELECT cron.schedule('wa-queue-processor', '*/10 * * * * *',
+//     $$SELECT net.http_post('https://<project>.supabase.co/functions/v1/server/whatsapp/process-queue',
+//       '{}'::jsonb, '{"Authorization": "Bearer <service_role_key>"}'::jsonb)$$);
+// Also called fire-and-forget from handler.ts after each enqueue.
+
+whatsappRoutes.post(`${PREFIX}/whatsapp/process-queue`, async (c: Context) => {
+  // No JWT auth needed — this endpoint is internal (called by pg_cron/service_role)
+  // The feature flag middleware already gates access.
+  try {
+    const processed = await processPendingJobs(5);
+    return ok(c, { processed });
+  } catch (e) {
+    console.error(`[WA-Queue] Process queue failed: ${(e as Error).message}`);
+    return err(c, "Queue processing failed", 500);
+  }
+});
 
 export { whatsappRoutes };

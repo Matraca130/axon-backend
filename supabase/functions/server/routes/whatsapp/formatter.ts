@@ -6,16 +6,18 @@
  *
  * Design constraints:
  *   - Max 4096 chars per WhatsApp text message
- *   - Target ~900 chars for bot responses (readability on mobile)
  *   - Use emojis sparingly but consistently
  *   - Use bullets and line breaks for structure
  *   - Spanish language
+ *
+ * C7 FIX: formatFlashcardSummary now imported by handler.ts for
+ * get_study_queue fallback path.
+ * C9 FIX: Removed unused TARGET_CHARS constant.
  */
 
 // ─── Constants ───────────────────────────────────────────
 
 const WA_MAX_CHARS = 4096;
-const TARGET_CHARS = 900;
 
 // ─── Flashcard Queue Formatter ──────────────────────────
 
@@ -29,7 +31,7 @@ interface StudyQueueCard {
 
 /**
  * Formats study queue data for a summary message.
- * Used when Gemini processes the get_study_queue tool result.
+ * C7 FIX: Now imported by handler.ts for get_study_queue fallback.
  */
 export function formatFlashcardSummary(
   cards: StudyQueueCard[],
@@ -44,7 +46,6 @@ export function formatFlashcardSummary(
     "",
   ];
 
-  // Group by course if available
   const byCourse = new Map<string, StudyQueueCard[]>();
   for (const card of cards.slice(0, 15)) {
     const course = card.course_name || "Sin curso";
@@ -94,7 +95,7 @@ export function formatProgressSummary(progress: ProgressData): string {
 
   if (progress.weak_topics?.length > 0) {
     lines.push("");
-    lines.push(`\u26a0\ufe0f *Topics d\u00e9biles:*`);
+    lines.push(`\u26a0\ufe0f *Topics débiles:*`);
     for (const topic of progress.weak_topics.slice(0, 5)) {
       lines.push(`  \u2022 ${topic}`);
     }
@@ -130,7 +131,7 @@ export function formatScheduleSummary(schedule: ScheduleData): string {
   const periodLabel = schedule.period === "week" ? "esta semana" : "hoy";
 
   if (!schedule.tasks?.length) {
-    return `\ud83d\udcc5 No ten\u00e9s tareas para ${periodLabel}. \u00a1Tiempo libre! \ud83c\udf89`;
+    return `\ud83d\udcc5 No tenés tareas para ${periodLabel}. ¡Tiempo libre! \ud83c\udf89`;
   }
 
   const lines: string[] = [
@@ -146,7 +147,7 @@ export function formatScheduleSummary(schedule: ScheduleData): string {
   }
 
   if (schedule.tasks.length > 10) {
-    lines.push(`\n\u2026 y ${schedule.tasks.length - 10} m\u00e1s`);
+    lines.push(`\n\u2026 y ${schedule.tasks.length - 10} más`);
   }
 
   return truncateForWhatsApp(lines.join("\n"));
@@ -162,7 +163,7 @@ interface BrowseResult {
 export function formatBrowseContent(result: BrowseResult): string {
   const items = result.items || [];
   if (items.length === 0) {
-    return "No se encontr\u00f3 contenido. \ud83d\ude14";
+    return "No se encontró contenido. \ud83d\ude14";
   }
 
   const lines: string[] = [];
@@ -199,10 +200,6 @@ export function formatBrowseContent(result: BrowseResult): string {
 
 // ─── Helpers ────────────────────────────────────────────
 
-/**
- * Truncates text to WhatsApp's 4096 char limit.
- * Prefers breaking at newlines to avoid mid-word cuts.
- */
 export function truncateForWhatsApp(text: string): string {
   if (text.length <= WA_MAX_CHARS) return text;
 
@@ -216,13 +213,10 @@ export function truncateForWhatsApp(text: string): string {
   return truncated + "\u2026";
 }
 
-/**
- * Formats a short date like "Lun 10 Mar" from ISO timestamp.
- */
 function formatShortDate(isoDate: string): string {
   try {
     const d = new Date(isoDate);
-    const days = ["Dom", "Lun", "Mar", "Mi\u00e9", "Jue", "Vie", "S\u00e1b"];
+    const days = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
     const months = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
     return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]}`;
   } catch {
@@ -230,12 +224,9 @@ function formatShortDate(isoDate: string): string {
   }
 }
 
-/**
- * Visual mastery bar using emojis. 0.0-1.0 scale.
- */
 function masteryBar(level: number): string {
-  if (level >= 0.8) return "\ud83d\udfe2"; // green
-  if (level >= 0.5) return "\ud83d\udfe1"; // yellow
-  if (level >= 0.3) return "\ud83d\udfe0"; // orange
-  return "\ud83d\udd34"; // red
+  if (level >= 0.8) return "\ud83d\udfe2";
+  if (level >= 0.5) return "\ud83d\udfe1";
+  if (level >= 0.3) return "\ud83d\udfe0";
+  return "\ud83d\udd34";
 }

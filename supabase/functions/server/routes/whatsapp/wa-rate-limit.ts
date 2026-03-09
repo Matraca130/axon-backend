@@ -11,8 +11,8 @@
  *   - Linked users:   30 messages per minute (normal usage)
  *   - Unlinked users:  10 messages per minute (anti-spam for strangers)
  *
- * Implementation: In-memory Map (same pattern as rate-limit.ts).
- * Trade-off: per-isolate counters. At Axon's scale, this is acceptable.
+ * C4 FIX: Returns block type ('allowed'|'first_block'|'silent_block')
+ * so webhook.ts only sends rate-limit message on first_block.
  */
 
 import { sendText } from "./wa-client.ts";
@@ -20,16 +20,20 @@ import { sendText } from "./wa-client.ts";
 // ─── Configuration ───────────────────────────────────────
 
 const WINDOW_MS = 60_000; // 1 minute
-const LINKED_LIMIT = 30;   // 30 msg/min for linked users
-const UNLINKED_LIMIT = 10; // 10 msg/min for unlinked/unknown
-const CLEANUP_INTERVAL_MS = 5 * 60_000; // Cleanup every 5 min
+const LINKED_LIMIT = 30;
+const UNLINKED_LIMIT = 10;
+const CLEANUP_INTERVAL_MS = 5 * 60_000;
 
-// ─── State ──────────────────────────────────────────────
+// ─── Types ──────────────────────────────────────────────
+
+export type RateLimitResult = "allowed" | "first_block" | "silent_block";
 
 interface RateLimitEntry {
   count: number;
   resetAt: number;
 }
+
+// ─── State ──────────────────────────────────────────────
 
 const phoneLimitMap = new Map<string, RateLimitEntry>();
 let lastCleanup = Date.now();
@@ -39,14 +43,18 @@ let lastCleanup = Date.now();
 /**
  * Check if a phone number has exceeded its rate limit.
  *
- * @param phoneKey - Phone hash or raw phone (for unlinked users pre-hash)
+ * C4 FIX: Returns a typed result instead of boolean:
+ *   - 'allowed': request can proceed
+ *   - 'first_block': first time exceeding limit (send rate-limit message)
+ *   - 'silent_block': already notified, silently drop
+ *
+ * @param phoneKey - Phone hash (NEVER raw phone — see C6 FIX)
  * @param isLinked - Whether the user is linked (affects limit)
- * @returns true if request should be BLOCKED (rate limited)
  */
 export function checkWhatsAppRateLimit(
   phoneKey: string,
   isLinked: boolean,
-): boolean {
+): RateLimitResult {
   const now = Date.now();
   const limit = isLinked ? LINKED_LIMIT : UNLINKED_LIMIT;
 
@@ -59,16 +67,22 @@ export function checkWhatsAppRateLimit(
 
   if (!entry || now > entry.resetAt) {
     phoneLimitMap.set(phoneKey, { count: 1, resetAt: now + WINDOW_MS });
-    return false; // allowed
+    return "allowed";
   }
 
   entry.count++;
 
-  if (entry.count > limit) {
-    return true; // BLOCKED
+  if (entry.count === limit + 1) {
+    // C4 FIX: First time exceeding limit — send notification
+    return "first_block";
   }
 
-  return false; // allowed
+  if (entry.count > limit + 1) {
+    // C4 FIX: Already notified — silently drop to avoid spam
+    return "silent_block";
+  }
+
+  return "allowed";
 }
 
 /**
@@ -79,7 +93,7 @@ export async function sendRateLimitMessage(phone: string): Promise<void> {
   try {
     await sendText(
       phone,
-      "\u23f3 Demasiados mensajes. Esper\u00e1 un minuto antes de enviar otro. \ud83d\ude4f",
+      "\u23f3 Demasiados mensajes. Esperá un minuto antes de enviar otro. \ud83d\ude4f",
     );
   } catch {
     // Best-effort
@@ -101,8 +115,6 @@ function cleanupExpired(now: number): void {
     console.log(`[WA-RateLimit] Cleaned ${cleaned} expired entries`);
   }
 }
-
-// ─── Testing / Observability ────────────────────────────
 
 /** Returns the current map size (for health checks/diagnostics). */
 export function getRateLimitMapSize(): number {

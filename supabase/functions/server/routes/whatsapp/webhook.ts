@@ -5,34 +5,17 @@
  * POST /webhooks/whatsapp — Incoming messages (HMAC-SHA256 verified)
  *
  * Security:
- *   - No JWT auth (webhooks are unauthenticated by nature)
  *   - HMAC-SHA256 signature verification using WHATSAPP_APP_SECRET
  *   - timing-safe comparison to prevent timing attacks (AUDIT F3)
  *   - Deduplication by Meta message ID (AUDIT F7)
  *   - Per-phone rate limiting via wa-rate-limit.ts (S12)
  *
- * Message routing (S09):
- *   - Linked users → handleMessage() from handler.ts
- *   - Unlinked users + 6-digit code → verifyLinkCode() from link.ts
- *   - Unlinked users + other → onboarding message
- *
- * AUDIT F12: Processing is inline (await handleMessage before return 200).
- * Meta allows up to 5s for response. Most ops complete in <3s.
- * Slow ops (generate_content, weekly_report) are handled by tools.ts
- * returning isAsync=true, which sends an immediate response to user.
- *
- * A9 FIX: Dedup record is now inserted BEFORE processing to close the
- * race condition window where Meta retransmissions could bypass dedup.
- *
- * B4 FIX: Unlinked users' phone numbers are now hashed with a global
- * salt (WHATSAPP_APP_SECRET) before storing in message_log.
- *
- * B5 FIX: Meta message types ('interactive','audio') are normalized to
- * DB enum values ('button','voice') before INSERT to avoid CHECK violation.
- *
- * S12: Per-phone rate limiting (30/min linked, 10/min unlinked).
- *
- * @see https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/components
+ * Audit fixes applied:
+ *   B4: Unlinked users' phones hashed before storing
+ *   B5: Meta message types normalized before INSERT
+ *   C4: Rate limit message sent only on first_block
+ *   C5: Dedup record inserted for rate-limited messages
+ *   C6: Raw phone hashed before rate limit Map key
  */
 
 import type { Context } from "npm:hono";
@@ -45,7 +28,6 @@ import { checkWhatsAppRateLimit, sendRateLimitMessage } from "./wa-rate-limit.ts
 
 // ─── Types ───────────────────────────────────────────────
 
-/** Subset of Meta webhook payload we care about */
 interface WhatsAppWebhookBody {
   object: string;
   entry?: Array<{
@@ -121,19 +103,13 @@ async function verifyMetaSignature(
 
 // ─── Message Type Normalization (B5 FIX) ──────────────
 
-/**
- * B5 FIX: Meta sends 'interactive' and 'audio' as message types,
- * but whatsapp_message_log.message_type CHECK constraint only allows
- * ('text', 'voice', 'button', 'image'). Without normalization,
- * INSERT fails silently and dedup breaks for those message types.
- */
 function normalizeMessageType(metaType: string): string {
   switch (metaType) {
     case "interactive": return "button";
     case "audio": return "voice";
     case "text": return "text";
     case "image": return "image";
-    default: return "text"; // Safe fallback for unsupported types
+    default: return "text";
   }
 }
 
@@ -149,10 +125,6 @@ async function isDuplicate(waMessageId: string): Promise<boolean> {
   return (data?.length ?? 0) > 0;
 }
 
-/**
- * A9 FIX: Insert a preliminary dedup record BEFORE processing.
- * B5 FIX: messageType is pre-normalized by caller to match DB CHECK.
- */
 async function insertDedupRecord(
   waMessageId: string,
   phoneHash: string,
@@ -254,7 +226,6 @@ export async function handleIncoming(c: Context): Promise<Response> {
   const messageType = message.type;
   const contactName = contacts?.[0]?.profile?.name ?? "Unknown";
 
-  // B5 FIX: Normalize Meta message type to DB enum ONCE
   const dbMessageType = normalizeMessageType(messageType);
 
   // ── Step 4: Dedup check ──
@@ -300,25 +271,37 @@ export async function handleIncoming(c: Context): Promise<Response> {
     `text="${textContent.slice(0, 80)}"`,
   );
 
-  // ── Step 6: Route message (S09 + S12 rate limit) ──
+  // ── Step 6: Route message ──
   try {
-    // Look up linked user
     const linked = await lookupLinkedUser(from);
 
-    // S12: Per-phone rate limiting
-    const phoneKey = linked ? linked.phoneHash : from;
-    const isRateLimited = checkWhatsAppRateLimit(phoneKey, !!linked);
-    if (isRateLimited) {
-      console.warn(`[WA-Webhook] Rate limited: ${phoneKey.slice(0, 12)}...`);
-      await sendRateLimitMessage(from);
+    // C6 FIX: Always use hashed phone as rate limit key (never raw phone)
+    const globalSalt = Deno.env.get("WHATSAPP_APP_SECRET") ?? "axon-global-salt";
+    const rateLimitKey = linked
+      ? linked.phoneHash
+      : await hashPhone(from, globalSalt);
+
+    // C4 FIX: Rate limit returns block type
+    const rateLimitResult = checkWhatsAppRateLimit(rateLimitKey, !!linked);
+
+    if (rateLimitResult !== "allowed") {
+      console.warn(`[WA-Webhook] Rate limited (${rateLimitResult}): ${rateLimitKey.slice(0, 12)}...`);
+
+      // C5 FIX: Insert dedup record even for rate-limited messages
+      const phoneHashForLog = linked ? linked.phoneHash : rateLimitKey;
+      await insertDedupRecord(waMessageId, phoneHashForLog, linked?.userId ?? null, dbMessageType);
+
+      // C4 FIX: Only send rate-limit message on first block
+      if (rateLimitResult === "first_block") {
+        await sendRateLimitMessage(from);
+      }
+
       return c.text("OK", 200);
     }
 
     if (linked) {
-      // A9 + B5 FIX: Insert dedup record BEFORE processing
       await insertDedupRecord(waMessageId, linked.phoneHash, linked.userId, dbMessageType);
 
-      // ── LINKED USER: Call handler ──
       await handleMessage({
         phone: from,
         phoneHash: linked.phoneHash,
@@ -331,13 +314,10 @@ export async function handleIncoming(c: Context): Promise<Response> {
       });
     } else {
       // B4 FIX: Hash raw phone with global salt
-      const globalSalt = Deno.env.get("WHATSAPP_APP_SECRET") ?? "axon-global-salt";
-      const anonPhoneHash = await hashPhone(from, globalSalt);
+      const anonPhoneHash = rateLimitKey; // Already hashed above for C6
 
-      // A9 + B5 FIX: Insert dedup record for unlinked users
       await insertDedupRecord(waMessageId, anonPhoneHash, null, dbMessageType);
 
-      // ── UNLINKED USER ──
       if (textContent && isLinkingCode(textContent)) {
         const result = await verifyLinkCode(from, textContent.trim());
         if (result.success) {
@@ -375,7 +355,6 @@ export async function handleIncoming(c: Context): Promise<Response> {
     } catch { /* can't send error message */ }
   }
 
-  // ── Step 7: Return 200 ──
   const latencyMs = Date.now() - startMs;
   console.log(`[WA-Webhook] Completed in ${latencyMs}ms`);
 

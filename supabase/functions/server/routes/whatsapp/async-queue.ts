@@ -7,14 +7,14 @@
  *
  * Architecture:
  *   - Jobs are enqueued in the whatsapp_jobs table (fallback for pgmq)
- *   - Jobs are polled by a scheduled invocation or edge function cron
+ *   - Jobs are polled by POST /whatsapp/process-queue (called by pg_cron)
  *   - Each job is processed, and the result is sent to the user via WhatsApp
- *   - Retry logic: 3 attempts with exponential backoff
+ *   - Retry logic: 3 attempts
  *
- * Integration:
- *   - handler.ts calls enqueueJob() when a tool returns isAsync=true
- *   - processNextJob() is called externally (e.g., by a pg_cron trigger
- *     or a separate edge function invocation)
+ * C1 FIX: Phone number is AES-GCM encrypted before storing in job payload.
+ * Decrypted only when needed to send WhatsApp message.
+ *
+ * C2 FIX: Removed broken subquery in executeWeeklyReport.
  *
  * AUDIT F9: generate_content uses direct DB operations instead of
  * internal HTTP to avoid the service_role_key auth issue (A3).
@@ -29,16 +29,27 @@ import { sendText } from "./wa-client.ts";
 interface JobPayload {
   type: "generate_content" | "generate_weekly_report";
   user_id: string;
-  phone: string;       // Raw phone for sending the result
-  phone_hash: string;  // For logging
+  phone_encrypted: string; // C1 FIX: AES-GCM encrypted, NOT plaintext
+  phone_hash: string;      // For logging only
   // generate_content specific
   action?: "flashcard" | "quiz";
   summary_id?: string;
 }
 
+/** @deprecated Use JobPayload with phone_encrypted instead */
+interface LegacyJobPayload {
+  type: string;
+  user_id: string;
+  phone?: string;
+  phone_encrypted?: string;
+  phone_hash: string;
+  action?: string;
+  summary_id?: string;
+}
+
 interface JobRow {
   id: number;
-  payload: JobPayload;
+  payload: LegacyJobPayload;
   status: string;
   attempts: number;
   max_attempts: number;
@@ -49,13 +60,63 @@ interface JobRow {
 // ─── Constants ───────────────────────────────────────────
 
 const MAX_ATTEMPTS = 3;
-const BACKOFF_BASE_MS = 2000; // 2s, 4s, 8s
+
+// ─── Phone Encryption (C1 FIX: AUDIT-05 PII protection) ──
+
+/**
+ * C1 FIX: Encrypt phone number with AES-GCM before storing in job payload.
+ * Key is derived from WHATSAPP_APP_SECRET via SHA-256.
+ * IV is random 12 bytes, prepended to ciphertext.
+ * Output: base64(iv + ciphertext)
+ */
+export async function encryptPhone(phone: string): Promise<string> {
+  const secret = Deno.env.get("WHATSAPP_APP_SECRET") ?? "axon-fallback-key";
+  const encoder = new TextEncoder();
+  const keyMaterial = await crypto.subtle.digest("SHA-256", encoder.encode(secret));
+  const key = await crypto.subtle.importKey("raw", keyMaterial, "AES-GCM", false, ["encrypt"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoder.encode(phone));
+  const combined = new Uint8Array(iv.length + encrypted.byteLength);
+  combined.set(iv);
+  combined.set(new Uint8Array(encrypted), iv.length);
+  return btoa(String.fromCharCode(...combined));
+}
+
+async function decryptPhone(encryptedBase64: string): Promise<string> {
+  const secret = Deno.env.get("WHATSAPP_APP_SECRET") ?? "axon-fallback-key";
+  const encoder = new TextEncoder();
+  const keyMaterial = await crypto.subtle.digest("SHA-256", encoder.encode(secret));
+  const key = await crypto.subtle.importKey("raw", keyMaterial, "AES-GCM", false, ["decrypt"]);
+  const combined = Uint8Array.from(atob(encryptedBase64), (c) => c.charCodeAt(0));
+  const iv = combined.slice(0, 12);
+  const ciphertext = combined.slice(12);
+  const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+  return new TextDecoder().decode(decrypted);
+}
+
+/**
+ * Resolve phone from job payload. Handles both legacy (plaintext) and
+ * new (encrypted) payloads for backward compatibility during migration.
+ */
+async function resolvePhone(payload: LegacyJobPayload): Promise<string> {
+  if (payload.phone_encrypted) {
+    return await decryptPhone(payload.phone_encrypted);
+  }
+  // Legacy fallback: plaintext phone (pre-C1 fix jobs)
+  if (payload.phone) {
+    console.warn("[WA-Queue] Legacy plaintext phone in job payload — migrate to encrypted");
+    return payload.phone;
+  }
+  throw new Error("Job payload has no phone_encrypted or phone field");
+}
 
 // ─── Enqueue ────────────────────────────────────────────
 
 /**
  * Enqueue an async job for background processing.
  * Called from handler.ts when a tool returns isAsync=true.
+ *
+ * C1 FIX: phone_encrypted is pre-encrypted by the caller (handler.ts).
  */
 export async function enqueueJob(payload: JobPayload): Promise<boolean> {
   const db = getAdminClient();
@@ -87,14 +148,13 @@ export async function enqueueJob(payload: JobPayload): Promise<boolean> {
  * Polls for the next pending job and processes it.
  * Returns true if a job was processed, false if queue is empty.
  *
- * Called externally (e.g., by a scheduled edge function or
- * pg_cron trigger via HTTP).
+ * C3 FIX: Now called from:
+ *   1. POST /whatsapp/process-queue (pg_cron or manual)
+ *   2. Fire-and-forget in handler.ts after enqueue
  */
 export async function processNextJob(): Promise<boolean> {
   const db = getAdminClient();
 
-  // Atomic claim: SELECT + UPDATE in one query
-  // Only pick jobs that haven't exceeded max_attempts
   const { data: jobs, error: fetchErr } = await db
     .from("whatsapp_jobs")
     .select("*")
@@ -103,22 +163,28 @@ export async function processNextJob(): Promise<boolean> {
     .limit(1);
 
   if (fetchErr || !jobs || jobs.length === 0) {
-    return false; // Queue empty or error
+    return false;
   }
 
   const job = jobs[0] as JobRow;
 
-  // Mark as processing (optimistic, no lock)
-  await db
+  // CAS: Mark as processing only if still pending
+  const { data: claimed } = await db
     .from("whatsapp_jobs")
     .update({ status: "processing", attempts: job.attempts + 1 })
     .eq("id", job.id)
-    .eq("status", "pending"); // CAS: only if still pending
+    .eq("status", "pending")
+    .select("id")
+    .maybeSingle();
+
+  if (!claimed) {
+    // Another worker claimed it
+    return false;
+  }
 
   try {
     await executeJob(job.payload);
 
-    // Mark as done
     await db
       .from("whatsapp_jobs")
       .update({ status: "done", processed_at: new Date().toISOString() })
@@ -131,7 +197,6 @@ export async function processNextJob(): Promise<boolean> {
     const newAttempts = job.attempts + 1;
 
     if (newAttempts >= job.max_attempts) {
-      // Max retries exceeded → mark as failed
       await db
         .from("whatsapp_jobs")
         .update({
@@ -141,17 +206,17 @@ export async function processNextJob(): Promise<boolean> {
         })
         .eq("id", job.id);
 
-      // Notify user of failure
+      // C1 FIX: Decrypt phone for error notification
       try {
+        const phone = await resolvePhone(job.payload);
         await sendText(
-          job.payload.phone,
-          "No pude completar tu solicitud despu\u00e9s de varios intentos. Intent\u00e1 de nuevo m\u00e1s tarde. \ud83d\ude14",
+          phone,
+          "No pude completar tu solicitud después de varios intentos. Intentá de nuevo más tarde. \ud83d\ude14",
         );
       } catch { /* best-effort */ }
 
       console.error(`[WA-Queue] Job ${job.id} failed permanently: ${errorMsg}`);
     } else {
-      // Retry: mark as pending again
       await db
         .from("whatsapp_jobs")
         .update({
@@ -163,13 +228,13 @@ export async function processNextJob(): Promise<boolean> {
       console.warn(`[WA-Queue] Job ${job.id} failed (attempt ${newAttempts}/${job.max_attempts}): ${errorMsg}`);
     }
 
-    return true; // We processed (attempted) a job
+    return true;
   }
 }
 
 // ─── Job Executor ───────────────────────────────────────
 
-async function executeJob(payload: JobPayload): Promise<void> {
+async function executeJob(payload: LegacyJobPayload): Promise<void> {
   switch (payload.type) {
     case "generate_content":
       await executeGenerateContent(payload);
@@ -184,15 +249,17 @@ async function executeJob(payload: JobPayload): Promise<void> {
 
 // ─── Generate Content (flashcard/quiz) ───────────────────
 
-async function executeGenerateContent(payload: JobPayload): Promise<void> {
+async function executeGenerateContent(payload: LegacyJobPayload): Promise<void> {
   const db = getAdminClient();
-  const { user_id, phone, action, summary_id } = payload;
+  const { user_id, action, summary_id } = payload;
+
+  // C1 FIX: Decrypt phone
+  const phone = await resolvePhone(payload);
 
   if (!summary_id || !action) {
     throw new Error("generate_content requires summary_id and action");
   }
 
-  // Fetch summary content for context
   const { data: summary, error: sumErr } = await db
     .from("summaries")
     .select("title, content")
@@ -206,25 +273,22 @@ async function executeGenerateContent(payload: JobPayload): Promise<void> {
   const contentSlice = ((summary.content as string) || "").slice(0, 3000);
 
   if (action === "flashcard") {
-    // Generate flashcards via Gemini
     const { text } = await generateText({
       prompt:
         `Genera 5 flashcards de estudio basadas en este contenido:\n\n` +
-        `T\u00edtulo: ${summary.title}\n${contentSlice}\n\n` +
+        `Título: ${summary.title}\n${contentSlice}\n\n` +
         `Formato JSON:\n[{"front": "pregunta", "back": "respuesta"}]`,
       systemPrompt:
         "Eres un generador de flashcards educativas. Genera preguntas claras " +
-        "y respuestas concisas en espa\u00f1ol. Retorna SOLO JSON v\u00e1lido.",
+        "y respuestas concisas en español. Retorna SOLO JSON válido.",
       jsonMode: true,
       temperature: 0.5,
       maxTokens: 1500,
     });
 
-    // Parse and store flashcards
     try {
       const cards = JSON.parse(text.trim().replace(/^```json\n?/, "").replace(/\n?```$/, ""));
       if (Array.isArray(cards) && cards.length > 0) {
-        // Insert into flashcards table
         const rows = cards.slice(0, 10).map((card: { front: string; back: string }) => ({
           summary_id,
           front_text: (card.front || "").slice(0, 1000),
@@ -239,9 +303,9 @@ async function executeGenerateContent(payload: JobPayload): Promise<void> {
 
         await sendText(
           phone,
-          `\u2705 \u00a1${rows.length} flashcards generadas!\n\n` +
+          `\u2705 ¡${rows.length} flashcards generadas!\n\n` +
           `Sobre: "${summary.title}"\n\n` +
-          `Decime "qu\u00e9 debo estudiar" para empezar a repasarlas. \ud83d\udcda`,
+          `Decime "qué debo estudiar" para empezar a repasarlas. \ud83d\udcda`,
         );
         return;
       }
@@ -255,36 +319,30 @@ async function executeGenerateContent(payload: JobPayload): Promise<void> {
     await sendText(
       phone,
       `\u2705 Quiz generado sobre "${summary.title}". ` +
-      `Abr\u00ed la app para resolverlo. \ud83d\udcf1`,
+      `Abrí la app para resolverlo. \ud83d\udcf1`,
     );
   }
 }
 
-// ─── Weekly Report ──────────────────────────────────────
+// ─── Weekly Report (C2 FIX: removed broken subquery) ────
 
-async function executeWeeklyReport(payload: JobPayload): Promise<void> {
+async function executeWeeklyReport(payload: LegacyJobPayload): Promise<void> {
   const db = getAdminClient();
-  const { user_id, phone } = payload;
+  const { user_id } = payload;
 
-  // Fetch stats for the last 7 days
+  // C1 FIX: Decrypt phone
+  const phone = await resolvePhone(payload);
+
   const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
-  const [reviewsRes, sessionsRes, progressRes] = await Promise.all([
-    // Total reviews this week
-    db.from("reviews")
-      .select("id, grade", { count: "exact" })
-      .gte("created_at", weekAgo)
-      .eq("session_id", db.from("study_sessions")
-        .select("id")
-        .eq("student_id", user_id) as unknown as string),
-
-    // Sessions this week
+  // C2 FIX: Removed broken reviewsRes query (Supabase JS doesn't support
+  // subqueries in .eq()). All needed data is in sessionsRes + progressRes.
+  const [sessionsRes, progressRes] = await Promise.all([
     db.from("study_sessions")
       .select("id, session_type, completed_at, total_reviews, correct_reviews")
       .eq("student_id", user_id)
       .gte("created_at", weekAgo),
 
-    // Current mastery levels
     db.from("topic_progress")
       .select("topic_name, mastery_level")
       .eq("student_id", user_id)
@@ -303,19 +361,18 @@ async function executeWeeklyReport(payload: JobPayload): Promise<void> {
     .slice(0, 3)
     .map((t) => t.topic_name);
 
-  // Generate personalized analysis
   const { text: analysis } = await generateText({
     prompt:
       `Datos de estudio semanal del alumno:\n` +
       `- Sesiones: ${totalSessions}\n` +
       `- Reviews: ${totalReviews}\n` +
-      `- Precisi\u00f3n: ${accuracy}%\n` +
-      `- Topics d\u00e9biles: ${weakTopics.join(", ") || "ninguno"}\n\n` +
+      `- Precisión: ${accuracy}%\n` +
+      `- Topics débiles: ${weakTopics.join(", ") || "ninguno"}\n\n` +
       `Genera un reporte motivacional breve (max 500 chars) con:\n` +
-      `1. Resumen de logros\n2. \u00c1rea de mejora\n3. Consejo para la pr\u00f3xima semana`,
+      `1. Resumen de logros\n2. Área de mejora\n3. Consejo para la próxima semana`,
     systemPrompt:
-      "Eres Axon, un tutor motivador. Escrib\u00ed en espa\u00f1ol informal (tuteo). " +
-      "M\u00e1ximo 500 caracteres. Us\u00e1 emojis moderados.",
+      "Eres Axon, un tutor motivador. Escribí en español informal (tuteo). " +
+      "Máximo 500 caracteres. Usá emojis moderados.",
     temperature: 0.6,
     maxTokens: 300,
   });
@@ -324,18 +381,14 @@ async function executeWeeklyReport(payload: JobPayload): Promise<void> {
     `\ud83d\udcca *Reporte Semanal*\n\n` +
     `\ud83d\udcd6 ${totalSessions} sesiones\n` +
     `\ud83c\udccf ${totalReviews} reviews\n` +
-    `\ud83c\udfaf ${accuracy}% precisi\u00f3n\n\n` +
+    `\ud83c\udfaf ${accuracy}% precisión\n\n` +
     `${analysis}`;
 
   await sendText(phone, report.slice(0, 4096));
 }
 
-// ─── Batch Processor (for external invocation) ─────────────
+// ─── Batch Processor ────────────────────────────────────
 
-/**
- * Process up to N pending jobs in sequence.
- * Called by a scheduled edge function or cron endpoint.
- */
 export async function processPendingJobs(maxJobs = 5): Promise<number> {
   let processed = 0;
   for (let i = 0; i < maxJobs; i++) {

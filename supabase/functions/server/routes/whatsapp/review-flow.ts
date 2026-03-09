@@ -2,28 +2,9 @@
  * routes/whatsapp/review-flow.ts — Flashcard review state machine (S10)
  *
  * Deterministic Session Mode: bypasses Gemini entirely for ~200ms responses.
- * When a student requests flashcard review, the bot enters flashcard_review
- * mode and presents cards one-by-one with interactive reply buttons.
  *
- * Flow:
- *   1. get_study_queue returns cards → enterReviewMode()
- *   2. Bot sends first card with [Fail / Good / Easy] buttons
- *   3. Student taps button → handleReviewButton()
- *   4. Review persisted, cursor advances, next card sent
- *   5. Queue exhausted OR student says "salir" → handleReviewExit()
- *
- * State stored in whatsapp_sessions.current_context:
- *   {
- *     ghost_session_id: UUID,  // study_sessions row for review persistence
- *     queue: FlashcardItem[],  // ordered cards from get_study_queue
- *     cursor: number,          // index of current card
- *     cards_reviewed: number,  // total reviewed so far
- *     ratings: { "1": n, "3": n, "4": n }  // rating distribution
- *   }
- *
- * AUDIT F5: Ghost session created with session_type='whatsapp_review'
- * FC-04: Exactly 3 buttons per card (WhatsApp max = 3)
- * FC-01: handler.ts routes interactive messages here when mode=flashcard_review
+ * C8 FIX: Optimistic lock errors now checked in handleReviewButton.
+ * C13 FIX: Card field validation in enterReviewMode and presentCard.
  */
 
 import { getAdminClient } from "../../db.ts";
@@ -45,7 +26,7 @@ export interface ReviewSessionContext {
   queue: FlashcardItem[];
   cursor: number;
   cards_reviewed: number;
-  ratings: Record<string, number>; // "1", "3", "4"
+  ratings: Record<string, number>;
 }
 
 // ─── Constants ───────────────────────────────────────────
@@ -62,22 +43,32 @@ const BUTTON_TO_RATING: Record<string, number> = {
   review_easy: 4,
 };
 
-const SESSION_MODE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours for review sessions
+const SESSION_MODE_TTL_MS = 4 * 60 * 60 * 1000;
+
+// ─── Card Validation (C13 FIX) ──────────────────────────
+
+/**
+ * C13 FIX: Validate and sanitize flashcard items from RPC.
+ * Filters out cards missing required fields to prevent runtime errors.
+ */
+function validateCards(rawCards: unknown[]): FlashcardItem[] {
+  return rawCards
+    .filter((card): card is Record<string, unknown> => {
+      if (!card || typeof card !== "object") return false;
+      const c = card as Record<string, unknown>;
+      return !!c.id && typeof c.id === "string";
+    })
+    .map((c) => ({
+      id: c.id as string,
+      front_text: (c.front_text as string) || (c.keyword_name as string) || "[Sin contenido]",
+      back_text: (c.back_text as string) || "[Sin respuesta]",
+      keyword_name: (c.keyword_name as string) || undefined,
+      course_name: (c.course_name as string) || undefined,
+    }));
+}
 
 // ─── Enter Review Mode ──────────────────────────────────
 
-/**
- * Creates a ghost study_session and transitions the WhatsApp session
- * to flashcard_review mode. Called from handler.ts when get_study_queue
- * returns cards and we want to start an interactive review.
- *
- * @param phoneHash - Session PK
- * @param phone - Raw phone for sending messages
- * @param userId - Axon user ID
- * @param cards - Flashcard queue from get_study_queue RPC
- * @param sessionVersion - Current optimistic lock version
- * @returns true if mode entered successfully
- */
 export async function enterReviewMode(
   phoneHash: string,
   phone: string,
@@ -87,12 +78,14 @@ export async function enterReviewMode(
 ): Promise<boolean> {
   const db = getAdminClient();
 
-  if (!cards || cards.length === 0) {
+  // C13 FIX: Validate cards before using
+  const validCards = validateCards(cards as unknown[]);
+
+  if (!validCards || validCards.length === 0) {
     await sendText(phone, "No tenés flashcards pendientes. \ud83c\udf89 ¡Estás al día!");
     return false;
   }
 
-  // Create ghost study_session (AUDIT F5)
   const { data: ghostSession, error: sessionErr } = await db
     .from("study_sessions")
     .insert({
@@ -108,16 +101,14 @@ export async function enterReviewMode(
     return false;
   }
 
-  // Build review context
   const reviewContext: ReviewSessionContext = {
     ghost_session_id: ghostSession.id,
-    queue: cards.slice(0, 50), // Cap at 50 cards per session
+    queue: validCards.slice(0, 50),
     cursor: 0,
     cards_reviewed: 0,
     ratings: { "1": 0, "3": 0, "4": 0 },
   };
 
-  // Update session to flashcard_review mode
   const { error: updateErr } = await db
     .from("whatsapp_sessions")
     .update({
@@ -136,10 +127,9 @@ export async function enterReviewMode(
     return false;
   }
 
-  // Send intro message + first card
   await sendText(
     phone,
-    `\ud83d\udcda Sesión de repaso: ${cards.length} flashcards\n\n` +
+    `\ud83d\udcda Sesión de repaso: ${validCards.length} flashcards\n\n` +
     `Calificá cada tarjeta:\n` +
     `\u274c Fail = No la sabía\n` +
     `\u2705 Good = La sabía con esfuerzo\n` +
@@ -165,24 +155,21 @@ async function presentCard(
   const label = card.keyword_name || card.course_name || "";
   const labelStr = label ? ` (${label})` : "";
 
-  // Show front (question)
+  // C13 FIX: Defensive access with fallbacks
+  const frontText = (card.front_text || "[Sin contenido]").slice(0, 800);
+  const backText = (card.back_text || "[Sin respuesta]").slice(0, 600);
+
   const body =
     `\ud83d\udccb ${cardNum}/${total}${labelStr}\n\n` +
-    `${card.front_text.slice(0, 800)}\n\n` +
+    `${frontText}\n\n` +
     `\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n` +
-    `${card.back_text.slice(0, 600)}`;
+    `${backText}`;
 
   await sendInteractiveButtons(phone, body.slice(0, 1024), RATING_BUTTONS);
 }
 
 // ─── Handle Rating Button Press ─────────────────────────
 
-/**
- * Called from handler.ts when a button press arrives during flashcard_review mode.
- * Persists the review, updates context, and sends next card or summary.
- *
- * @returns true if handled (caller should NOT fall through to Agentic Loop)
- */
 export async function handleReviewButton(
   phoneHash: string,
   phone: string,
@@ -193,7 +180,6 @@ export async function handleReviewButton(
 ): Promise<boolean> {
   const db = getAdminClient();
 
-  // Parse context
   const ctx = currentContext as unknown as ReviewSessionContext;
   if (!ctx.ghost_session_id || !ctx.queue) {
     console.warn("[WA-ReviewFlow] Invalid review context, exiting mode");
@@ -201,10 +187,8 @@ export async function handleReviewButton(
     return true;
   }
 
-  // Map button to FSRS rating
   const rating = BUTTON_TO_RATING[buttonPayload];
   if (!rating) {
-    // Unknown button — might be from a different interaction
     await sendText(phone, "Usá los botones Fail / Good / Easy para calificar. \ud83d\udc46");
     return true;
   }
@@ -215,7 +199,6 @@ export async function handleReviewButton(
     return true;
   }
 
-  // Persist review (direct DB, same as tools.ts submit_review)
   try {
     await db.from("reviews").insert({
       session_id: ctx.ghost_session_id,
@@ -225,22 +208,19 @@ export async function handleReviewButton(
     });
   } catch (e) {
     console.error(`[WA-ReviewFlow] Review insert failed: ${(e as Error).message}`);
-    // Non-fatal: continue to next card
   }
 
-  // Update context
   ctx.cursor += 1;
   ctx.cards_reviewed += 1;
   ctx.ratings[String(rating)] = (ctx.ratings[String(rating)] || 0) + 1;
 
-  // Check if queue exhausted
   if (ctx.cursor >= ctx.queue.length) {
     await exitReviewMode(phoneHash, phone, ctx, sessionVersion);
     return true;
   }
 
-  // Save updated context + send next card
-  await db
+  // C8 FIX: Check optimistic lock error on session update
+  const { error: saveErr } = await db
     .from("whatsapp_sessions")
     .update({
       current_context: ctx,
@@ -250,16 +230,19 @@ export async function handleReviewButton(
     .eq("phone_hash", phoneHash)
     .eq("version", sessionVersion);
 
+  if (saveErr) {
+    console.warn(
+      `[WA-ReviewFlow] Context save failed: ${saveErr.message}. ` +
+      `Cursor may desync — next button press will reload from DB.`,
+    );
+  }
+
   await presentCard(phone, ctx);
   return true;
 }
 
-// ─── Handle Exit ("salir" or queue exhausted) ────────────
+// ─── Handle Exit ────────────────────────────────────────
 
-/**
- * Exits flashcard_review mode, updates study_session stats,
- * and shows a summary to the student.
- */
 export async function exitReviewMode(
   phoneHash: string,
   phone: string,
@@ -269,7 +252,6 @@ export async function exitReviewMode(
   const db = getAdminClient();
   const ctx = context as ReviewSessionContext;
 
-  // Update ghost session with completion stats
   if (ctx.ghost_session_id) {
     const correctCount = (ctx.ratings?.["3"] || 0) + (ctx.ratings?.["4"] || 0);
     try {
@@ -286,7 +268,6 @@ export async function exitReviewMode(
     }
   }
 
-  // Transition back to conversation mode
   await db
     .from("whatsapp_sessions")
     .update({
@@ -298,7 +279,6 @@ export async function exitReviewMode(
     .eq("phone_hash", phoneHash)
     .eq("version", sessionVersion);
 
-  // Send summary
   const reviewed = ctx.cards_reviewed || 0;
   const fail = ctx.ratings?.["1"] || 0;
   const good = ctx.ratings?.["3"] || 0;
@@ -322,15 +302,12 @@ export async function exitReviewMode(
     `\ud83d\udca1 Easy: ${easy}\n\n` +
     (fail > 0
       ? `Las tarjetas fallidas se reprogramaron para pronto. \ud83d\udcaa`
-      : `\u00a1Excelente sesión! \ud83c\udf1f`),
+      : `¡Excelente sesión! \ud83c\udf1f`),
   );
 }
 
 // ─── Check for Exit Command ─────────────────────────────
 
-/**
- * Returns true if the text message is an exit command during review mode.
- */
 export function isExitCommand(text: string): boolean {
   const normalized = text.trim().toLowerCase();
   return [
