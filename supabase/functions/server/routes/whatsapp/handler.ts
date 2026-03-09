@@ -11,6 +11,10 @@
  *   4. Update session with optimistic locking
  *   5. Log to whatsapp_message_log (fire-and-forget)
  *
+ * Phase 2 additions:
+ *   S10: flashcard_review mode delegates to review-flow.ts
+ *   S13: isAsync tools enqueue jobs via async-queue.ts
+ *
  * @see AUDIT F10: tool_config with mode: AUTO
  * @see AUDIT F11: Correct multi-turn functionCall/functionResponse format
  * @see AUDIT F12: Inline processing for fast ops, pgmq for slow ops
@@ -29,6 +33,14 @@ import {
   executeToolCall,
   type ToolExecutionResult,
 } from "./tools.ts";
+import {
+  enterReviewMode,
+  handleReviewButton,
+  exitReviewMode,
+  isExitCommand,
+  type FlashcardItem,
+} from "./review-flow.ts";
+import { enqueueJob } from "./async-queue.ts";
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -219,7 +231,7 @@ async function callGemini(
   }
 }
 
-// ─── Student Context Builder ─────────────────────────────
+// ─── Student Context Builder ───────────────────────────
 
 async function buildStudentContext(userId: string): Promise<string> {
   const db = getAdminClient();
@@ -267,24 +279,41 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
     const session = await loadOrCreateSession(phoneHash, userId);
     let history: GeminiMessage[] = Array.isArray(session.history) ? [...session.history] : [];
 
-    // ── Step 2: Session Mode routing (FC-01) ──
+    // ── Step 2: Session Mode routing (FC-01 + S10) ──
     if (session.mode === "flashcard_review") {
       if (messageType === "interactive" && buttonPayload) {
-        // Button press during flashcard review → delegate to review-flow
-        // TODO S10: Replace with actual review-flow handler
-        await sendText(phone, "Sesión de flashcards en desarrollo. Pronto estará lista. 🛠️");
-        return;
+        // S10: Button press during flashcard review → delegate to review-flow
+        const handled = await handleReviewButton(
+          phoneHash,
+          phone,
+          userId,
+          buttonPayload,
+          session.current_context,
+          session.version,
+        );
+        if (handled) {
+          // Update log record
+          updateLogRecord(messageId, ["flashcard_review"], Date.now() - startMs);
+          return;
+        }
       }
 
-      // Free text during flashcard review → exit mode, fall through to Agentic Loop
-      if (text && !buttonPayload) {
+      // S10: Text during flashcard_review → check for exit command
+      if (text) {
+        if (isExitCommand(text)) {
+          await exitReviewMode(phoneHash, phone, session.current_context, session.version);
+          updateLogRecord(messageId, ["review_exit"], Date.now() - startMs);
+          return;
+        }
+
+        // Non-exit text during review → exit mode, fall through to Agentic Loop
         console.log(`[WA-Handler] User sent text during flashcard_review, exiting mode`);
         await updateSession(phoneHash, session.version, {
           mode: "conversation",
           current_tool: null,
           current_context: {},
         });
-        // Re-load session with updated mode
+        // Update local session state for the rest of this function
         session.mode = "conversation";
         session.version += 1;
         session.current_context = {};
@@ -297,12 +326,12 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
       userMessage = `[Botón seleccionado: ${buttonPayload}]`;
     } else if (messageType === "audio" && audioMediaId) {
       // TODO S14: Download + transcribe audio
-      await sendText(phone, "Los mensajes de voz estarán disponibles pronto. Por ahora, escribí tu pregunta. 🎙️");
+      await sendText(phone, "Los mensajes de voz estarán disponibles pronto. Por ahora, escribí tu pregunta. \ud83c\udfa4");
       return;
     }
 
     if (!userMessage.trim()) {
-      await sendText(phone, "No entendí tu mensaje. Probá escribiendo tu pregunta. 😊");
+      await sendText(phone, "No entendí tu mensaje. Probá escribiendo tu pregunta. \ud83d\ude0a");
       return;
     }
 
@@ -343,9 +372,18 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
 
         // Handle async tools (generate_content, weekly_report)
         if (toolResult.isAsync) {
-          // TODO: Enqueue in pgmq for background processing
+          // S13: Enqueue job for background processing
           const asyncResult = toolResult.result as Record<string, unknown>;
-          await sendText(phone, (asyncResult?.message as string) ?? "Procesando... ⏳");
+          await enqueueJob({
+            type: toolName as "generate_content" | "generate_weekly_report",
+            user_id: userId,
+            phone,
+            phone_hash: phoneHash,
+            action: toolArgs.action as "flashcard" | "quiz" | undefined,
+            summary_id: toolArgs.summary_id as string | undefined,
+          });
+
+          await sendText(phone, (asyncResult?.message as string) ?? "Procesando... \u23f3");
 
           // A4 FIX: functionResponse includes status:'queued' to help
           // Gemini distinguish from completed results on next turn
@@ -356,12 +394,24 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
           break;
         }
 
-        // Handle get_study_queue → enter Session Mode
+        // S10: Handle get_study_queue → enter Session Mode
         if (toolName === "get_study_queue" && toolResult.result) {
-          const queueResult = toolResult.result as { cards: unknown[]; count: number };
+          const queueResult = toolResult.result as { cards: FlashcardItem[]; count: number };
           if (queueResult.count > 0) {
-            // TODO S10: Create ghost session + enter flashcard_review mode
-            // For now, let Gemini summarize the queue
+            // Enter flashcard_review mode (bypasses Gemini for rest of session)
+            const entered = await enterReviewMode(
+              phoneHash,
+              phone,
+              userId,
+              queueResult.cards,
+              session.version,
+            );
+            if (entered) {
+              // Session mode changed, update log and return
+              updateLogRecord(messageId, toolsUsed, Date.now() - startMs);
+              return;
+            }
+            // If enterReviewMode failed, fall through to let Gemini summarize
           }
         }
 
@@ -423,21 +473,10 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
     }
 
     // ── Step 7: Update log record (A9 FIX: record was pre-inserted by webhook.ts) ──
-    const latencyMs = Date.now() - startMs;
-    const db = getAdminClient();
-    db.from("whatsapp_message_log")
-      .update({
-        tool_called: toolsUsed.length > 0 ? toolsUsed.join(",") : null,
-        latency_ms: latencyMs,
-        success: true,
-      })
-      .eq("wa_message_id", messageId)
-      .then(({ error }) => {
-        if (error) console.warn(`[WA-Handler] Log update failed: ${error.message}`);
-      });
+    updateLogRecord(messageId, toolsUsed, Date.now() - startMs);
 
     console.log(
-      `[WA-Handler] Processed in ${latencyMs}ms. Tools: [${toolsUsed.join(", ")}]. ` +
+      `[WA-Handler] Processed in ${Date.now() - startMs}ms. Tools: [${toolsUsed.join(", ")}]. ` +
       `Response: ${finalText.slice(0, 80)}...`,
     );
   } catch (e) {
@@ -446,7 +485,7 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
 
     // Best-effort error response to user
     try {
-      await sendText(phone, "Ups, algo salió mal. Intentá de nuevo en unos segundos. 😔");
+      await sendText(phone, "Ups, algo salió mal. Intentá de nuevo en unos segundos. \ud83d\ude14");
     } catch {
       // Can't even send error message — nothing to do
     }
@@ -462,4 +501,24 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
       .eq("wa_message_id", messageId)
       .then(() => {});
   }
+}
+
+// ─── Log Helper (extracted to reduce duplication) ───────────
+
+function updateLogRecord(
+  messageId: string,
+  toolsUsed: string[],
+  latencyMs: number,
+): void {
+  const db = getAdminClient();
+  db.from("whatsapp_message_log")
+    .update({
+      tool_called: toolsUsed.length > 0 ? toolsUsed.join(",") : null,
+      latency_ms: latencyMs,
+      success: true,
+    })
+    .eq("wa_message_id", messageId)
+    .then(({ error }) => {
+      if (error) console.warn(`[WA-Handler] Log update failed: ${error.message}`);
+    });
 }

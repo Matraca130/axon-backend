@@ -9,6 +9,7 @@
  *   - HMAC-SHA256 signature verification using WHATSAPP_APP_SECRET
  *   - timing-safe comparison to prevent timing attacks (AUDIT F3)
  *   - Deduplication by Meta message ID (AUDIT F7)
+ *   - Per-phone rate limiting via wa-rate-limit.ts (S12)
  *
  * Message routing (S09):
  *   - Linked users → handleMessage() from handler.ts
@@ -29,6 +30,8 @@
  * B5 FIX: Meta message types ('interactive','audio') are normalized to
  * DB enum values ('button','voice') before INSERT to avoid CHECK violation.
  *
+ * S12: Per-phone rate limiting (30/min linked, 10/min unlinked).
+ *
  * @see https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/components
  */
 
@@ -38,6 +41,7 @@ import { timingSafeEqual } from "../../timing-safe.ts";
 import { sendText, hashPhone } from "./wa-client.ts";
 import { handleMessage } from "./handler.ts";
 import { verifyLinkCode, isLinkingCode } from "./link.ts";
+import { checkWhatsAppRateLimit, sendRateLimitMessage } from "./wa-rate-limit.ts";
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -72,7 +76,7 @@ interface WhatsAppWebhookBody {
   }>;
 }
 
-// ─── HMAC Verification (AUDIT F3) ─────────────────────────
+// ─── HMAC Verification (AUDIT F3) ─────────────────────
 
 async function verifyMetaSignature(
   rawBody: string,
@@ -115,7 +119,7 @@ async function verifyMetaSignature(
   }
 }
 
-// ─── Message Type Normalization (B5 FIX) ──────────────────
+// ─── Message Type Normalization (B5 FIX) ──────────────
 
 /**
  * B5 FIX: Meta sends 'interactive' and 'audio' as message types,
@@ -133,7 +137,7 @@ function normalizeMessageType(metaType: string): string {
   }
 }
 
-// ─── Deduplication (AUDIT F7 + A9 FIX) ────────────────────
+// ─── Deduplication (AUDIT F7 + A9 FIX) ────────────────
 
 async function isDuplicate(waMessageId: string): Promise<boolean> {
   const admin = getAdminClient();
@@ -147,10 +151,6 @@ async function isDuplicate(waMessageId: string): Promise<boolean> {
 
 /**
  * A9 FIX: Insert a preliminary dedup record BEFORE processing.
- * This closes the race condition where Meta retransmissions could
- * arrive during the 2-5s processing window and bypass the dedup check.
- * handler.ts will UPDATE this record with tool_called, latency, etc.
- *
  * B5 FIX: messageType is pre-normalized by caller to match DB CHECK.
  */
 async function insertDedupRecord(
@@ -167,21 +167,15 @@ async function insertDedupRecord(
       user_id: userId,
       direction: "in",
       message_type: messageType,
-      success: true, // Optimistic; handler.ts updates if fails
+      success: true,
     });
   } catch (e) {
-    // Non-fatal: dedup is best-effort
     console.warn(`[WA-Webhook] Dedup record insert failed: ${(e as Error).message}`);
   }
 }
 
-// ─── Phone Lookup ───────────────────────────────────────
+// ─── Phone Lookup ─────────────────────────────────────
 
-/**
- * Look up a linked user by phone number.
- * Must iterate through all links and re-hash because each link has its own salt.
- * This is O(n) on active links, but n is small (each user has max 1 link).
- */
 async function lookupLinkedUser(
   phoneNumber: string,
 ): Promise<{ userId: string; phoneHash: string } | null> {
@@ -194,7 +188,6 @@ async function lookupLinkedUser(
 
   if (!links || links.length === 0) return null;
 
-  // Try each salt until we find a matching hash
   for (const link of links) {
     const computedHash = await hashPhone(phoneNumber, link.phone_salt);
     if (computedHash === link.phone_hash) {
@@ -205,11 +198,8 @@ async function lookupLinkedUser(
   return null;
 }
 
-// ─── Handlers ────────────────────────────────────────────
+// ─── Handlers ────────────────────────────────────────
 
-/**
- * GET /webhooks/whatsapp — Meta verification challenge.
- */
 export async function handleVerification(c: Context): Promise<Response> {
   const mode = c.req.query("hub.mode");
   const token = c.req.query("hub.verify_token");
@@ -225,14 +215,6 @@ export async function handleVerification(c: Context): Promise<Response> {
   return c.text("Forbidden", 403);
 }
 
-/**
- * POST /webhooks/whatsapp — Incoming messages from Meta.
- *
- * AUDIT F12: Processing is INLINE (await before return).
- * A9 FIX: Dedup record inserted BEFORE processing to prevent duplicates.
- * B5 FIX: Message types normalized before DB insert.
- * B4 FIX: Unlinked user phones hashed before storing.
- */
 export async function handleIncoming(c: Context): Promise<Response> {
   const startMs = Date.now();
 
@@ -263,7 +245,7 @@ export async function handleIncoming(c: Context): Promise<Response> {
   const contacts = body.entry?.[0]?.changes?.[0]?.value?.contacts;
 
   if (!messages || messages.length === 0) {
-    return c.text("OK", 200); // Status update, no message
+    return c.text("OK", 200);
   }
 
   const message = messages[0];
@@ -318,14 +300,22 @@ export async function handleIncoming(c: Context): Promise<Response> {
     `text="${textContent.slice(0, 80)}"`,
   );
 
-  // ── Step 6: Route message (S09) ──
+  // ── Step 6: Route message (S09 + S12 rate limit) ──
   try {
     // Look up linked user
     const linked = await lookupLinkedUser(from);
 
+    // S12: Per-phone rate limiting
+    const phoneKey = linked ? linked.phoneHash : from;
+    const isRateLimited = checkWhatsAppRateLimit(phoneKey, !!linked);
+    if (isRateLimited) {
+      console.warn(`[WA-Webhook] Rate limited: ${phoneKey.slice(0, 12)}...`);
+      await sendRateLimitMessage(from);
+      return c.text("OK", 200);
+    }
+
     if (linked) {
-      // A9 FIX: Insert dedup record BEFORE processing
-      // B5 FIX: Use normalized dbMessageType
+      // A9 + B5 FIX: Insert dedup record BEFORE processing
       await insertDedupRecord(waMessageId, linked.phoneHash, linked.userId, dbMessageType);
 
       // ── LINKED USER: Call handler ──
@@ -340,30 +330,24 @@ export async function handleIncoming(c: Context): Promise<Response> {
         audioMediaId,
       });
     } else {
-      // B4 FIX: Hash the raw phone with a global salt before storing.
-      // AUDIT-05: Raw phone must NEVER be stored in any DB table.
-      // Uses WHATSAPP_APP_SECRET as a deterministic global salt so
-      // the same unlinked phone always produces the same hash
-      // (needed for per-user log grouping/analytics).
+      // B4 FIX: Hash raw phone with global salt
       const globalSalt = Deno.env.get("WHATSAPP_APP_SECRET") ?? "axon-global-salt";
       const anonPhoneHash = await hashPhone(from, globalSalt);
 
-      // A9 FIX: Insert dedup record for unlinked users too
-      // B5 FIX: Use normalized dbMessageType
+      // A9 + B5 FIX: Insert dedup record for unlinked users
       await insertDedupRecord(waMessageId, anonPhoneHash, null, dbMessageType);
 
       // ── UNLINKED USER ──
       if (textContent && isLinkingCode(textContent)) {
-        // Attempt to verify linking code
         const result = await verifyLinkCode(from, textContent.trim());
         if (result.success) {
           await sendText(
             from,
             "¡Vinculado! Ya podés estudiar por WhatsApp \ud83c\udf89\n\n" +
             "Probá enviando:\n" +
-            "• \"Qué debo estudiar?\"\n" +
-            "• \"Cómo voy en mis cursos?\"\n" +
-            "• O cualquier pregunta académica",
+            "\u2022 \"Qué debo estudiar?\"\n" +
+            "\u2022 \"Cómo voy en mis cursos?\"\n" +
+            "\u2022 O cualquier pregunta académica",
           );
         } else {
           await sendText(
@@ -373,7 +357,6 @@ export async function handleIncoming(c: Context): Promise<Response> {
           );
         }
       } else {
-        // Unknown user, send onboarding
         await sendText(
           from,
           "\u00a1Hola! Soy Axon, tu asistente de estudio. \ud83d\udcda\n\n" +
@@ -386,9 +369,7 @@ export async function handleIncoming(c: Context): Promise<Response> {
       }
     }
   } catch (e) {
-    // handleMessage or linking failed — log but don't propagate to Meta
     console.error(`[WA-Webhook] Processing error: ${(e as Error).message}`);
-    // Best-effort error response
     try {
       await sendText(from, "Algo salió mal. Intentá de nuevo. \ud83d\ude14");
     } catch { /* can't send error message */ }
