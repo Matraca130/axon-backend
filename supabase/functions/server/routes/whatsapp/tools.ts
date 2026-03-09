@@ -14,7 +14,6 @@
 
 import { getAdminClient } from "../../db.ts";
 import { generateText } from "../../gemini.ts";
-import { generateEmbedding, EMBEDDING_DIMENSIONS } from "../../openai-embeddings.ts";
 import {
   selectStrategy,
   executeRetrievalEmbedding,

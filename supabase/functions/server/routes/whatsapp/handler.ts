@@ -10,13 +10,11 @@
 
 import { getAdminClient } from "../../db.ts";
 import { getApiKey, GENERATE_MODEL, fetchWithRetry } from "../../gemini.ts";
-import { sendText } from "./wa-client.ts";
-import { downloadMedia } from "./wa-client.ts";
+import { sendText, downloadMedia } from "./wa-client.ts";
 import {
   WHATSAPP_TOOLS,
   WHATSAPP_SYSTEM_PROMPT,
   executeToolCall,
-  type ToolExecutionResult,
 } from "./tools.ts";
 import {
   enterReviewMode,
@@ -126,23 +124,12 @@ async function updateSession(
 
 // ─── S14: Voice Transcription via Gemini Multimodal ───────
 
-/**
- * S14: Download voice message from Meta, transcribe with Gemini multimodal.
- * Returns the transcribed text, or null if transcription fails.
- *
- * Flow: Meta mediaId → downloadMedia() → ArrayBuffer → base64 → Gemini inline_data
- *
- * Gemini 2.5 Flash supports audio natively via inline_data with
- * audio/ogg, audio/mpeg, audio/wav, audio/webm MIME types.
- */
 async function transcribeVoiceMessage(audioMediaId: string): Promise<string | null> {
   try {
     const { buffer, mimeType } = await downloadMedia(audioMediaId);
 
-    // Convert ArrayBuffer to base64
     const bytes = new Uint8Array(buffer);
     let binary = "";
-    // Process in chunks of 8192 to avoid stack overflow with spread operator
     for (let i = 0; i < bytes.length; i += 8192) {
       const chunk = bytes.subarray(i, Math.min(i + 8192, bytes.length));
       binary += String.fromCharCode(...chunk);
@@ -181,8 +168,8 @@ async function transcribeVoiceMessage(audioMediaId: string): Promise<string | nu
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       },
-      20_000, // voice can be slow
-      1, // 1 retry max
+      20_000,
+      1,
     );
 
     if (!res.ok) {
@@ -293,7 +280,7 @@ async function buildStudentContext(userId: string): Promise<string> {
   }
 }
 
-// ─── History Trimmer ────────────────────────────────────
+// ─── History Trimmer ──────────────────────────────────
 
 function trimHistory(history: GeminiMessage[]): GeminiMessage[] {
   const maxMessages = MAX_HISTORY_TURNS * 2;
@@ -343,7 +330,6 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
     if (messageType === "interactive" && buttonPayload) {
       userMessage = `[Bot\u00f3n seleccionado: ${buttonPayload}]`;
     } else if (messageType === "audio" && audioMediaId) {
-      // S14: Transcribe voice message via Gemini multimodal
       await sendText(phone, "Transcribiendo tu audio... \ud83c\udfa4");
       const transcription = await transcribeVoiceMessage(audioMediaId);
       if (!transcription) {
@@ -352,7 +338,6 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
         return;
       }
       userMessage = transcription;
-      // Notify user what we heard
       await sendText(phone, `\ud83d\udcdd Escuch\u00e9: \"${transcription.slice(0, 200)}${transcription.length > 200 ? "..." : ""}\"`);
     }
 
@@ -366,7 +351,7 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
     history.push({ role: "user", parts: [{ text: userMessage }] });
 
     let finalText = "";
-    let toolsUsed: string[] = [];
+    const toolsUsed: string[] = [];
 
     for (let iteration = 0; iteration < MAX_AGENTIC_ITERATIONS; iteration++) {
       const response = await callGemini(history, studentContext);
