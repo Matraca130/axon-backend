@@ -29,6 +29,7 @@ import { searchRoutes } from "./routes/search/index.ts";
 import { storageRoutes } from "./routes-storage.tsx";
 import { settingsRoutes } from "./routes/settings/index.ts";
 import { aiRoutes } from "./routes/ai/index.ts";
+import { whatsappRoutes } from "./routes/whatsapp/index.ts"; // WA: WhatsApp webhook + bot (feature-flagged via WHATSAPP_ENABLED)
 
 const app = new Hono();
 
@@ -84,6 +85,7 @@ app.route("/", searchRoutes);
 app.route("/", storageRoutes);
 app.route("/", settingsRoutes);
 app.route("/", aiRoutes);
+app.route("/", whatsappRoutes); // WA: WhatsApp webhook + bot (feature-flagged via WHATSAPP_ENABLED)
 
 // ─── Catch-all 404 ────────────────────────────────────────────────
 
