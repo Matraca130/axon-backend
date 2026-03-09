@@ -1,6 +1,23 @@
 /**
  * routes/study/batch-review.ts — Atomic batch review persistence
  *
+ * DUAL PATH (Camino B, spec v4.2, plan v3.7 Fase 3):
+ *
+ *   PATH A (legacy): Frontend sends fsrs_update + bkt_update pre-computed
+ *     → Server stores values as-is (current behavior, zero changes)
+ *
+ *   PATH B (new): Frontend sends only grade (+ optional subtopic_id)
+ *     → Server computes FSRS v4 Petrick + BKT v4 Recovery using lib/
+ *     → Server stores computed values
+ *
+ *   Detection: if item has fsrs_update → PATH A; else → PATH B
+ *             if item has bkt_update → PATH A; else if subtopic_id → PATH B
+ *
+ * BACKWARD COMPATIBILITY:
+ *   Old frontends that send fsrs_update/bkt_update continue working
+ *   exactly as before. New frontends that send only grade get server-side
+ *   computation. Both can coexist in the same batch.
+ *
  * PERF M1: Eliminates the 3-POST-per-card pattern where the frontend had to:
  *   1. POST /reviews           → insert review record
  *   2. POST /fsrs-states       → upsert FSRS scheduling
@@ -12,43 +29,25 @@
  *   Total: 1 HTTP request per session
  *
  * HOW IT WORKS:
- *   The frontend computes FSRS and BKT updates locally (same algorithms
- *   as the individual endpoints use), then sends everything in one batch.
+ *   The frontend computes FSRS and BKT updates locally (PATH A), OR sends
+ *   only the grade and the server computes everything (PATH B).
  *   The server processes each review item sequentially within the batch:
  *     a) INSERT into reviews (same as POST /reviews)
- *     b) UPSERT into fsrs_states (same as POST /fsrs-states)
+ *     b) UPSERT into fsrs_states (PATH A: pre-computed; PATH B: server-computed)
  *     c) READ existing bkt_states + INCREMENT counters + UPSERT
- *        (same as POST /bkt-states with M-1 FIX)
+ *        (PATH A: pre-computed; PATH B: server-computed with BKT v4)
  *
  * WHY SEQUENTIAL AND NOT PARALLEL:
  *   BKT states use INCREMENT logic (M-1 FIX from spaced-rep.ts):
  *   total_attempts is READ + ADD, not REPLACE. If two reviews for cards
  *   sharing the same subtopic_id run in parallel, the READ-ADD-WRITE
  *   would race. Sequential processing guarantees correct accumulation.
- *   FSRS states don't have this issue (each card has its own row), but
- *   we keep everything sequential for simplicity and predictability.
- *
- * WHY NOT MODIFY EXISTING ENDPOINTS:
- *   The existing POST /reviews, POST /fsrs-states, POST /bkt-states
- *   are consumed by other flows (FlashcardReviewer, ReviewSessionView,
- *   quiz attempts). Modifying them risks breaking those consumers.
- *   A dedicated batch endpoint is additive and safe.
  *
  * BKT INCREMENT REPLICATION (critical):
- *   The M-1 FIX in spaced-rep.ts (lines 139-162) reads the existing
- *   bkt_states row and ADDs the incoming total_attempts/correct_attempts
- *   to the existing values. This fix is replicated here identically.
- *   Without it, a 50-card session would show total_attempts=1.
- *
- * SESSION OWNERSHIP:
- *   Same verification as POST /reviews (reviews.ts lines 37-51).
- *   We verify ONCE that the session belongs to the authenticated user,
- *   then process all reviews without re-checking.
- *
- * ERROR HANDLING:
- *   - Individual item failures are collected but don't abort the batch.
- *   - The response includes per-item error details.
- *   - The frontend can retry failed items individually.
+ *   The M-1 FIX in spaced-rep.ts reads the existing bkt_states row and
+ *   ADDs the incoming total_attempts/correct_attempts to the existing
+ *   values. This fix is replicated here identically for PATH A.
+ *   PATH B computes BKT server-side and uses delta increments of 1.
  *
  * SECURITY:
  *   - Authenticated (same as all Axon endpoints)
@@ -73,6 +72,12 @@ import {
 } from "../../validate.ts";
 import { atomicUpsert } from "./progress.ts";
 import type { Context } from "npm:hono";
+
+// ── PATH B imports: server-side FSRS + BKT compute ──────────
+import { computeFsrsV4Update } from "../../lib/fsrs-v4.ts";
+import { computeBktV4Update } from "../../lib/bkt-v4.ts";
+import { THRESHOLDS } from "../../lib/types.ts";
+import type { FsrsGrade, FsrsCardState } from "../../lib/types.ts";
 
 export const batchReviewRoutes = new Hono();
 
@@ -100,18 +105,27 @@ async function verifySessionOwnership(
   return null; // OK
 }
 
+// ─── Grade Mapping (PATH B) ───────────────────────────────────────
+// Frontend may send grade 0-5 (SM-2 scale). PATH B needs FsrsGrade 1-4.
+// Mapping: 0→1(Again), 1→1(Again), 2→2(Hard), 3→3(Good), 4→3(Good), 5→4(Easy)
+
+function mapToFsrsGrade(grade: number): FsrsGrade {
+  if (grade <= 1) return 1; // Again
+  if (grade === 2) return 2; // Hard
+  if (grade === 3) return 3; // Good
+  if (grade === 4) return 3; // Good (SM-2 "good" maps to FSRS "good")
+  return 4; // Easy (SM-2 5 = perfect)
+}
+
 // ─── Item Validators ──────────────────────────────────────────────
-// WHY INLINE INSTEAD OF validateFields()?
-//   validateFields() is designed for optional fields with a declarative
-//   schema. Here we have deeply nested objects (fsrs_update, bkt_update)
-//   that don't map cleanly to the flat key-value pattern. Inline validation
-//   gives us better error messages and cleaner control flow.
 
 interface ReviewItem {
   item_id: string;
   instrument_type: string;
   grade: number;
   response_time_ms?: number;
+  /** Optional: subtopic_id for PATH B BKT compute (when bkt_update not sent) */
+  subtopic_id?: string;
   fsrs_update?: {
     stability: number;
     difficulty: number;
@@ -149,7 +163,15 @@ function validateReviewItem(
   if (item.response_time_ms !== undefined && !isNonNegInt(item.response_time_ms))
     return { valid: null, error: `${prefix}.response_time_ms must be a non-negative integer` };
 
-  // Validate fsrs_update if present
+  // Validate optional subtopic_id for PATH B
+  let subtopicId: string | undefined = undefined;
+  if (item.subtopic_id !== undefined) {
+    if (!isUuid(item.subtopic_id))
+      return { valid: null, error: `${prefix}.subtopic_id must be a valid UUID` };
+    subtopicId = item.subtopic_id as string;
+  }
+
+  // Validate fsrs_update if present (PATH A)
   let fsrsUpdate: ReviewItem["fsrs_update"] = undefined;
   if (item.fsrs_update && typeof item.fsrs_update === "object") {
     const f = item.fsrs_update as Record<string, unknown>;
@@ -179,7 +201,7 @@ function validateReviewItem(
     };
   }
 
-  // Validate bkt_update if present
+  // Validate bkt_update if present (PATH A)
   let bktUpdate: ReviewItem["bkt_update"] = undefined;
   if (item.bkt_update && typeof item.bkt_update === "object") {
     const b = item.bkt_update as Record<string, unknown>;
@@ -221,6 +243,7 @@ function validateReviewItem(
       instrument_type: item.instrument_type as string,
       grade: item.grade as number,
       response_time_ms: item.response_time_ms as number | undefined,
+      subtopic_id: subtopicId,
       fsrs_update: fsrsUpdate,
       bkt_update: bktUpdate,
     },
@@ -256,10 +279,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   }
 
   // ── Validate all items upfront (fail-fast) ──
-  // WHY VALIDATE ALL BEFORE PROCESSING?
-  //   If item #25 of 30 has a validation error, we don't want to have
-  //   already written 24 reviews to the DB. Validating everything first
-  //   ensures atomicity at the validation level.
   const validatedItems: ReviewItem[] = [];
   for (let i = 0; i < body.reviews.length; i++) {
     const item = body.reviews[i];
@@ -280,15 +299,9 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   }
 
   // ── Process each review sequentially ──
-  // WHY SEQUENTIAL?
-  //   BKT uses READ + INCREMENT + WRITE. If two cards share the same
-  //   subtopic_id and we process them in parallel, the second READ
-  //   would get stale data (before the first WRITE). Sequential
-  //   guarantees correct accumulation of total_attempts.
-  //
-  //   Performance impact: minimal. Each iteration is ~3-6ms (3 DB ops).
-  //   For 30 cards: ~90-180ms total, which is still faster than
-  //   90 individual HTTP requests from the frontend.
+  // WHY SEQUENTIAL? BKT uses READ + INCREMENT + WRITE.
+  // If two cards share the same subtopic_id and we process them in
+  // parallel, the second READ would get stale data.
 
   let reviewsCreated = 0;
   let fsrsUpdated = 0;
@@ -297,6 +310,8 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
 
   for (let i = 0; i < validatedItems.length; i++) {
     const item = validatedItems[i];
+    const now = new Date();
+    const nowIso = now.toISOString();
 
     // ── Step A: INSERT review ──
     try {
@@ -327,6 +342,10 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
 
     // ── Step B: UPSERT fsrs_states ──
     if (item.fsrs_update) {
+      // ════════════════════════════════════════════════════════
+      // PATH A (legacy): frontend sent pre-computed fsrs_update
+      // Store exactly as received — no server-side computation
+      // ════════════════════════════════════════════════════════
       try {
         const fsrsRow = {
           student_id: user.id,
@@ -355,13 +374,91 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
       } catch (e) {
         errors.push({ index: i, step: "fsrs", message: (e as Error).message });
       }
+    } else {
+      // ════════════════════════════════════════════════════════
+      // PATH B (new): no fsrs_update — compute FSRS server-side
+      // Uses lib/fsrs-v4.ts (Petrick completo, spec v4.2)
+      // ════════════════════════════════════════════════════════
+      try {
+        // 1. Read current FSRS state for this card (may not exist)
+        const { data: existingFsrs } = await db
+          .from("fsrs_states")
+          .select("stability, difficulty, reps, lapses, state, last_review_at")
+          .eq("student_id", user.id)
+          .eq("flashcard_id", item.item_id)
+          .maybeSingle();
+
+        // 2. Read current BKT state for recovery cross-signal
+        //    We need to resolve subtopic_id first
+        let isRecovering = false;
+        const resolvedSubtopicId = item.subtopic_id || item.bkt_update?.subtopic_id;
+        if (resolvedSubtopicId) {
+          const { data: existingBkt } = await db
+            .from("bkt_states")
+            .select("p_know, max_p_know")
+            .eq("student_id", user.id)
+            .eq("subtopic_id", resolvedSubtopicId)
+            .maybeSingle();
+
+          if (existingBkt) {
+            const maxPKnow = existingBkt.max_p_know ?? 0;
+            const pKnow = existingBkt.p_know ?? 0;
+            isRecovering = maxPKnow > 0.50 && pKnow < maxPKnow;
+          }
+        }
+
+        // 3. Map grade to FsrsGrade (1-4)
+        const fsrsGrade = mapToFsrsGrade(item.grade);
+
+        // 4. Compute FSRS v4 update
+        const fsrsResult = computeFsrsV4Update({
+          currentStability: existingFsrs?.stability ?? 0,
+          currentDifficulty: existingFsrs?.difficulty ?? 5.0,
+          currentReps: existingFsrs?.reps ?? 0,
+          currentLapses: existingFsrs?.lapses ?? 0,
+          currentState: (existingFsrs?.state as FsrsCardState) ?? "new",
+          lastReviewAt: existingFsrs?.last_review_at ?? null,
+          grade: fsrsGrade,
+          isRecovering,
+          now,
+        });
+
+        // 5. UPSERT computed result
+        const fsrsRow = {
+          student_id: user.id,
+          flashcard_id: item.item_id,
+          stability: fsrsResult.stability,
+          difficulty: fsrsResult.difficulty,
+          due_at: fsrsResult.due_at,
+          last_review_at: fsrsResult.last_review_at,
+          reps: fsrsResult.reps,
+          lapses: fsrsResult.lapses,
+          state: fsrsResult.state,
+        };
+
+        const { error: fsrsErr } = await atomicUpsert(
+          db,
+          "fsrs_states",
+          "student_id,flashcard_id",
+          fsrsRow,
+        );
+
+        if (fsrsErr) {
+          errors.push({ index: i, step: "fsrs_pathb", message: fsrsErr.message });
+        } else {
+          fsrsUpdated++;
+        }
+      } catch (e) {
+        errors.push({ index: i, step: "fsrs_pathb", message: (e as Error).message });
+      }
     }
 
     // ── Step C: READ + INCREMENT + UPSERT bkt_states ──
-    // CRITICAL: This replicates the M-1 FIX from spaced-rep.ts.
-    // The incoming total_attempts/correct_attempts are DELTAS (e.g. 1/0),
-    // not absolute values. We must READ the existing row and ADD.
     if (item.bkt_update) {
+      // ════════════════════════════════════════════════════════
+      // PATH A (legacy): frontend sent pre-computed bkt_update
+      // Store with M-1 FIX increment logic — no BKT computation
+      // ════════════════════════════════════════════════════════
       try {
         const bkt = item.bkt_update;
         let finalTotalAttempts = bkt.total_attempts;
@@ -381,7 +478,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           finalCorrectAttempts =
             (existing.correct_attempts || 0) + bkt.correct_attempts;
         }
-        // If no existing row, the delta IS the initial value (correct).
 
         const bktRow = {
           student_id: user.id,
@@ -410,6 +506,72 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         }
       } catch (e) {
         errors.push({ index: i, step: "bkt", message: (e as Error).message });
+      }
+    } else if (item.subtopic_id) {
+      // ════════════════════════════════════════════════════════
+      // PATH B (new): no bkt_update but subtopic_id present
+      // Compute BKT v4 server-side using lib/bkt-v4.ts
+      // ════════════════════════════════════════════════════════
+      try {
+        const fsrsGrade = mapToFsrsGrade(item.grade);
+        const isCorrect = fsrsGrade >= THRESHOLDS.BKT_CORRECT_MIN_GRADE;
+        const instrumentType =
+          item.instrument_type === "quiz" ? "quiz" as const : "flashcard" as const;
+
+        // 1. Read existing BKT state
+        const { data: existingBkt } = await db
+          .from("bkt_states")
+          .select("p_know, max_p_know, total_attempts, correct_attempts, p_transit, p_slip, p_guess")
+          .eq("student_id", user.id)
+          .eq("subtopic_id", item.subtopic_id)
+          .maybeSingle();
+
+        const currentMastery = existingBkt?.p_know ?? 0;
+        const maxReachedMastery = existingBkt?.max_p_know ?? 0;
+        const existingTotal = existingBkt?.total_attempts ?? 0;
+        const existingCorrect = existingBkt?.correct_attempts ?? 0;
+
+        // 2. Compute BKT v4 update
+        const bktResult = computeBktV4Update({
+          currentMastery,
+          maxReachedMastery,
+          isCorrect,
+          instrumentType,
+        });
+
+        // 3. Increment counters (M-1 FIX)
+        const finalTotalAttempts = existingTotal + 1;
+        const finalCorrectAttempts = existingCorrect + (isCorrect ? 1 : 0);
+
+        // 4. UPSERT with computed values
+        const bktRow = {
+          student_id: user.id,
+          subtopic_id: item.subtopic_id,
+          p_know: bktResult.p_know,
+          max_p_know: bktResult.max_p_know,
+          p_transit: existingBkt?.p_transit ?? 0.18,
+          p_slip: existingBkt?.p_slip ?? 0.10,
+          p_guess: existingBkt?.p_guess ?? 0.25,
+          delta: bktResult.delta,
+          total_attempts: finalTotalAttempts,
+          correct_attempts: finalCorrectAttempts,
+          last_attempt_at: nowIso,
+        };
+
+        const { error: bktErr } = await atomicUpsert(
+          db,
+          "bkt_states",
+          "student_id,subtopic_id",
+          bktRow,
+        );
+
+        if (bktErr) {
+          errors.push({ index: i, step: "bkt_pathb", message: bktErr.message });
+        } else {
+          bktUpdated++;
+        }
+      } catch (e) {
+        errors.push({ index: i, step: "bkt_pathb", message: (e as Error).message });
       }
     }
   }
