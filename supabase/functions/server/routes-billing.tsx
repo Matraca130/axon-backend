@@ -3,6 +3,7 @@
  *
  * N-10 FIX: Timing-safe Stripe signature verification.
  * O-7 FIX: Webhook idempotency via processed_webhook_events table.
+ * W3-11 FIX: subscription-status uses auth user.id (was IDOR via query param)
  */
 
 import { Hono } from "npm:hono";
@@ -331,15 +332,18 @@ async function verifyStripeSignature(
 }
 
 // ─── GET /billing/subscription-status ────────────────────────────────
+// W3-11 FIX: IDOR vulnerability — was accepting user_id from query param,
+// allowing any authenticated user to view another user's subscription.
+// Now uses the authenticated user's ID from the JWT token.
 
 billingRoutes.get(`${PREFIX}/billing/subscription-status`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;  // W3-11 FIX: extract user from auth
 
-  const userId = c.req.query("user_id");
+  // W3-11 FIX: Use authenticated user's ID, NOT query param
+  const userId = user.id;
   const institutionId = c.req.query("institution_id");
-  if (!isUuid(userId)) return err(c, "user_id must be a valid UUID", 400);
   if (!isUuid(institutionId)) return err(c, "institution_id must be a valid UUID", 400);
 
   const { data: sub, error: subErr } = await db
