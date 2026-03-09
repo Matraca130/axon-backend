@@ -12,18 +12,11 @@
  *
  * LA-02 FIX: Added AbortController timeout (15s generate, 10s embed)
  * LA-06 FIX: Added retry with exponential backoff for 429/503
- * D-16 FIX: Use gemini-embedding-001 (correct model name per 2026 docs)
- *           + truncate to 768 dims to match DB vector column
- * D-17 FIX: Switch from gemini-2.0-flash to gemini-2.5-flash
- *           (separate quota bucket, avoids free tier exhaustion)
- * D-18 FIX: Export GENERATE_MODEL so _meta always reports correct model
- * D45-D49: PDF extraction via Gemini multimodal (Fase 7)
- * D57-D62: Embedding function deprecated — migrated to OpenAI (openai-embeddings.ts)
+ * N3 FIX: Export fetchWithRetry so handler.ts can use it for callGemini
  */
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
-// D-17 + D-18: Single source of truth for the generation model name
 export const GENERATE_MODEL = "gemini-2.5-flash";
 
 function getApiKey(): string {
@@ -32,12 +25,12 @@ function getApiKey(): string {
   return key;
 }
 
-// Exported so diagnostic route can use it
 export { getApiKey };
 
 // ─── LA-02 + LA-06 FIX: Fetch with timeout + retry ─────────────
+// N3 FIX: Now exported so handler.ts callGemini can use retry logic
 
-async function fetchWithRetry(
+export async function fetchWithRetry(
   url: string,
   init: RequestInit,
   timeoutMs: number,
@@ -149,13 +142,6 @@ export async function generateText(
 }
 
 // ─── Embeddings (DEPRECATED — D57) ──────────────────────────────
-//
-// @deprecated Use generateEmbedding() from ./openai-embeddings.ts instead.
-// This function is kept temporarily for reference but is no longer imported
-// by any production code. Will be removed in a future cleanup.
-//
-// Migration: D57 (text-embedding-3-large 1536d via OpenAI)
-// Old model: gemini-embedding-001 (768d)
 
 const _DEPRECATED_EMBEDDING_DIMENSIONS = 768;
 

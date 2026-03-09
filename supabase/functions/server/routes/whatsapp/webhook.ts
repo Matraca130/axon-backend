@@ -5,31 +5,17 @@
  * POST /webhooks/whatsapp — Incoming messages (HMAC-SHA256 verified)
  *
  * Security:
- *   - No JWT auth (webhooks are unauthenticated by nature)
  *   - HMAC-SHA256 signature verification using WHATSAPP_APP_SECRET
  *   - timing-safe comparison to prevent timing attacks (AUDIT F3)
  *   - Deduplication by Meta message ID (AUDIT F7)
+ *   - Per-phone rate limiting via wa-rate-limit.ts (S12)
  *
- * Message routing (S09):
- *   - Linked users → handleMessage() from handler.ts
- *   - Unlinked users + 6-digit code → verifyLinkCode() from link.ts
- *   - Unlinked users + other → onboarding message
- *
- * AUDIT F12: Processing is inline (await handleMessage before return 200).
- * Meta allows up to 5s for response. Most ops complete in <3s.
- * Slow ops (generate_content, weekly_report) are handled by tools.ts
- * returning isAsync=true, which sends an immediate response to user.
- *
- * A9 FIX: Dedup record is now inserted BEFORE processing to close the
- * race condition window where Meta retransmissions could bypass dedup.
- *
- * B4 FIX: Unlinked users' phone numbers are now hashed with a global
- * salt (WHATSAPP_APP_SECRET) before storing in message_log.
- *
- * B5 FIX: Meta message types ('interactive','audio') are normalized to
- * DB enum values ('button','voice') before INSERT to avoid CHECK violation.
- *
- * @see https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/components
+ * Audit fixes applied:
+ *   B4: Unlinked users' phones hashed before storing
+ *   B5: Meta message types normalized before INSERT
+ *   C4: Rate limit message sent only on first_block
+ *   C5: Dedup record inserted for rate-limited messages
+ *   C6: Raw phone hashed before rate limit Map key
  */
 
 import type { Context } from "npm:hono";
@@ -38,10 +24,10 @@ import { timingSafeEqual } from "../../timing-safe.ts";
 import { sendText, hashPhone } from "./wa-client.ts";
 import { handleMessage } from "./handler.ts";
 import { verifyLinkCode, isLinkingCode } from "./link.ts";
+import { checkWhatsAppRateLimit, sendRateLimitMessage } from "./wa-rate-limit.ts";
 
 // ─── Types ───────────────────────────────────────────────
 
-/** Subset of Meta webhook payload we care about */
 interface WhatsAppWebhookBody {
   object: string;
   entry?: Array<{
@@ -72,7 +58,7 @@ interface WhatsAppWebhookBody {
   }>;
 }
 
-// ─── HMAC Verification (AUDIT F3) ─────────────────────────
+// ─── HMAC Verification (AUDIT F3) ─────────────────────
 
 async function verifyMetaSignature(
   rawBody: string,
@@ -115,25 +101,19 @@ async function verifyMetaSignature(
   }
 }
 
-// ─── Message Type Normalization (B5 FIX) ──────────────────
+// ─── Message Type Normalization (B5 FIX) ──────────────
 
-/**
- * B5 FIX: Meta sends 'interactive' and 'audio' as message types,
- * but whatsapp_message_log.message_type CHECK constraint only allows
- * ('text', 'voice', 'button', 'image'). Without normalization,
- * INSERT fails silently and dedup breaks for those message types.
- */
 function normalizeMessageType(metaType: string): string {
   switch (metaType) {
     case "interactive": return "button";
     case "audio": return "voice";
     case "text": return "text";
     case "image": return "image";
-    default: return "text"; // Safe fallback for unsupported types
+    default: return "text";
   }
 }
 
-// ─── Deduplication (AUDIT F7 + A9 FIX) ────────────────────
+// ─── Deduplication (AUDIT F7 + A9 FIX) ────────────────
 
 async function isDuplicate(waMessageId: string): Promise<boolean> {
   const admin = getAdminClient();
@@ -145,14 +125,6 @@ async function isDuplicate(waMessageId: string): Promise<boolean> {
   return (data?.length ?? 0) > 0;
 }
 
-/**
- * A9 FIX: Insert a preliminary dedup record BEFORE processing.
- * This closes the race condition where Meta retransmissions could
- * arrive during the 2-5s processing window and bypass the dedup check.
- * handler.ts will UPDATE this record with tool_called, latency, etc.
- *
- * B5 FIX: messageType is pre-normalized by caller to match DB CHECK.
- */
 async function insertDedupRecord(
   waMessageId: string,
   phoneHash: string,
@@ -167,21 +139,15 @@ async function insertDedupRecord(
       user_id: userId,
       direction: "in",
       message_type: messageType,
-      success: true, // Optimistic; handler.ts updates if fails
+      success: true,
     });
   } catch (e) {
-    // Non-fatal: dedup is best-effort
     console.warn(`[WA-Webhook] Dedup record insert failed: ${(e as Error).message}`);
   }
 }
 
-// ─── Phone Lookup ───────────────────────────────────────
+// ─── Phone Lookup ─────────────────────────────────────
 
-/**
- * Look up a linked user by phone number.
- * Must iterate through all links and re-hash because each link has its own salt.
- * This is O(n) on active links, but n is small (each user has max 1 link).
- */
 async function lookupLinkedUser(
   phoneNumber: string,
 ): Promise<{ userId: string; phoneHash: string } | null> {
@@ -194,7 +160,6 @@ async function lookupLinkedUser(
 
   if (!links || links.length === 0) return null;
 
-  // Try each salt until we find a matching hash
   for (const link of links) {
     const computedHash = await hashPhone(phoneNumber, link.phone_salt);
     if (computedHash === link.phone_hash) {
@@ -205,11 +170,8 @@ async function lookupLinkedUser(
   return null;
 }
 
-// ─── Handlers ────────────────────────────────────────────
+// ─── Handlers ────────────────────────────────────────
 
-/**
- * GET /webhooks/whatsapp — Meta verification challenge.
- */
 export async function handleVerification(c: Context): Promise<Response> {
   const mode = c.req.query("hub.mode");
   const token = c.req.query("hub.verify_token");
@@ -225,14 +187,6 @@ export async function handleVerification(c: Context): Promise<Response> {
   return c.text("Forbidden", 403);
 }
 
-/**
- * POST /webhooks/whatsapp — Incoming messages from Meta.
- *
- * AUDIT F12: Processing is INLINE (await before return).
- * A9 FIX: Dedup record inserted BEFORE processing to prevent duplicates.
- * B5 FIX: Message types normalized before DB insert.
- * B4 FIX: Unlinked user phones hashed before storing.
- */
 export async function handleIncoming(c: Context): Promise<Response> {
   const startMs = Date.now();
 
@@ -263,7 +217,7 @@ export async function handleIncoming(c: Context): Promise<Response> {
   const contacts = body.entry?.[0]?.changes?.[0]?.value?.contacts;
 
   if (!messages || messages.length === 0) {
-    return c.text("OK", 200); // Status update, no message
+    return c.text("OK", 200);
   }
 
   const message = messages[0];
@@ -272,7 +226,6 @@ export async function handleIncoming(c: Context): Promise<Response> {
   const messageType = message.type;
   const contactName = contacts?.[0]?.profile?.name ?? "Unknown";
 
-  // B5 FIX: Normalize Meta message type to DB enum ONCE
   const dbMessageType = normalizeMessageType(messageType);
 
   // ── Step 4: Dedup check ──
@@ -318,17 +271,37 @@ export async function handleIncoming(c: Context): Promise<Response> {
     `text="${textContent.slice(0, 80)}"`,
   );
 
-  // ── Step 6: Route message (S09) ──
+  // ── Step 6: Route message ──
   try {
-    // Look up linked user
     const linked = await lookupLinkedUser(from);
 
+    // C6 FIX: Always use hashed phone as rate limit key (never raw phone)
+    const globalSalt = Deno.env.get("WHATSAPP_APP_SECRET") ?? "axon-global-salt";
+    const rateLimitKey = linked
+      ? linked.phoneHash
+      : await hashPhone(from, globalSalt);
+
+    // C4 FIX: Rate limit returns block type
+    const rateLimitResult = checkWhatsAppRateLimit(rateLimitKey, !!linked);
+
+    if (rateLimitResult !== "allowed") {
+      console.warn(`[WA-Webhook] Rate limited (${rateLimitResult}): ${rateLimitKey.slice(0, 12)}...`);
+
+      // C5 FIX: Insert dedup record even for rate-limited messages
+      const phoneHashForLog = linked ? linked.phoneHash : rateLimitKey;
+      await insertDedupRecord(waMessageId, phoneHashForLog, linked?.userId ?? null, dbMessageType);
+
+      // C4 FIX: Only send rate-limit message on first block
+      if (rateLimitResult === "first_block") {
+        await sendRateLimitMessage(from);
+      }
+
+      return c.text("OK", 200);
+    }
+
     if (linked) {
-      // A9 FIX: Insert dedup record BEFORE processing
-      // B5 FIX: Use normalized dbMessageType
       await insertDedupRecord(waMessageId, linked.phoneHash, linked.userId, dbMessageType);
 
-      // ── LINKED USER: Call handler ──
       await handleMessage({
         phone: from,
         phoneHash: linked.phoneHash,
@@ -340,30 +313,21 @@ export async function handleIncoming(c: Context): Promise<Response> {
         audioMediaId,
       });
     } else {
-      // B4 FIX: Hash the raw phone with a global salt before storing.
-      // AUDIT-05: Raw phone must NEVER be stored in any DB table.
-      // Uses WHATSAPP_APP_SECRET as a deterministic global salt so
-      // the same unlinked phone always produces the same hash
-      // (needed for per-user log grouping/analytics).
-      const globalSalt = Deno.env.get("WHATSAPP_APP_SECRET") ?? "axon-global-salt";
-      const anonPhoneHash = await hashPhone(from, globalSalt);
+      // B4 FIX: Hash raw phone with global salt
+      const anonPhoneHash = rateLimitKey; // Already hashed above for C6
 
-      // A9 FIX: Insert dedup record for unlinked users too
-      // B5 FIX: Use normalized dbMessageType
       await insertDedupRecord(waMessageId, anonPhoneHash, null, dbMessageType);
 
-      // ── UNLINKED USER ──
       if (textContent && isLinkingCode(textContent)) {
-        // Attempt to verify linking code
         const result = await verifyLinkCode(from, textContent.trim());
         if (result.success) {
           await sendText(
             from,
             "¡Vinculado! Ya podés estudiar por WhatsApp \ud83c\udf89\n\n" +
             "Probá enviando:\n" +
-            "• \"Qué debo estudiar?\"\n" +
-            "• \"Cómo voy en mis cursos?\"\n" +
-            "• O cualquier pregunta académica",
+            "\u2022 \"Qué debo estudiar?\"\n" +
+            "\u2022 \"Cómo voy en mis cursos?\"\n" +
+            "\u2022 O cualquier pregunta académica",
           );
         } else {
           await sendText(
@@ -373,7 +337,6 @@ export async function handleIncoming(c: Context): Promise<Response> {
           );
         }
       } else {
-        // Unknown user, send onboarding
         await sendText(
           from,
           "\u00a1Hola! Soy Axon, tu asistente de estudio. \ud83d\udcda\n\n" +
@@ -386,15 +349,12 @@ export async function handleIncoming(c: Context): Promise<Response> {
       }
     }
   } catch (e) {
-    // handleMessage or linking failed — log but don't propagate to Meta
     console.error(`[WA-Webhook] Processing error: ${(e as Error).message}`);
-    // Best-effort error response
     try {
       await sendText(from, "Algo salió mal. Intentá de nuevo. \ud83d\ude14");
     } catch { /* can't send error message */ }
   }
 
-  // ── Step 7: Return 200 ──
   const latencyMs = Date.now() - startMs;
   console.log(`[WA-Webhook] Completed in ${latencyMs}ms`);
 

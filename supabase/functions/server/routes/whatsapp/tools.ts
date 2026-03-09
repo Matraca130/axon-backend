@@ -1,28 +1,14 @@
 /**
  * routes/whatsapp/tools.ts — Gemini Function Calling definitions + executor
  *
- * 9 tools available to the WhatsApp chatbot. Each maps to existing
- * Axon backend functionality via direct DB queries or internal HTTP.
+ * 9 tools available to the WhatsApp chatbot.
  *
- * ARCHITECTURE DECISION (AUDIT F4):
- * Existing route handlers (study-queue, reviews, progress) are module-private
- * and do NOT export their business logic. Instead of refactoring ~10 files,
- * we use direct DB queries/RPCs for 6 tools and internal HTTP for 2 tools
- * whose logic is too complex to extract (RAG chat: 21KB, generate-smart).
- *
- * A3 FIX: ask_academic_question now uses direct generateText() + summary
- * context instead of internal HTTP. The service_role_key JWT has no 'sub'
- * claim, so authenticate() in chat.ts always returned 401.
- *
- * B2 FIX: ask_academic_question now checks for query errors when fetching
- * summaries by course_id, with explicit logging if column is missing.
+ * C12 FIX: Removed unused SupabaseClient type import.
  *
  * @see AUDIT F4: Direct DB queries (handlers are module-private)
  * @see AUDIT F5: Ghost session for submit_review
- * @see AUDIT F9: Internal HTTP for generate_content (deferred to pgmq)
  */
 
-import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { getAdminClient } from "../../db.ts";
 import { generateText } from "../../gemini.ts";
 
@@ -32,7 +18,6 @@ export interface ToolExecutionResult {
   name: string;
   result: unknown;
   error?: string;
-  /** If true, handler should enqueue and respond "Generando..." */
   isAsync?: boolean;
 }
 
@@ -246,14 +231,8 @@ CONTEXTO DEL ALUMNO:
 {STUDENT_CONTEXT}
 `;
 
-// ─── Tool Executor (AUDIT F4: Direct DB queries) ───────────
+// ─── Tool Executor ───────────────────────────────────────
 
-/**
- * Execute a tool call from Gemini.
- * Uses direct DB queries/RPCs for most tools (AUDIT F4).
- * A3 FIX: ask_academic_question uses direct generateText() instead of
- * internal HTTP (service_role_key JWT has no 'sub' claim).
- */
 export async function executeToolCall(
   name: string,
   args: Record<string, unknown>,
@@ -264,10 +243,7 @@ export async function executeToolCall(
 
   try {
     switch (name) {
-      // ─── Direct DB/RPC tools (6) ───────────────────
-
       case "get_study_queue": {
-        // RPC exists: migration 20260303_03_study_queue_rpc.sql
         const { data, error } = await db.rpc("get_study_queue", {
           p_student_id: userId,
           p_course_id: (args.course_id as string) || null,
@@ -293,7 +269,6 @@ export async function executeToolCall(
         const { data, error } = await query;
         if (error) throw new Error(`topic_progress: ${error.message}`);
 
-        // Compute summary stats
         const total = data?.length ?? 0;
         const avgMastery = total > 0
           ? (data!.reduce((sum, r) => sum + (r.mastery_level ?? 0), 0) / total).toFixed(1)
@@ -343,7 +318,6 @@ export async function executeToolCall(
 
       case "browse_content": {
         if (args.section_id) {
-          // Get keywords/summaries for a specific section
           const { data, error } = await db
             .from("keywords")
             .select("id, name, summaries(id, title)")
@@ -355,7 +329,6 @@ export async function executeToolCall(
         }
 
         if (args.course_id) {
-          // Get sections for a course
           const { data, error } = await db
             .from("sections")
             .select("id, name, position")
@@ -365,7 +338,6 @@ export async function executeToolCall(
           return { name, result: { level: "sections", items: data } };
         }
 
-        // Get all courses for the user
         const { data, error } = await db
           .from("course_members")
           .select("courses(id, name, code)")
@@ -375,7 +347,6 @@ export async function executeToolCall(
       }
 
       case "submit_review": {
-        // AUDIT F5: Use ghost_session_id from session context
         const ghostSessionId = sessionContext.ghost_session_id as string;
         if (!ghostSessionId) {
           return { name, result: null, error: "No active flashcard session. Use get_study_queue first." };
@@ -401,19 +372,11 @@ export async function executeToolCall(
         return { name, result: { review_id: data?.id, rating } };
       }
 
-      // ─── Academic Question (A3 FIX: direct instead of internal HTTP) ──
-
       case "ask_academic_question": {
-        // A3 FIX: service_role_key JWT has no 'sub' claim, so internal HTTP
-        // to /ai/rag-chat always returned 401. Instead, we do a simplified
-        // RAG: fetch summary content + call generateText() directly.
-        // Full hybrid search (embeddings + FTS) deferred to Phase 2.
-
         const question = args.question as string;
         let context = "";
 
         if (args.summary_id) {
-          // Specific summary requested
           const { data, error: summaryErr } = await db
             .from("summaries")
             .select("title, content")
@@ -427,7 +390,6 @@ export async function executeToolCall(
             context = `Fuente: "${data.title}"\n${((data.content as string) || "").slice(0, 4000)}`;
           }
         } else {
-          // No summary_id: fetch recent summaries from student's courses
           const { data: memberships } = await db
             .from("course_members")
             .select("course_id")
@@ -437,9 +399,6 @@ export async function executeToolCall(
           if (memberships?.length) {
             const courseIds = memberships.map((m) => m.course_id);
 
-            // B2 FIX: Check for query errors (summaries.course_id might not exist).
-            // If the column doesn't exist, Supabase returns an error and data is null.
-            // We log the error and fall through to answering without context.
             const { data: summaries, error: sumErr } = await db
               .from("summaries")
               .select("title, content")
@@ -477,8 +436,6 @@ export async function executeToolCall(
         return { name, result: { answer: text } };
       }
 
-      // ─── Async tools (2) — enqueue and respond immediately ────
-
       case "generate_content": {
         return {
           name,
@@ -503,10 +460,7 @@ export async function executeToolCall(
         };
       }
 
-      // ─── Voice (delegated to S14) ───────────────────────
-
       case "handle_voice_message": {
-        // TODO S14: Implement voice transcription
         return {
           name,
           result: { message: "Los mensajes de voz estarán disponibles pronto." },
