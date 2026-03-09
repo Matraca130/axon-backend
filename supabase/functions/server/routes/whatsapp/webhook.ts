@@ -23,6 +23,12 @@
  * A9 FIX: Dedup record is now inserted BEFORE processing to close the
  * race condition window where Meta retransmissions could bypass dedup.
  *
+ * B4 FIX: Unlinked users' phone numbers are now hashed with a global
+ * salt (WHATSAPP_APP_SECRET) before storing in message_log.
+ *
+ * B5 FIX: Meta message types ('interactive','audio') are normalized to
+ * DB enum values ('button','voice') before INSERT to avoid CHECK violation.
+ *
  * @see https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/components
  */
 
@@ -109,6 +115,24 @@ async function verifyMetaSignature(
   }
 }
 
+// ─── Message Type Normalization (B5 FIX) ──────────────────
+
+/**
+ * B5 FIX: Meta sends 'interactive' and 'audio' as message types,
+ * but whatsapp_message_log.message_type CHECK constraint only allows
+ * ('text', 'voice', 'button', 'image'). Without normalization,
+ * INSERT fails silently and dedup breaks for those message types.
+ */
+function normalizeMessageType(metaType: string): string {
+  switch (metaType) {
+    case "interactive": return "button";
+    case "audio": return "voice";
+    case "text": return "text";
+    case "image": return "image";
+    default: return "text"; // Safe fallback for unsupported types
+  }
+}
+
 // ─── Deduplication (AUDIT F7 + A9 FIX) ────────────────────
 
 async function isDuplicate(waMessageId: string): Promise<boolean> {
@@ -126,6 +150,8 @@ async function isDuplicate(waMessageId: string): Promise<boolean> {
  * This closes the race condition where Meta retransmissions could
  * arrive during the 2-5s processing window and bypass the dedup check.
  * handler.ts will UPDATE this record with tool_called, latency, etc.
+ *
+ * B5 FIX: messageType is pre-normalized by caller to match DB CHECK.
  */
 async function insertDedupRecord(
   waMessageId: string,
@@ -204,6 +230,8 @@ export async function handleVerification(c: Context): Promise<Response> {
  *
  * AUDIT F12: Processing is INLINE (await before return).
  * A9 FIX: Dedup record inserted BEFORE processing to prevent duplicates.
+ * B5 FIX: Message types normalized before DB insert.
+ * B4 FIX: Unlinked user phones hashed before storing.
  */
 export async function handleIncoming(c: Context): Promise<Response> {
   const startMs = Date.now();
@@ -243,6 +271,9 @@ export async function handleIncoming(c: Context): Promise<Response> {
   const waMessageId = message.id;
   const messageType = message.type;
   const contactName = contacts?.[0]?.profile?.name ?? "Unknown";
+
+  // B5 FIX: Normalize Meta message type to DB enum ONCE
+  const dbMessageType = normalizeMessageType(messageType);
 
   // ── Step 4: Dedup check ──
   try {
@@ -294,7 +325,8 @@ export async function handleIncoming(c: Context): Promise<Response> {
 
     if (linked) {
       // A9 FIX: Insert dedup record BEFORE processing
-      await insertDedupRecord(waMessageId, linked.phoneHash, linked.userId, messageType);
+      // B5 FIX: Use normalized dbMessageType
+      await insertDedupRecord(waMessageId, linked.phoneHash, linked.userId, dbMessageType);
 
       // ── LINKED USER: Call handler ──
       await handleMessage({
@@ -308,8 +340,17 @@ export async function handleIncoming(c: Context): Promise<Response> {
         audioMediaId,
       });
     } else {
+      // B4 FIX: Hash the raw phone with a global salt before storing.
+      // AUDIT-05: Raw phone must NEVER be stored in any DB table.
+      // Uses WHATSAPP_APP_SECRET as a deterministic global salt so
+      // the same unlinked phone always produces the same hash
+      // (needed for per-user log grouping/analytics).
+      const globalSalt = Deno.env.get("WHATSAPP_APP_SECRET") ?? "axon-global-salt";
+      const anonPhoneHash = await hashPhone(from, globalSalt);
+
       // A9 FIX: Insert dedup record for unlinked users too
-      await insertDedupRecord(waMessageId, from, null, messageType);
+      // B5 FIX: Use normalized dbMessageType
+      await insertDedupRecord(waMessageId, anonPhoneHash, null, dbMessageType);
 
       // ── UNLINKED USER ──
       if (textContent && isLinkingCode(textContent)) {

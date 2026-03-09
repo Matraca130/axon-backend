@@ -14,6 +14,9 @@
  * context instead of internal HTTP. The service_role_key JWT has no 'sub'
  * claim, so authenticate() in chat.ts always returned 401.
  *
+ * B2 FIX: ask_academic_question now checks for query errors when fetching
+ * summaries by course_id, with explicit logging if column is missing.
+ *
  * @see AUDIT F4: Direct DB queries (handlers are module-private)
  * @see AUDIT F5: Ghost session for submit_review
  * @see AUDIT F9: Internal HTTP for generate_content (deferred to pgmq)
@@ -411,11 +414,15 @@ export async function executeToolCall(
 
         if (args.summary_id) {
           // Specific summary requested
-          const { data } = await db
+          const { data, error: summaryErr } = await db
             .from("summaries")
             .select("title, content")
             .eq("id", args.summary_id as string)
             .single();
+
+          if (summaryErr) {
+            console.warn(`[WA-Tools] ask_academic_question: summary fetch failed: ${summaryErr.message}`);
+          }
           if (data) {
             context = `Fuente: "${data.title}"\n${((data.content as string) || "").slice(0, 4000)}`;
           }
@@ -429,12 +436,23 @@ export async function executeToolCall(
 
           if (memberships?.length) {
             const courseIds = memberships.map((m) => m.course_id);
-            const { data: summaries } = await db
+
+            // B2 FIX: Check for query errors (summaries.course_id might not exist).
+            // If the column doesn't exist, Supabase returns an error and data is null.
+            // We log the error and fall through to answering without context.
+            const { data: summaries, error: sumErr } = await db
               .from("summaries")
               .select("title, content")
               .in("course_id", courseIds)
               .order("updated_at", { ascending: false })
               .limit(3);
+
+            if (sumErr) {
+              console.warn(
+                `[WA-Tools] ask_academic_question: summaries by course_id failed: ${sumErr.message}. ` +
+                `Falling back to no-context answer. Verify summaries table has course_id column.`,
+              );
+            }
 
             if (summaries?.length) {
               context = summaries
