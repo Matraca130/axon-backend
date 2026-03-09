@@ -5,11 +5,27 @@
  * GET    /mux/playback-token     — Signed JWT for playback
  * GET    /mux/video-stats        — Aggregated stats for professor
  * DELETE /mux/asset/:video_id    — Delete from Mux + soft-delete in DB
+ *
+ * W7-SEC02 FIX: All 4 endpoints now resolve institution ownership
+ * via video→summary→resolve_parent_institution and verify membership
+ * via requireInstitutionRole(). Previously, any authenticated user
+ * could access/modify any video across all institutions.
+ *
+ * W7-SEC05 FIX: create-upload now resolves institution BEFORE calling
+ * the Mux API, closing the JWT verification gap where a forged JWT
+ * could consume a Mux upload URL before PostgREST validates it.
  */
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { PREFIX, authenticate, safeJson, ok, err } from "../../db.ts";
+import { isUuid } from "../../validate.ts";
+import {
+  requireInstitutionRole,
+  isDenied,
+  ALL_ROLES,
+  CONTENT_WRITE_ROLES,
+} from "../../auth-helpers.ts";
 import { muxFetch, buildPlaybackJwt } from "./helpers.ts";
 
 export const muxApiRoutes = new Hono();
@@ -24,8 +40,23 @@ muxApiRoutes.post(`${PREFIX}/mux/create-upload`, async (c: Context) => {
   if (!body) return err(c, "Invalid or missing JSON body", 400);
 
   const { summary_id, title } = body;
-  if (typeof summary_id !== "string" || typeof title !== "string")
-    return err(c, "summary_id and title are required strings", 400);
+  if (!isUuid(summary_id)) return err(c, "summary_id must be a valid UUID", 400);
+  if (typeof title !== "string" || !title.trim())
+    return err(c, "title is required (non-empty string)", 400);
+
+  // W7-SEC02 + W7-SEC05 FIX: Resolve institution BEFORE Mux API call.
+  // This validates the JWT cryptographically via PostgREST and prevents
+  // forged JWTs from consuming Mux upload URLs.
+  const { data: instId } = await db.rpc("resolve_parent_institution", {
+    p_table: "summaries",
+    p_id: summary_id,
+  });
+  if (!instId) return err(c, "Summary not found or inaccessible", 404);
+
+  const roleCheck = await requireInstitutionRole(
+    db, user.id, instId as string, CONTENT_WRITE_ROLES,
+  );
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   const muxRes = await muxFetch("/video/v1/uploads", {
     method: "POST",
@@ -58,13 +89,13 @@ muxApiRoutes.post(`${PREFIX}/mux/create-upload`, async (c: Context) => {
 muxApiRoutes.get(`${PREFIX}/mux/playback-token`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const videoId = c.req.query("video_id");
-  if (!videoId) return err(c, "Missing required query param: video_id", 400);
+  if (!isUuid(videoId)) return err(c, "video_id must be a valid UUID", 400);
 
   const { data: video, error: dbErr } = await db
-    .from("videos").select("id, mux_playback_id, status, is_mux, deleted_at")
+    .from("videos").select("id, summary_id, mux_playback_id, status, is_mux, deleted_at")
     .eq("id", videoId).single();
 
   if (dbErr || !video) return err(c, "Video not found", 404);
@@ -72,6 +103,18 @@ muxApiRoutes.get(`${PREFIX}/mux/playback-token`, async (c: Context) => {
   if (!video.is_mux)     return err(c, "Video is not a Mux asset", 400);
   if (video.status !== "ready") return err(c, `Video not ready (status: ${video.status})`, 409);
   if (!video.mux_playback_id)   return err(c, "Video has no playback ID", 500);
+
+  // W7-SEC02 FIX: Verify user has access to this video's institution
+  const { data: instId } = await db.rpc("resolve_parent_institution", {
+    p_table: "summaries",
+    p_id: video.summary_id,
+  });
+  if (!instId) return err(c, "Cannot resolve video institution", 404);
+
+  const roleCheck = await requireInstitutionRole(
+    db, user.id, instId as string, ALL_ROLES,
+  );
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   try {
     const [token, thumbnailToken, storyboardToken] = await Promise.all([
@@ -89,10 +132,29 @@ muxApiRoutes.get(`${PREFIX}/mux/playback-token`, async (c: Context) => {
 muxApiRoutes.get(`${PREFIX}/mux/video-stats`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const videoId = c.req.query("video_id");
-  if (!videoId) return err(c, "Missing required query param: video_id", 400);
+  if (!isUuid(videoId)) return err(c, "video_id must be a valid UUID", 400);
+
+  // W7-SEC02 FIX: Fetch video to get summary_id for institution scoping
+  const { data: videoRow, error: videoErr } = await db
+    .from("videos").select("id, summary_id")
+    .eq("id", videoId).single();
+
+  if (videoErr || !videoRow) return err(c, "Video not found", 404);
+
+  const { data: instId } = await db.rpc("resolve_parent_institution", {
+    p_table: "summaries",
+    p_id: videoRow.summary_id,
+  });
+  if (!instId) return err(c, "Cannot resolve video institution", 404);
+
+  // Professors+ can see stats
+  const roleCheck = await requireInstitutionRole(
+    db, user.id, instId as string, CONTENT_WRITE_ROLES,
+  );
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   const { data: views, error: dbErr } = await db
     .from("video_views")
@@ -120,15 +182,27 @@ muxApiRoutes.get(`${PREFIX}/mux/video-stats`, async (c: Context) => {
 muxApiRoutes.delete(`${PREFIX}/mux/asset/:video_id`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const videoId = c.req.param("video_id");
   const { data: video, error: fetchErr } = await db
-    .from("videos").select("id, mux_asset_id, is_mux, deleted_at")
+    .from("videos").select("id, summary_id, mux_asset_id, is_mux, deleted_at")
     .eq("id", videoId).single();
 
   if (fetchErr || !video) return err(c, "Video not found", 404);
   if (video.deleted_at) return err(c, "Video already deleted", 410);
+
+  // W7-SEC02 FIX: Verify user has content-write access to this institution
+  const { data: instId } = await db.rpc("resolve_parent_institution", {
+    p_table: "summaries",
+    p_id: video.summary_id,
+  });
+  if (!instId) return err(c, "Cannot resolve video institution", 404);
+
+  const roleCheck = await requireInstitutionRole(
+    db, user.id, instId as string, CONTENT_WRITE_ROLES,
+  );
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   if (video.is_mux && video.mux_asset_id) {
     const muxRes = await muxFetch(`/video/v1/assets/${video.mux_asset_id}`, { method: "DELETE" });

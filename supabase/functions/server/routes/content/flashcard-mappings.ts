@@ -18,6 +18,9 @@
  *
  * SECURITY:
  *   - Authenticated (same as all Axon endpoints)
+ *   - W7-SEC04 FIX: Scoped to user's active institution memberships.
+ *     Previously returned ALL flashcards across all institutions.
+ *     Now filters via summaries.institution_id JOIN.
  *   - Filters: is_active = true, deleted_at IS NULL
  *   - Optional status filter (default: all non-deleted)
  *
@@ -44,7 +47,7 @@ flashcardMappingRoutes.get(
   async (c: Context) => {
     const auth = await authenticate(c);
     if (auth instanceof Response) return auth;
-    const { db } = auth;
+    const { user, db } = auth;
 
     // ── Parse query params ──
     const status = c.req.query("status"); // optional: 'published', 'draft', etc.
@@ -57,10 +60,41 @@ flashcardMappingRoutes.get(
     if (isNaN(offset) || offset < 0) offset = 0;
 
     try {
-      // ── Build query: only 3 columns ──
+      // ── W7-SEC04 FIX: Scope to user's active institutions ──
+      // Get the user's active institution memberships
+      const { data: memberships, error: memErr } = await db
+        .from("memberships")
+        .select("institution_id")
+        .eq("user_id", user.id)
+        .eq("is_active", true);
+
+      if (memErr) {
+        return err(c, `Failed to resolve memberships: ${memErr.message}`, 500);
+      }
+
+      // No active memberships → no flashcards accessible
+      if (!memberships || memberships.length === 0) {
+        return ok(c, { data: [], total: 0, limit, offset });
+      }
+
+      const institutionIds = memberships.map(
+        (m: { institution_id: string }) => m.institution_id,
+      );
+
+      // ── Build query: only 3 columns, scoped by institution ──
+      // Uses !inner JOIN on summaries to filter by institution_id.
+      // The summaries columns are NOT returned in the response
+      // (PostgREST strips them when not selected in the top-level).
       let query = db
         .from("flashcards")
-        .select("id, subtopic_id, keyword_id", { count: "estimated" })
+        .select(
+          "id, subtopic_id, keyword_id, summaries!inner(institution_id)",
+          { count: "estimated" },
+        )
+        .in(
+          "summaries.institution_id",
+          institutionIds,
+        )
         .eq("is_active", true)
         .is("deleted_at", null)
         .order("created_at", { ascending: true })
@@ -77,9 +111,19 @@ flashcardMappingRoutes.get(
         return err(c, `Failed to fetch flashcard mappings: ${queryErr.message}`, 500);
       }
 
+      // Strip the joined summaries object from each row —
+      // the frontend only needs { id, subtopic_id, keyword_id }
+      const cleaned = (data ?? []).map(
+        (row: Record<string, unknown>) => ({
+          id: row.id,
+          subtopic_id: row.subtopic_id,
+          keyword_id: row.keyword_id,
+        }),
+      );
+
       return ok(c, {
-        data: data ?? [],
-        total: count ?? (data?.length ?? 0),
+        data: cleaned,
+        total: count ?? cleaned.length,
         limit,
         offset,
       });
