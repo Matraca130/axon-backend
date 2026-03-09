@@ -1,17 +1,17 @@
 /**
  * routes/whatsapp/handler.ts — WhatsApp bot orchestrator
  *
- * Audit fixes applied:
- *   C1: Phone encrypted before enqueue (PII protection)
- *   C3: Fire-and-forget processNextJob after enqueue
- *   C7: formatFlashcardSummary used in get_study_queue fallback
- *   C11: Removed unused sendInteractiveButtons import
- *   N3: callGemini now uses fetchWithRetry for 429/503 resilience
+ * Phase 3 additions:
+ *   S14: Voice messages transcribed via Gemini multimodal, then processed
+ *        through the normal Agentic Loop (no separate tool call needed).
+ *
+ * Audit fixes applied: C1, C3, C7, C11, N3
  */
 
 import { getAdminClient } from "../../db.ts";
 import { getApiKey, GENERATE_MODEL, fetchWithRetry } from "../../gemini.ts";
 import { sendText } from "./wa-client.ts";
+import { downloadMedia } from "./wa-client.ts";
 import {
   WHATSAPP_TOOLS,
   WHATSAPP_SYSTEM_PROMPT,
@@ -77,9 +77,7 @@ async function loadOrCreateSession(phoneHash: string, userId: string): Promise<S
     .eq("phone_hash", phoneHash)
     .single();
 
-  if (existing) {
-    return existing as SessionRow;
-  }
+  if (existing) return existing as SessionRow;
 
   const { data: created, error } = await db
     .from("whatsapp_sessions")
@@ -98,7 +96,6 @@ async function loadOrCreateSession(phoneHash: string, userId: string): Promise<S
     console.error(`[WA-Handler] Session create failed: ${error.message}`);
     throw error;
   }
-
   return created as SessionRow;
 }
 
@@ -108,7 +105,6 @@ async function updateSession(
   updates: Partial<Pick<SessionRow, "history" | "mode" | "current_tool" | "current_context" | "last_message_id">>,
 ): Promise<boolean> {
   const db = getAdminClient();
-
   const { data, error } = await db
     .from("whatsapp_sessions")
     .update({
@@ -122,14 +118,93 @@ async function updateSession(
     .single();
 
   if (error || !data) {
-    console.warn(`[WA-Handler] Optimistic lock failed for ${phoneHash} (version ${expectedVersion})`);
+    console.warn(`[WA-Handler] Optimistic lock failed for ${phoneHash} (v${expectedVersion})`);
     return false;
   }
-
   return true;
 }
 
-// ─── Gemini API Call (N3 FIX: uses fetchWithRetry for 429/503) ──
+// ─── S14: Voice Transcription via Gemini Multimodal ───────
+
+/**
+ * S14: Download voice message from Meta, transcribe with Gemini multimodal.
+ * Returns the transcribed text, or null if transcription fails.
+ *
+ * Flow: Meta mediaId → downloadMedia() → ArrayBuffer → base64 → Gemini inline_data
+ *
+ * Gemini 2.5 Flash supports audio natively via inline_data with
+ * audio/ogg, audio/mpeg, audio/wav, audio/webm MIME types.
+ */
+async function transcribeVoiceMessage(audioMediaId: string): Promise<string | null> {
+  try {
+    const { buffer, mimeType } = await downloadMedia(audioMediaId);
+
+    // Convert ArrayBuffer to base64
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    // Process in chunks of 8192 to avoid stack overflow with spread operator
+    for (let i = 0; i < bytes.length; i += 8192) {
+      const chunk = bytes.subarray(i, Math.min(i + 8192, bytes.length));
+      binary += String.fromCharCode(...chunk);
+    }
+    const audioBase64 = btoa(binary);
+
+    const apiKey = getApiKey();
+    const url = `${GEMINI_BASE}/${GENERATE_MODEL}:generateContent?key=${apiKey}`;
+
+    const body = {
+      contents: [{
+        parts: [
+          {
+            text: "Transcrib\u00ed este mensaje de voz en espa\u00f1ol. " +
+              "Retorn\u00e1 SOLO la transcripci\u00f3n textual, sin explicaciones ni prefijos. " +
+              "Si no pod\u00e9s entender el audio, respond\u00e9 '[inaudible]'.",
+          },
+          {
+            inline_data: {
+              mime_type: mimeType,
+              data: audioBase64,
+            },
+          },
+        ],
+      }],
+      generation_config: {
+        temperature: 0.1,
+        max_output_tokens: 512,
+      },
+    };
+
+    const res = await fetchWithRetry(
+      url,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      20_000, // voice can be slow
+      1, // 1 retry max
+    );
+
+    if (!res.ok) {
+      console.error(`[WA-Handler] Gemini STT failed: ${res.status}`);
+      return null;
+    }
+
+    const data = await res.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text || text.includes("[inaudible]")) {
+      return null;
+    }
+
+    console.log(`[WA-Handler] Voice transcribed (${bytes.length} bytes): "${text.slice(0, 80)}..."`);
+    return text.trim();
+  } catch (e) {
+    console.error(`[WA-Handler] Voice transcription failed: ${(e as Error).message}`);
+    return null;
+  }
+}
+
+// ─── Gemini API Call (N3 FIX: uses fetchWithRetry) ────────
 
 interface GeminiResponse {
   functionCall?: { name: string; args: Record<string, unknown> };
@@ -151,22 +226,11 @@ async function callGemini(
   const body = {
     contents: history,
     tools: [{ function_declarations: WHATSAPP_TOOLS }],
-    tool_config: {
-      function_calling_config: { mode: "AUTO" },
-    },
-    system_instruction: {
-      parts: [{ text: systemPrompt }],
-    },
-    generation_config: {
-      temperature: 0.3,
-      max_output_tokens: 1024,
-    },
+    tool_config: { function_calling_config: { mode: "AUTO" } },
+    system_instruction: { parts: [{ text: systemPrompt }] },
+    generation_config: { temperature: 0.3, max_output_tokens: 1024 },
   };
 
-  // N3 FIX: Use fetchWithRetry (exported from gemini.ts) instead of raw fetch.
-  // Retries 429 (rate limit) and 503 (service unavailable) with exponential backoff.
-  // Max 2 retries for WhatsApp (tighter than gemini.ts default of 3) to stay within
-  // Meta's ~5s webhook processing window.
   const res = await fetchWithRetry(
     url,
     {
@@ -175,7 +239,7 @@ async function callGemini(
       body: JSON.stringify(body),
     },
     GEMINI_TIMEOUT_MS,
-    2, // max 2 retries (total 3 attempts, ~7s worst case)
+    2,
   );
 
   if (!res.ok) {
@@ -195,7 +259,6 @@ async function callGemini(
   }
 
   const part = candidate.content.parts[0];
-
   if (part.functionCall) {
     return {
       functionCall: {
@@ -204,7 +267,6 @@ async function callGemini(
       },
     };
   }
-
   return { text: part.text ?? "" };
 }
 
@@ -212,18 +274,15 @@ async function callGemini(
 
 async function buildStudentContext(userId: string): Promise<string> {
   const db = getAdminClient();
-
   try {
     const [profileRes, coursesRes] = await Promise.all([
       db.from("profiles").select("first_name, last_name").eq("id", userId).single(),
       db.from("course_members").select("courses(name, code)").eq("user_id", userId).limit(5),
     ]);
-
     const name = profileRes.data
       ? `${profileRes.data.first_name ?? ""} ${profileRes.data.last_name ?? ""}`.trim()
       : "Alumno";
     const courses = coursesRes.data?.map((cm) => (cm.courses as { name: string })?.name).filter(Boolean) ?? [];
-
     return [
       `Nombre: ${name}`,
       `Cursos: ${courses.length > 0 ? courses.join(", ") : "Ning\u00fan curso inscrito"}`,
@@ -249,39 +308,29 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
   const startMs = Date.now();
 
   try {
-    // ── Step 1: Load session ──
     const session = await loadOrCreateSession(phoneHash, userId);
     let history: GeminiMessage[] = Array.isArray(session.history) ? [...session.history] : [];
 
-    // ── Step 2: Session Mode routing (FC-01 + S10) ──
+    // ── Step 2: Session Mode routing ──
     if (session.mode === "flashcard_review") {
       if (messageType === "interactive" && buttonPayload) {
         const handled = await handleReviewButton(
-          phoneHash,
-          phone,
-          userId,
-          buttonPayload,
-          session.current_context,
-          session.version,
+          phoneHash, phone, userId, buttonPayload,
+          session.current_context, session.version,
         );
         if (handled) {
           updateLogRecord(messageId, ["flashcard_review"], Date.now() - startMs);
           return;
         }
       }
-
       if (text) {
         if (isExitCommand(text)) {
           await exitReviewMode(phoneHash, phone, session.current_context, session.version);
           updateLogRecord(messageId, ["review_exit"], Date.now() - startMs);
           return;
         }
-
-        console.log(`[WA-Handler] User sent text during flashcard_review, exiting mode`);
         await updateSession(phoneHash, session.version, {
-          mode: "conversation",
-          current_tool: null,
-          current_context: {},
+          mode: "conversation", current_tool: null, current_context: {},
         });
         session.mode = "conversation";
         session.version += 1;
@@ -289,13 +338,22 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
       }
     }
 
-    // ── Step 3: Build user message ──
+    // ── Step 3: Build user message (S14: voice transcription) ──
     let userMessage = text ?? "";
     if (messageType === "interactive" && buttonPayload) {
       userMessage = `[Bot\u00f3n seleccionado: ${buttonPayload}]`;
     } else if (messageType === "audio" && audioMediaId) {
-      await sendText(phone, "Los mensajes de voz estar\u00e1n disponibles pronto. Por ahora, escrib\u00ed tu pregunta. \ud83c\udfa4");
-      return;
+      // S14: Transcribe voice message via Gemini multimodal
+      await sendText(phone, "Transcribiendo tu audio... \ud83c\udfa4");
+      const transcription = await transcribeVoiceMessage(audioMediaId);
+      if (!transcription) {
+        await sendText(phone, "No pude entender el audio. Prob\u00e1 enviando tu pregunta por texto. \ud83d\ude14");
+        updateLogRecord(messageId, ["voice_failed"], Date.now() - startMs);
+        return;
+      }
+      userMessage = transcription;
+      // Notify user what we heard
+      await sendText(phone, `\ud83d\udcdd Escuch\u00e9: \"${transcription.slice(0, 200)}${transcription.length > 200 ? "..." : ""}\"`);
     }
 
     if (!userMessage.trim()) {
@@ -305,11 +363,7 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
 
     // ── Step 4: Agentic Loop ──
     const studentContext = await buildStudentContext(userId);
-
-    history.push({
-      role: "user",
-      parts: [{ text: userMessage }],
-    });
+    history.push({ role: "user", parts: [{ text: userMessage }] });
 
     let finalText = "";
     let toolsUsed: string[] = [];
@@ -320,25 +374,18 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
       if (response.functionCall) {
         const { name: toolName, args: toolArgs } = response.functionCall;
         toolsUsed.push(toolName);
-
-        console.log(`[WA-Handler] Tool call #${iteration + 1}: ${toolName}(${JSON.stringify(toolArgs).slice(0, 100)})`);
+        console.log(`[WA-Handler] Tool #${iteration + 1}: ${toolName}(${JSON.stringify(toolArgs).slice(0, 100)})`);
 
         history.push({
           role: "model",
           parts: [{ functionCall: { name: toolName, args: toolArgs } }],
         });
 
-        const toolResult = await executeToolCall(
-          toolName,
-          toolArgs,
-          userId,
-          session.current_context,
-        );
+        const toolResult = await executeToolCall(toolName, toolArgs, userId, session.current_context);
 
-        // Handle async tools
+        // Async tools
         if (toolResult.isAsync) {
           const asyncResult = toolResult.result as Record<string, unknown>;
-
           const phoneEncrypted = await encryptPhone(phone);
           await enqueueJob({
             type: toolName as "generate_content" | "generate_weekly_report",
@@ -348,13 +395,10 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
             action: toolArgs.action as "flashcard" | "quiz" | undefined,
             summary_id: toolArgs.summary_id as string | undefined,
           });
-
           processNextJob().catch((e) =>
-            console.warn(`[WA-Handler] Background job processing failed: ${(e as Error).message}`),
+            console.warn(`[WA-Handler] Background job failed: ${(e as Error).message}`),
           );
-
           await sendText(phone, (asyncResult?.message as string) ?? "Procesando... \u23f3");
-
           history.push({
             role: "user",
             parts: [{ functionResponse: { name: toolName, response: { content: toolResult.result } } }],
@@ -362,17 +406,11 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
           break;
         }
 
-        // S10: Handle get_study_queue → enter Session Mode
+        // S10: get_study_queue → Session Mode
         if (toolName === "get_study_queue" && toolResult.result) {
           const queueResult = toolResult.result as { cards: FlashcardItem[]; count: number };
           if (queueResult.count > 0) {
-            const entered = await enterReviewMode(
-              phoneHash,
-              phone,
-              userId,
-              queueResult.cards,
-              session.version,
-            );
+            const entered = await enterReviewMode(phoneHash, phone, userId, queueResult.cards, session.version);
             if (entered) {
               updateLogRecord(messageId, toolsUsed, Date.now() - startMs);
               return;
@@ -388,73 +426,51 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
             functionResponse: {
               name: toolName,
               response: {
-                content: toolResult.error
-                  ? { error: toolResult.error }
-                  : toolResult.result,
+                content: toolResult.error ? { error: toolResult.error } : toolResult.result,
               },
             },
           }],
         });
-
         continue;
       }
 
       if (response.text) {
         finalText = response.text;
-        history.push({
-          role: "model",
-          parts: [{ text: finalText }],
-        });
+        history.push({ role: "model", parts: [{ text: finalText }] });
         break;
       }
 
-      console.warn(`[WA-Handler] Gemini returned neither functionCall nor text at iteration ${iteration}`);
+      console.warn(`[WA-Handler] Gemini empty at iteration ${iteration}`);
       break;
     }
 
     // ── Step 5: Send response ──
     if (finalText) {
-      const truncated = finalText.length > 4000
-        ? finalText.slice(0, 3997) + "..."
-        : finalText;
+      const truncated = finalText.length > 4000 ? finalText.slice(0, 3997) + "..." : finalText;
       await sendText(phone, truncated);
     }
 
     // ── Step 6: Update session ──
-    const trimmedHistory = trimHistory(history);
     const updated = await updateSession(phoneHash, session.version, {
-      history: trimmedHistory,
+      history: trimHistory(history),
       last_message_id: messageId,
     });
-
     if (!updated) {
-      console.warn(`[WA-Handler] Session update failed (concurrent modification), message still processed`);
+      console.warn(`[WA-Handler] Session save failed (concurrent), msg still processed`);
     }
 
-    // ── Step 7: Update log ──
     updateLogRecord(messageId, toolsUsed, Date.now() - startMs);
-
-    console.log(
-      `[WA-Handler] Processed in ${Date.now() - startMs}ms. Tools: [${toolsUsed.join(", ")}]. ` +
-      `Response: ${finalText.slice(0, 80)}...`,
-    );
+    console.log(`[WA-Handler] Done in ${Date.now() - startMs}ms. Tools: [${toolsUsed.join(", ")}]`);
   } catch (e) {
     const errorMsg = (e as Error).message;
-    console.error(`[WA-Handler] Fatal error: ${errorMsg}`);
-
+    console.error(`[WA-Handler] Fatal: ${errorMsg}`);
     try {
       await sendText(phone, "Ups, algo sali\u00f3 mal. Intent\u00e1 de nuevo en unos segundos. \ud83d\ude14");
-    } catch {
-      // Can't even send error message
-    }
+    } catch { /* */ }
 
     const db = getAdminClient();
     db.from("whatsapp_message_log")
-      .update({
-        success: false,
-        error_message: errorMsg.slice(0, 500),
-        latency_ms: Date.now() - startMs,
-      })
+      .update({ success: false, error_message: errorMsg.slice(0, 500), latency_ms: Date.now() - startMs })
       .eq("wa_message_id", messageId)
       .then(() => {});
   }
@@ -462,11 +478,7 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
 
 // ─── Log Helper ─────────────────────────────────────────
 
-function updateLogRecord(
-  messageId: string,
-  toolsUsed: string[],
-  latencyMs: number,
-): void {
+function updateLogRecord(messageId: string, toolsUsed: string[], latencyMs: number): void {
   const db = getAdminClient();
   db.from("whatsapp_message_log")
     .update({
