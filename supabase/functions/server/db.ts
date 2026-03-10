@@ -12,25 +12,70 @@
  *   - authenticate() decodes the JWT locally (~0.1ms, zero network).
  *   - Cryptographic signature validation is deferred to PostgREST/RLS on every DB query.
  *   - For admin-only routes (signup, institution creation), use getAdminClient().auth.getUser(token).
+ *
+ * D1 FIX (debate-001/002):
+ *   - Replaced throw-on-missing env validation with Zod safeParse + envValid flag.
+ *   - authenticate() returns 503 if envValid is false.
+ *   - JWT_SECRET is optional in D1, becomes required in D2 (jose).
  */
 
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js";
 import type { Context } from "npm:hono";
 import type { StatusCode } from "npm:hono/utils/http-status";
+import { z } from "npm:zod";
 
-// ─── Environment Validation (fail fast on cold start) ─────────────────
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY");
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+// ─── Environment Validation (Zod safeParse — D1 FIX) ─────────────────
+/**
+ * D1 FIX: Replaced `throw new Error(...)` with Zod safeParse.
+ *
+ * Previous behavior: missing env vars threw at import time, killing the
+ * entire module chain. This made debugging difficult and provided no
+ * graceful degradation.
+ *
+ * New behavior: Zod validates all env vars on startup. If validation
+ * fails, `envValid` is set to false and `authenticate()` returns 503.
+ * The server still starts (for health checks, diagnostics) but all
+ * authenticated routes fail gracefully.
+ *
+ * JWT_SECRET is optional in D1 — it becomes required in D2 when jose
+ * is added for cryptographic JWT verification.
+ */
+const EnvSchema = z.object({
+  SUPABASE_URL: z.string().url(),
+  SUPABASE_ANON_KEY: z.string().min(20),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().min(20),
+  SUPABASE_JWT_SECRET: z.string().min(32).optional(), // D1: optional, D2: required
+});
 
-if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !SUPABASE_SERVICE_ROLE_KEY) {
-  const missing = [
-    !SUPABASE_URL && "SUPABASE_URL",
-    !SUPABASE_ANON_KEY && "SUPABASE_ANON_KEY",
-    !SUPABASE_SERVICE_ROLE_KEY && "SUPABASE_SERVICE_ROLE_KEY",
-  ].filter(Boolean).join(", ");
-  throw new Error(`[Axon Fatal] Missing required env vars: ${missing}`);
+const envResult = EnvSchema.safeParse({
+  SUPABASE_URL: Deno.env.get("SUPABASE_URL"),
+  SUPABASE_ANON_KEY: Deno.env.get("SUPABASE_ANON_KEY"),
+  SUPABASE_SERVICE_ROLE_KEY: Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
+  SUPABASE_JWT_SECRET: Deno.env.get("SUPABASE_JWT_SECRET"),
+});
+
+/** Module-level flag: true if all required env vars are valid. Write-once on startup. */
+export let envValid = true;
+
+if (!envResult.success) {
+  console.error(
+    "[Axon Fatal] Env validation failed:",
+    envResult.error.flatten(),
+  );
+  envValid = false;
 }
+
+// Use validated values if available, raw Deno.env as fallback (no fake values).
+// If envValid is false, authenticate() blocks all requests with 503 anyway.
+const SUPABASE_URL = envResult.success
+  ? envResult.data.SUPABASE_URL
+  : Deno.env.get("SUPABASE_URL") ?? "";
+const SUPABASE_ANON_KEY = envResult.success
+  ? envResult.data.SUPABASE_ANON_KEY
+  : Deno.env.get("SUPABASE_ANON_KEY") ?? "";
+const SUPABASE_SERVICE_ROLE_KEY = envResult.success
+  ? envResult.data.SUPABASE_SERVICE_ROLE_KEY
+  : Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
 // ─── Route Prefix ─────────────────────────────────────────────────────
 /**
@@ -96,6 +141,9 @@ export const extractToken = (c: Context): string | null => {
  * Decode JWT payload locally — ~0.1ms, zero network.
  * Does NOT verify the cryptographic signature (PostgREST/RLS handles that).
  * Does check `exp` locally to fast-fail expired tokens before wasting a DB round-trip.
+ *
+ * ⚠️  D2 TODO: This function will be REPLACED by jose.jwtVerify() in Deploy 2.
+ *    See issue #78 and docs/DECISIONS.md for the plan.
  */
 const decodeJwtPayload = (
   token: string,
@@ -140,7 +188,9 @@ const decodeJwtPayload = (
  *   For such routes, ALWAYS either:
  *     (a) Do a canary DB query first (e.g. db.from('profiles').select('id').single())
  *     (b) Use getAdminClient().auth.getUser(token) to verify the token via network
- *     (c) [Phase 3] Use jose to verify the JWT signature locally with SUPABASE_JWT_SECRET
+ *     (c) [D2] Use jose to verify the JWT signature locally with SUPABASE_JWT_SECRET
+ *
+ * D1 FIX: Added envValid guard — returns 503 if env validation failed on startup.
  *
  * Usage:
  *   const auth = await authenticate(c);
@@ -152,6 +202,11 @@ export const authenticate = async (
 ): Promise<
   { user: { id: string; email: string }; db: SupabaseClient } | Response
 > => {
+  // D1 FIX: Block all auth if env is invalid (503 graceful degradation)
+  if (!envValid) {
+    return err(c, "Service temporarily unavailable: configuration error", 503);
+  }
+
   const token = extractToken(c);
   if (!token) {
     return err(c, "Missing Authorization header", 401);
