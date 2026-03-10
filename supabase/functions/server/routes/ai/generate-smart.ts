@@ -53,6 +53,7 @@ import {
 } from "../../auth-helpers.ts";
 import { generateText, parseGeminiJson, GENERATE_MODEL } from "../../gemini.ts";
 import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
+import { truncateAtWord } from "../../auto-ingest.ts";
 
 export const aiGenerateSmartRoutes = new Hono();
 
@@ -61,14 +62,11 @@ const ACTIONS = ["quiz_question", "flashcard"] as const;
 // Fase 8E: Max items per bulk request
 const MAX_BULK_COUNT = 10;
 
-// ── D12: Local truncateAtWord (Fase 3 not yet on main) ────────
-function truncateAtWord(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  const truncated = text.substring(0, maxLen);
-  const lastSpace = truncated.lastIndexOf(" ");
-  return lastSpace > maxLen * 0.8
-    ? truncated.substring(0, lastSpace) + "..."
-    : truncated + "...";
+// ── D12: Prompt-specific truncation — adds "..." to signal truncation to Gemini.
+// Core word-boundary logic imported from auto-ingest.ts (single source of truth).
+function truncateForPrompt(text: string, maxLen: number): string {
+  const result = truncateAtWord(text, maxLen);
+  return result.length < text.length ? result + "..." : result;
 }
 
 // ── D13: Map primary_reason to Spanish explanation for prompt ──
@@ -320,7 +318,7 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
       .eq("id", chosen.summary_id)
       .single();
 
-    const contentSnippet = truncateAtWord(
+    const contentSnippet = truncateForPrompt(
       summary?.content_markdown || "",
       1500,
     );
@@ -595,7 +593,7 @@ Responde en JSON con este schema exacto:
 
     summaryContentCache.set(
       sid,
-      truncateAtWord(summaryData?.content_markdown || "", 1500),
+      truncateForPrompt(summaryData?.content_markdown || "", 1500),
     );
   }
 
