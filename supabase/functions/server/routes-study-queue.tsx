@@ -3,31 +3,15 @@
  *
  * GET /study-queue — Returns a prioritized list of flashcards to study.
  *
- * S-3 FIX: Primary path now uses get_study_queue() PostgreSQL RPC.
- * The entire NeedScore calculation, filtering, and ranking happens in SQL.
- * Falls back to the original JS-side logic if the RPC is unavailable.
+ * v4.2 SPEC COMPLIANCE:
+ *   - clinical_priority from keywords (exponential NeedScore scaling)
+ *   - 5-color scale: red/orange/yellow/green/blue with relative Δ mode
+ *   - Domination threshold: 0.70 + (priority × 0.20)
+ *   - Leech detection (consecutive_lapses >= threshold)
+ *   - Enriched return: reps, lapses, last_review_at, max_p_know
  *
- * S-3b FIX: RPC now returns total_count via COUNT(*) OVER() so
- * total_in_queue accurately reflects ALL matching cards, not just
- * the LIMIT-ed subset returned.
- *
- * U-1 FIX: JS fallback now scopes flashcards to the student's
- * accessible institutions (was fetching ALL flashcards globally).
- *
- * The algorithm combines three systems:
- *   1. BKT (Bayesian Knowledge Tracing) — concept-level mastery per subtopic
- *   2. FSRS (Free Spaced Repetition Scheduler) — card-level scheduling
- *   3. NeedScore — weighted urgency score per card combining:
- *      - Overdue factor (0.40), Mastery factor (0.30),
- *      - Fragility factor (0.20), Novelty factor (0.10)
- *
- * Query params:
- *   ?course_id=xxx    — optional, filter flashcards to a specific course
- *   ?limit=20         — optional, max items to return (default 20, max 100)
- *   ?include_future=0 — optional, if "1" include cards not yet due
- *
- * Response:
- *   { data: { queue: StudyQueueItem[], meta: { ... } } }
+ * S-3 FIX: Primary path uses get_study_queue() PostgreSQL RPC.
+ * Falls back to JS-side logic if RPC is unavailable.
  */
 
 import { Hono } from "npm:hono";
@@ -50,11 +34,11 @@ const NEED_CONFIG = {
 
 // ─── Constants ────────────────────────────────────────────────────
 
-// U-1 FIX: Safety cap on flashcard fetch in JS fallback.
-// Prevents OOM if scoping somehow fails or returns too many results.
 const MAX_FALLBACK_FLASHCARDS = 10_000;
+const DEFAULT_DOMINATION_BASE = 0.70;
+const DEFAULT_DOMINATION_PRIORITY_SCALE = 0.20;
 
-// ─── NeedScore Calculation (fallback only) ────────────────────────
+// ─── NeedScore Calculation (fallback) ─────────────────────────────
 
 interface NeedScoreInput {
   dueAt: string | null;
@@ -63,38 +47,40 @@ interface NeedScoreInput {
   fsrsState: string;
   fsrsStability: number;
   pKnow: number;
+  clinicalPriority: number;
 }
 
 function calculateNeedScore(input: NeedScoreInput, now: Date): number {
-  const { dueAt, fsrsLapses, fsrsReps, fsrsState, pKnow } = input;
+  const { dueAt, fsrsLapses, fsrsReps, fsrsState, pKnow, clinicalPriority } = input;
 
   let overdue = 0;
   if (!dueAt) {
     overdue = 1.0;
   } else {
     const dueDate = new Date(dueAt);
-    const daysOverdue =
-      (now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24);
+    const daysOverdue = (now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24);
     if (daysOverdue > 0) {
       overdue = 1 - Math.exp(-daysOverdue / NEED_CONFIG.graceDays);
     }
   }
 
   const needMastery = 1 - pKnow;
-  const needFragility = Math.min(
-    1,
-    fsrsLapses / Math.max(1, fsrsReps + fsrsLapses + 1),
-  );
+  const needFragility = Math.min(1, fsrsLapses / Math.max(1, fsrsReps + fsrsLapses + 1));
   const needNovelty = fsrsState === "new" ? 1.0 : 0.0;
 
-  const score =
+  const baseScore =
     NEED_CONFIG.overdueWeight * overdue +
     NEED_CONFIG.masteryWeight * needMastery +
     NEED_CONFIG.fragilityWeight * needFragility +
     NEED_CONFIG.noveltyWeight * needNovelty;
 
-  return Math.max(0, Math.min(1, score));
+  // §6.4: clinical_priority exponential multiplier
+  const priorityMultiplier = 1.0 + Math.pow(2.0, clinicalPriority * 2.0);
+
+  return Math.max(0, baseScore * priorityMultiplier);
 }
+
+// ─── Retention: FSRS v4 power-law (matches fsrs-v4.ts) ───────────
 
 function calculateRetention(
   lastReviewAt: string | null,
@@ -102,19 +88,37 @@ function calculateRetention(
   now: Date,
 ): number {
   if (!lastReviewAt || stabilityDays <= 0) return 0;
-  const daysSince =
-    (now.getTime() - new Date(lastReviewAt).getTime()) / (1000 * 60 * 60 * 24);
-  return Math.max(0, Math.min(1, Math.exp(-daysSince / stabilityDays)));
+  const daysSince = (now.getTime() - new Date(lastReviewAt).getTime()) / (1000 * 60 * 60 * 24);
+  // FSRS v4 power-law forgetting curve (NOT exponential)
+  return Math.max(0, Math.min(1, Math.pow(1 + daysSince / (9 * stabilityDays), -1)));
 }
 
-function getMasteryColor(pKnow: number): "green" | "yellow" | "red" | "gray" {
-  if (pKnow < 0) return "gray";
-  if (pKnow >= 0.80) return "green";
-  if (pKnow >= 0.50) return "yellow";
-  return "red";
+// ─── 5-Color Scale (§6.2) ─────────────────────────────────────────
+
+function getMasteryColor(
+  pKnow: number,
+  retention: number,
+  clinicalPriority: number,
+): "blue" | "green" | "yellow" | "orange" | "red" | "gray" {
+  if (pKnow <= 0) return "gray";
+
+  // Display mastery = p_know × R
+  const displayMastery = pKnow * (retention > 0 ? retention : (pKnow > 0 ? 1.0 : 0.0));
+
+  // Domination threshold (§6.3): threshold = 0.70 + (priority × 0.20)
+  const threshold = DEFAULT_DOMINATION_BASE + clinicalPriority * DEFAULT_DOMINATION_PRIORITY_SCALE;
+
+  // Relative Δ = displayMastery / threshold
+  const delta = threshold > 0 ? displayMastery / threshold : 0;
+
+  if (delta >= 1.10) return "blue";    // Superado
+  if (delta >= 1.00) return "green";   // Dominado
+  if (delta >= 0.85) return "yellow";  // Casi
+  if (delta >= 0.50) return "orange";  // En progreso
+  return "red";                         // Critico
 }
 
-// ─── Course → Summary IDs resolution (fallback only) ────────────────
+// ─── Course → Summary IDs resolution (fallback) ─────────────────
 
 async function resolveSummaryIdsForCourse(
   db: SupabaseClient,
@@ -130,112 +134,50 @@ async function resolveSummaryIdsForCourse(
     return new Set(rpcData.map((r: { id: string }) => r.id));
   }
 
-  console.warn(
-    `[study-queue] get_course_summary_ids RPC failed, using fallback: ${rpcError?.message}`,
-  );
+  console.warn(`[study-queue] RPC failed, using fallback: ${rpcError?.message}`);
 
-  const { data: semesters } = await db
-    .from("semesters")
-    .select("id")
-    .eq("course_id", courseId)
-    .is("deleted_at", null);
-
+  const { data: semesters } = await db.from("semesters").select("id").eq("course_id", courseId).is("deleted_at", null);
   if (!semesters || semesters.length === 0) return null;
   const semesterIds = semesters.map((s: { id: string }) => s.id);
 
-  const { data: sections } = await db
-    .from("sections")
-    .select("id")
-    .in("semester_id", semesterIds)
-    .is("deleted_at", null);
-
+  const { data: sections } = await db.from("sections").select("id").in("semester_id", semesterIds).is("deleted_at", null);
   if (!sections || sections.length === 0) return null;
   const sectionIds = sections.map((s: { id: string }) => s.id);
 
-  const { data: topics } = await db
-    .from("topics")
-    .select("id")
-    .in("section_id", sectionIds)
-    .is("deleted_at", null);
-
+  const { data: topics } = await db.from("topics").select("id").in("section_id", sectionIds).is("deleted_at", null);
   if (!topics || topics.length === 0) return null;
   const topicIds = topics.map((t: { id: string }) => t.id);
 
-  const { data: summaries } = await db
-    .from("summaries")
-    .select("id")
-    .in("topic_id", topicIds)
-    .is("deleted_at", null);
-
+  const { data: summaries } = await db.from("summaries").select("id").in("topic_id", topicIds).is("deleted_at", null);
   if (!summaries || summaries.length === 0) return null;
   return new Set(summaries.map((s: { id: string }) => s.id));
 }
-
-// ─── Student → Summary IDs resolution (fallback, no course_id) ──────
-// U-1 FIX: When course_id is null, resolve ALL summary IDs the student
-// has access to via their active memberships → institutions → full
-// content hierarchy. Prevents loading flashcards from other institutions.
 
 async function resolveSummaryIdsForStudent(
   db: SupabaseClient,
   userId: string,
 ): Promise<Set<string> | null> {
-  // Step 1: Get user's active institution memberships
-  const { data: memberships } = await db
-    .from("memberships")
-    .select("institution_id")
-    .eq("user_id", userId)
-    .eq("is_active", true);
-
+  const { data: memberships } = await db.from("memberships").select("institution_id").eq("user_id", userId).eq("is_active", true);
   if (!memberships || memberships.length === 0) return null;
-  const institutionIds = memberships.map(
-    (m: { institution_id: string }) => m.institution_id,
-  );
+  const institutionIds = memberships.map((m: { institution_id: string }) => m.institution_id);
 
-  // Step 2: Get all active courses for those institutions
-  const { data: courses } = await db
-    .from("courses")
-    .select("id")
-    .in("institution_id", institutionIds)
-    .eq("is_active", true);
-
+  const { data: courses } = await db.from("courses").select("id").in("institution_id", institutionIds).eq("is_active", true);
   if (!courses || courses.length === 0) return null;
   const courseIds = courses.map((c: { id: string }) => c.id);
 
-  // Steps 3–6: Same hierarchy traversal as resolveSummaryIdsForCourse
-  const { data: semesters } = await db
-    .from("semesters")
-    .select("id")
-    .in("course_id", courseIds)
-    .is("deleted_at", null);
-
+  const { data: semesters } = await db.from("semesters").select("id").in("course_id", courseIds).is("deleted_at", null);
   if (!semesters || semesters.length === 0) return null;
   const semesterIds = semesters.map((s: { id: string }) => s.id);
 
-  const { data: sections } = await db
-    .from("sections")
-    .select("id")
-    .in("semester_id", semesterIds)
-    .is("deleted_at", null);
-
+  const { data: sections } = await db.from("sections").select("id").in("semester_id", semesterIds).is("deleted_at", null);
   if (!sections || sections.length === 0) return null;
   const sectionIds = sections.map((s: { id: string }) => s.id);
 
-  const { data: topics } = await db
-    .from("topics")
-    .select("id")
-    .in("section_id", sectionIds)
-    .is("deleted_at", null);
-
+  const { data: topics } = await db.from("topics").select("id").in("section_id", sectionIds).is("deleted_at", null);
   if (!topics || topics.length === 0) return null;
   const topicIds = topics.map((t: { id: string }) => t.id);
 
-  const { data: summaries } = await db
-    .from("summaries")
-    .select("id")
-    .in("topic_id", topicIds)
-    .is("deleted_at", null);
-
+  const { data: summaries } = await db.from("summaries").select("id").in("topic_id", topicIds).is("deleted_at", null);
   if (!summaries || summaries.length === 0) return null;
   return new Set(summaries.map((s: { id: string }) => s.id));
 }
@@ -258,9 +200,7 @@ async function getStudyQueueFromRpc(
     });
 
     if (error) {
-      console.warn(
-        `[StudyQueue] RPC get_study_queue failed: ${error.message}. Falling back to JS.`,
-      );
+      console.warn(`[StudyQueue] RPC failed: ${error.message}. Falling back to JS.`);
       return null;
     }
 
@@ -268,11 +208,8 @@ async function getStudyQueueFromRpc(
       return { queue: [], totalDue: 0, totalNew: 0, totalInQueue: 0 };
     }
 
-    // S-3b FIX: Extract total_count from the first row (window function)
-    // Every row has the same total_count value, so we only need the first.
     const totalInQueue = Number(data[0].total_count) || 0;
 
-    // Count new vs review from the returned (limited) results
     let totalNew = 0;
     let totalDue = 0;
     for (const item of data) {
@@ -280,7 +217,6 @@ async function getStudyQueueFromRpc(
       else totalDue++;
     }
 
-    // Strip total_count from response items (internal field)
     const queue = data.map((item: Record<string, unknown>) => {
       const { total_count: _tc, ...rest } = item;
       return rest;
@@ -288,14 +224,12 @@ async function getStudyQueueFromRpc(
 
     return { queue, totalDue, totalNew, totalInQueue };
   } catch (e) {
-    console.warn(
-      `[StudyQueue] RPC exception: ${(e as Error).message}. Falling back to JS.`,
-    );
+    console.warn(`[StudyQueue] RPC exception: ${(e as Error).message}. Falling back to JS.`);
     return null;
   }
 }
 
-// ─── Fallback: JS-based study queue (original logic) ───────────────
+// ─── Fallback: JS-based study queue ────────────────────────────────
 
 async function getStudyQueueFromJs(
   db: SupabaseClient,
@@ -305,44 +239,40 @@ async function getStudyQueueFromJs(
   includeFuture: boolean,
   now: Date,
 ): Promise<{ queue: unknown[]; totalDue: number; totalNew: number; totalInQueue: number }> {
-  // Build FSRS query
   let fsrsQuery = db
     .from("fsrs_states")
-    .select(
-      "flashcard_id, stability, difficulty, due_at, last_review_at, reps, lapses, state",
-    )
+    .select("flashcard_id, stability, difficulty, due_at, last_review_at, reps, lapses, state, consecutive_lapses, is_leech")
     .eq("student_id", userId);
   if (!includeFuture) {
     fsrsQuery = fsrsQuery.lte("due_at", now.toISOString());
   }
   fsrsQuery = fsrsQuery.order("due_at", { ascending: true });
 
-  // U-1 FIX: Added .limit() safety cap to prevent OOM on large datasets.
-  // The actual scoping is done by allowedSummaryIds below, but this
-  // prevents loading millions of rows if the scoping somehow fails.
   const flashcardsQuery = db
     .from("flashcards")
-    .select(
-      "id, summary_id, keyword_id, subtopic_id, front, back, front_image_url, back_image_url",
-    )
+    .select("id, summary_id, keyword_id, subtopic_id, front, back, front_image_url, back_image_url")
     .is("deleted_at", null)
     .eq("is_active", true)
+    .eq("status", "published")
     .limit(MAX_FALLBACK_FLASHCARDS);
 
   const bktQuery = db
     .from("bkt_states")
-    .select("subtopic_id, p_know, total_attempts, correct_attempts, delta")
+    .select("subtopic_id, p_know, max_p_know, total_attempts, correct_attempts, delta")
     .eq("student_id", userId);
 
-  // U-1 FIX: When course_id is null, resolve ALL summary IDs the student
-  // has access to via memberships → institutions → content hierarchy.
-  // Previously this was Promise.resolve(undefined) which meant NO filtering,
-  // causing ALL flashcards from ALL institutions to be loaded.
-  const [bktResult, fsrsResult, flashcardsResult, allowedSummaryIds] =
+  // Fetch keywords for clinical_priority
+  const keywordsQuery = db
+    .from("keywords")
+    .select("id, clinical_priority")
+    .is("deleted_at", null);
+
+  const [bktResult, fsrsResult, flashcardsResult, keywordsResult, allowedSummaryIds] =
     await Promise.all([
       bktQuery,
       fsrsQuery,
       flashcardsQuery,
+      keywordsQuery,
       courseId
         ? resolveSummaryIdsForCourse(db, courseId)
         : resolveSummaryIdsForStudent(db, userId),
@@ -352,33 +282,25 @@ async function getStudyQueueFromJs(
   if (fsrsResult.error) throw new Error(`Fetch fsrs_states failed: ${fsrsResult.error.message}`);
   if (flashcardsResult.error) throw new Error(`Fetch flashcards failed: ${flashcardsResult.error.message}`);
 
-  // U-1 FIX: Return empty queue if student has no accessible summaries.
-  // Previously only checked when courseId was set; now checks always.
   if (allowedSummaryIds === null) {
     return { queue: [], totalDue: 0, totalNew: 0, totalInQueue: 0 };
   }
 
   // Build lookup maps
-  const bktMap = new Map<string, { p_know: number; total_attempts: number }>();
+  const bktMap = new Map<string, { p_know: number; max_p_know: number; total_attempts: number }>();
   for (const bkt of bktResult.data ?? []) {
     bktMap.set(bkt.subtopic_id, {
       p_know: bkt.p_know ?? 0,
+      max_p_know: bkt.max_p_know ?? 0,
       total_attempts: bkt.total_attempts ?? 0,
     });
   }
 
-  const fsrsMap = new Map<
-    string,
-    {
-      stability: number;
-      difficulty: number;
-      due_at: string;
-      last_review_at: string | null;
-      reps: number;
-      lapses: number;
-      state: string;
-    }
-  >();
+  const fsrsMap = new Map<string, {
+    stability: number; difficulty: number; due_at: string;
+    last_review_at: string | null; reps: number; lapses: number;
+    state: string; consecutive_lapses: number; is_leech: boolean;
+  }>();
   for (const fs of fsrsResult.data ?? []) {
     fsrsMap.set(fs.flashcard_id, {
       stability: fs.stability ?? 1,
@@ -388,7 +310,14 @@ async function getStudyQueueFromJs(
       reps: fs.reps ?? 0,
       lapses: fs.lapses ?? 0,
       state: fs.state ?? "new",
+      consecutive_lapses: fs.consecutive_lapses ?? 0,
+      is_leech: fs.is_leech ?? false,
     });
+  }
+
+  const kwMap = new Map<string, number>();
+  for (const kw of keywordsResult.data ?? []) {
+    kwMap.set(kw.id, kw.clinical_priority ?? 0);
   }
 
   interface QueueItem {
@@ -409,6 +338,13 @@ async function getStudyQueueFromJs(
     stability: number;
     difficulty: number;
     is_new: boolean;
+    reps: number;
+    lapses: number;
+    last_review_at: string | null;
+    max_p_know: number;
+    clinical_priority: number;
+    consecutive_lapses: number;
+    is_leech: boolean;
   }
 
   const queue: QueueItem[] = [];
@@ -416,35 +352,30 @@ async function getStudyQueueFromJs(
   let totalReview = 0;
 
   for (const card of flashcardsResult.data ?? []) {
-    if (
-      allowedSummaryIds instanceof Set &&
-      !allowedSummaryIds.has(card.summary_id)
-    ) {
-      continue;
-    }
+    if (allowedSummaryIds instanceof Set && !allowedSummaryIds.has(card.summary_id)) continue;
 
     const fsrs = fsrsMap.get(card.id);
     const isNew = !fsrs;
     const subtopicId = card.subtopic_id ?? null;
     const bkt = subtopicId ? bktMap.get(subtopicId) : null;
     const pKnow = bkt?.p_know ?? 0;
+    const maxPKnow = bkt?.max_p_know ?? 0;
+    const clinicalPriority = kwMap.get(card.keyword_id) ?? 0;
 
     if (fsrs && !includeFuture) {
       const dueDate = new Date(fsrs.due_at);
       if (dueDate > now) continue;
     }
 
-    const needScore = calculateNeedScore(
-      {
-        dueAt: fsrs?.due_at ?? null,
-        fsrsLapses: fsrs?.lapses ?? 0,
-        fsrsReps: fsrs?.reps ?? 0,
-        fsrsState: fsrs?.state ?? "new",
-        fsrsStability: fsrs?.stability ?? 1,
-        pKnow,
-      },
-      now,
-    );
+    const needScore = calculateNeedScore({
+      dueAt: fsrs?.due_at ?? null,
+      fsrsLapses: fsrs?.lapses ?? 0,
+      fsrsReps: fsrs?.reps ?? 0,
+      fsrsState: fsrs?.state ?? "new",
+      fsrsStability: fsrs?.stability ?? 1,
+      pKnow,
+      clinicalPriority,
+    }, now);
 
     const retention = fsrs
       ? calculateRetention(fsrs.last_review_at, fsrs.stability, now)
@@ -464,13 +395,20 @@ async function getStudyQueueFromJs(
       back_image_url: card.back_image_url ?? null,
       need_score: Math.round(needScore * 1000) / 1000,
       retention: Math.round(retention * 1000) / 1000,
-      mastery_color: getMasteryColor(pKnow),
+      mastery_color: getMasteryColor(pKnow, retention, clinicalPriority),
       p_know: Math.round(pKnow * 1000) / 1000,
       fsrs_state: fsrs?.state ?? "new",
       due_at: fsrs?.due_at ?? null,
       stability: fsrs?.stability ?? 1,
       difficulty: fsrs?.difficulty ?? 5,
       is_new: isNew,
+      reps: fsrs?.reps ?? 0,
+      lapses: fsrs?.lapses ?? 0,
+      last_review_at: fsrs?.last_review_at ?? null,
+      max_p_know: Math.round(maxPKnow * 1000) / 1000,
+      clinical_priority: clinicalPriority,
+      consecutive_lapses: fsrs?.consecutive_lapses ?? 0,
+      is_leech: fsrs?.is_leech ?? false,
     });
   }
 
@@ -496,7 +434,6 @@ studyQueueRoutes.get(`${PREFIX}/study-queue`, async (c: Context) => {
   if (auth instanceof Response) return auth;
   const { user, db } = auth;
 
-  // Parse query params
   const courseId = c.req.query("course_id") ?? null;
   const includeFuture = c.req.query("include_future") === "1";
   let limit = parseInt(c.req.query("limit") ?? "20", 10);
@@ -510,28 +447,12 @@ studyQueueRoutes.get(`${PREFIX}/study-queue`, async (c: Context) => {
   const now = new Date();
 
   try {
-    // ── S-3 FIX: Try SQL-based queue first (single RPC call) ──
-    let result = await getStudyQueueFromRpc(
-      db,
-      user.id,
-      courseId,
-      limit,
-      includeFuture,
-    );
-
+    let result = await getStudyQueueFromRpc(db, user.id, courseId, limit, includeFuture);
     let engine: "sql" | "js" = "sql";
 
-    // ── Fallback to JS-based queue if RPC unavailable ──
     if (result === null) {
       engine = "js";
-      result = await getStudyQueueFromJs(
-        db,
-        user.id,
-        courseId,
-        limit,
-        includeFuture,
-        now,
-      );
+      result = await getStudyQueueFromJs(db, user.id, courseId, limit, includeFuture, now);
     }
 
     return ok(c, {
@@ -552,10 +473,6 @@ studyQueueRoutes.get(`${PREFIX}/study-queue`, async (c: Context) => {
     });
   } catch (e) {
     console.error("[StudyQueue] Unexpected error:", e);
-    return err(
-      c,
-      `Study queue generation failed: ${(e as Error).message}`,
-      500,
-    );
+    return err(c, `Study queue generation failed: ${(e as Error).message}`, 500);
   }
 });
