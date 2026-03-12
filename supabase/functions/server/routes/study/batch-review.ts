@@ -9,6 +9,7 @@
  *   PATH B (new): Frontend sends only grade (+ optional subtopic_id)
  *     → Server computes FSRS v4 Petrick + BKT v4 Recovery using lib/
  *     → Server stores computed values
+ *     → Server returns computed values in `results` array (v4.5)
  *
  *   Detection: if item has fsrs_update → PATH A; else → PATH B
  *             if item has bkt_update → PATH A; else if subtopic_id → PATH B
@@ -106,15 +107,20 @@ async function verifySessionOwnership(
 }
 
 // ─── Grade Mapping (PATH B) ───────────────────────────────────────
-// Frontend may send grade 0-5 (SM-2 scale). PATH B needs FsrsGrade 1-4.
-// Mapping: 0→1(Again), 1→1(Again), 2→2(Hard), 3→3(Good), 4→3(Good), 5→4(Easy)
+// Frontend uses native 1-4 scale: 1=Again, 2=Hard, 3=Good, 4=Easy
+// This maps directly to FSRS grades 1-4.
+// Legacy SM-2 grade 5 also maps to Easy (4) for backward compat.
+//
+// FIX v4.5: grade 4 now maps to 4 (Easy), not 3 (Good).
+// The old mapping caused ~60% less stability growth for "Easy" reviews
+// because w16 (Easy bonus ≈ 2.61x) was never applied.
 
 function mapToFsrsGrade(grade: number): FsrsGrade {
   if (grade <= 1) return 1; // Again
   if (grade === 2) return 2; // Hard
   if (grade === 3) return 3; // Good
-  if (grade === 4) return 3; // Good (SM-2 "good" maps to FSRS "good")
-  return 4; // Easy (SM-2 5 = perfect)
+  if (grade === 4) return 4; // Easy (FIX: was 3/Good, now correctly 4/Easy)
+  return 4; // Easy (SM-2 grade 5 legacy)
 }
 
 // ─── Item Validators ──────────────────────────────────────────────
@@ -145,6 +151,26 @@ interface ReviewItem {
     total_attempts: number;
     correct_attempts: number;
     last_attempt_at: string;
+  };
+}
+
+// ─── PATH B computed result type (returned in response) ───────────
+
+interface ComputedResult {
+  item_id: string;
+  fsrs?: {
+    stability: number;
+    difficulty: number;
+    due_at: string;
+    state: string;
+    reps: number;
+    lapses: number;
+  };
+  bkt?: {
+    subtopic_id: string;
+    p_know: number;
+    max_p_know: number;
+    delta: number;
   };
 }
 
@@ -308,6 +334,11 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   let bktUpdated = 0;
   const errors: { index: number; step: string; message: string }[] = [];
 
+  // ── PATH B response enrichment (v4.5) ──
+  // Accumulates per-item computed values for PATH B items.
+  // PATH A items do NOT generate entries here.
+  const computedResults: ComputedResult[] = [];
+
   for (let i = 0; i < validatedItems.length; i++) {
     const item = validatedItems[i];
     const now = new Date();
@@ -447,6 +478,19 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           errors.push({ index: i, step: "fsrs_pathb", message: fsrsErr.message });
         } else {
           fsrsUpdated++;
+
+          // ── PATH B response enrichment: capture FSRS computed values ──
+          computedResults.push({
+            item_id: item.item_id,
+            fsrs: {
+              stability: fsrsResult.stability,
+              difficulty: fsrsResult.difficulty,
+              due_at: fsrsResult.due_at,
+              state: fsrsResult.state,
+              reps: fsrsResult.reps,
+              lapses: fsrsResult.lapses,
+            },
+          });
         }
       } catch (e) {
         errors.push({ index: i, step: "fsrs_pathb", message: (e as Error).message });
@@ -569,6 +613,29 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           errors.push({ index: i, step: "bkt_pathb", message: bktErr.message });
         } else {
           bktUpdated++;
+
+          // ── PATH B response enrichment: attach BKT to matching FSRS result ──
+          const lastResult = computedResults[computedResults.length - 1];
+          if (lastResult && lastResult.item_id === item.item_id) {
+            // Same item — attach BKT to existing FSRS entry
+            lastResult.bkt = {
+              subtopic_id: item.subtopic_id,
+              p_know: bktResult.p_know,
+              max_p_know: bktResult.max_p_know,
+              delta: bktResult.delta,
+            };
+          } else {
+            // Different item or no FSRS entry — create standalone BKT entry
+            computedResults.push({
+              item_id: item.item_id,
+              bkt: {
+                subtopic_id: item.subtopic_id,
+                p_know: bktResult.p_know,
+                max_p_know: bktResult.max_p_know,
+                delta: bktResult.delta,
+              },
+            });
+          }
         }
       } catch (e) {
         errors.push({ index: i, step: "bkt_pathb", message: (e as Error).message });
@@ -583,5 +650,7 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     fsrs_updated: fsrsUpdated,
     bkt_updated: bktUpdated,
     errors: errors.length > 0 ? errors : undefined,
+    // PATH B enrichment: per-item computed values (only for PATH B items)
+    results: computedResults.length > 0 ? computedResults : undefined,
   });
 });
