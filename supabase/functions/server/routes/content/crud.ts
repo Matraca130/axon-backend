@@ -129,6 +129,8 @@ registerCrud(contentCrudRoutes, {
 });
 
 // 8. Keywords — Summary -> Keyword (SACRED, soft-delete)
+//    v4.2: Added clinical_priority (0-1 float) and is_foundation (boolean)
+//    for NeedScore multiplier and prerequisite tracking.
 registerCrud(contentCrudRoutes, {
   table: "keywords",
   slug: "keywords",
@@ -138,8 +140,8 @@ registerCrud(contentCrudRoutes, {
   hasOrderIndex: false,
   softDelete: true,
   requiredFields: ["name"],
-  createFields: ["name", "definition", "priority"],
-  updateFields: ["name", "definition", "priority", "is_active"],
+  createFields: ["name", "definition", "priority", "clinical_priority", "is_foundation"],
+  updateFields: ["name", "definition", "priority", "is_active", "clinical_priority", "is_foundation"],
 });
 
 // 9. Subtopics — Keyword -> Subtopic (SACRED, soft-delete, NO updated_at)
