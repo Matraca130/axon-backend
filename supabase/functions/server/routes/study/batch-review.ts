@@ -14,47 +14,19 @@
  *   Detection: if item has fsrs_update → PATH A; else → PATH B
  *             if item has bkt_update → PATH A; else if subtopic_id → PATH B
  *
+ * v4.2 ADDITIONS:
+ *   - Leech detection: tracks consecutive_lapses on fsrs_states
+ *   - is_leech flag when consecutive_lapses >= leech_threshold
+ *   - leech_threshold read from algorithm_config (default 8)
+ *   - PATH B response includes consecutive_lapses + is_leech
+ *
  * BACKWARD COMPATIBILITY:
  *   Old frontends that send fsrs_update/bkt_update continue working
  *   exactly as before. New frontends that send only grade get server-side
  *   computation. Both can coexist in the same batch.
  *
- * PERF M1: Eliminates the 3-POST-per-card pattern where the frontend had to:
- *   1. POST /reviews           → insert review record
- *   2. POST /fsrs-states       → upsert FSRS scheduling
- *   3. POST /bkt-states        → upsert BKT mastery (with INCREMENT)
- *   Total: 3 × N HTTP requests per session (e.g. 90 for 30 cards)
- *
- * New pattern:
- *   1. POST /review-batch      → ALL reviews + FSRS + BKT in one call
- *   Total: 1 HTTP request per session
- *
- * HOW IT WORKS:
- *   The frontend computes FSRS and BKT updates locally (PATH A), OR sends
- *   only the grade and the server computes everything (PATH B).
- *   The server processes each review item sequentially within the batch:
- *     a) INSERT into reviews (same as POST /reviews)
- *     b) UPSERT into fsrs_states (PATH A: pre-computed; PATH B: server-computed)
- *     c) READ existing bkt_states + INCREMENT counters + UPSERT
- *        (PATH A: pre-computed; PATH B: server-computed with BKT v4)
- *
- * WHY SEQUENTIAL AND NOT PARALLEL:
- *   BKT states use INCREMENT logic (M-1 FIX from spaced-rep.ts):
- *   total_attempts is READ + ADD, not REPLACE. If two reviews for cards
- *   sharing the same subtopic_id run in parallel, the READ-ADD-WRITE
- *   would race. Sequential processing guarantees correct accumulation.
- *
- * BKT INCREMENT REPLICATION (critical):
- *   The M-1 FIX in spaced-rep.ts reads the existing bkt_states row and
- *   ADDs the incoming total_attempts/correct_attempts to the existing
- *   values. This fix is replicated here identically for PATH A.
- *   PATH B computes BKT server-side and uses delta increments of 1.
- *
- * SECURITY:
- *   - Authenticated (same as all Axon endpoints)
- *   - Session ownership verified before processing
- *   - All field validations match the individual endpoints exactly
- *   - Max 100 reviews per batch (safety cap)
+ * PERF M1: Eliminates the 3-POST-per-card pattern.
+ *   New pattern: 1 HTTP request per session.
  */
 
 import { Hono } from "npm:hono";
@@ -86,6 +58,7 @@ export const batchReviewRoutes = new Hono();
 
 const MAX_BATCH_SIZE = 100;
 const FSRS_STATES = ["new", "learning", "review", "relearning"] as const;
+const DEFAULT_LEECH_THRESHOLD = 8;
 
 // ─── Session Ownership (same logic as reviews.ts) ─────────────────
 
@@ -106,20 +79,41 @@ async function verifySessionOwnership(
   return null; // OK
 }
 
+// ─── Leech Threshold Loader ───────────────────────────────────────
+
+async function loadLeechThreshold(
+  db: SupabaseClient,
+  userId: string,
+): Promise<number> {
+  try {
+    const { data } = await db
+      .from("algorithm_config")
+      .select("leech_threshold")
+      .in("institution_id", [
+        // Try institution-specific first via subquery workaround
+      ])
+      .maybeSingle();
+
+    // Simpler approach: global default
+    const { data: globalData } = await db
+      .from("algorithm_config")
+      .select("leech_threshold")
+      .is("institution_id", null)
+      .maybeSingle();
+
+    return globalData?.leech_threshold ?? DEFAULT_LEECH_THRESHOLD;
+  } catch {
+    return DEFAULT_LEECH_THRESHOLD;
+  }
+}
+
 // ─── Grade Mapping (PATH B) ───────────────────────────────────────
-// Frontend uses native 1-4 scale: 1=Again, 2=Hard, 3=Good, 4=Easy
-// This maps directly to FSRS grades 1-4.
-// Legacy SM-2 grade 5 also maps to Easy (4) for backward compat.
-//
-// FIX v4.5: grade 4 now maps to 4 (Easy), not 3 (Good).
-// The old mapping caused ~60% less stability growth for "Easy" reviews
-// because w16 (Easy bonus ≈ 2.61x) was never applied.
 
 function mapToFsrsGrade(grade: number): FsrsGrade {
   if (grade <= 1) return 1; // Again
   if (grade === 2) return 2; // Hard
   if (grade === 3) return 3; // Good
-  if (grade === 4) return 4; // Easy (FIX: was 3/Good, now correctly 4/Easy)
+  if (grade === 4) return 4; // Easy
   return 4; // Easy (SM-2 grade 5 legacy)
 }
 
@@ -130,7 +124,6 @@ interface ReviewItem {
   instrument_type: string;
   grade: number;
   response_time_ms?: number;
-  /** Optional: subtopic_id for PATH B BKT compute (when bkt_update not sent) */
   subtopic_id?: string;
   fsrs_update?: {
     stability: number;
@@ -165,6 +158,8 @@ interface ComputedResult {
     state: string;
     reps: number;
     lapses: number;
+    consecutive_lapses: number;
+    is_leech: boolean;
   };
   bkt?: {
     subtopic_id: string;
@@ -189,7 +184,6 @@ function validateReviewItem(
   if (item.response_time_ms !== undefined && !isNonNegInt(item.response_time_ms))
     return { valid: null, error: `${prefix}.response_time_ms must be a non-negative integer` };
 
-  // Validate optional subtopic_id for PATH B
   let subtopicId: string | undefined = undefined;
   if (item.subtopic_id !== undefined) {
     if (!isUuid(item.subtopic_id))
@@ -287,13 +281,11 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
 
-  // ── Validate session_id ──
   if (!isUuid(body.session_id)) {
     return err(c, "session_id must be a valid UUID", 400);
   }
   const sessionId = body.session_id as string;
 
-  // ── Validate reviews array ──
   if (!Array.isArray(body.reviews)) {
     return err(c, "reviews must be an array", 400);
   }
@@ -304,7 +296,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     return err(c, `reviews array exceeds max batch size of ${MAX_BATCH_SIZE}`, 400);
   }
 
-  // ── Validate all items upfront (fail-fast) ──
   const validatedItems: ReviewItem[] = [];
   for (let i = 0; i < body.reviews.length; i++) {
     const item = body.reviews[i];
@@ -318,25 +309,18 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     validatedItems.push(result.valid);
   }
 
-  // ── Verify session ownership (1 query for the entire batch) ──
   const ownershipErr = await verifySessionOwnership(db, sessionId, user.id);
   if (ownershipErr) {
     return err(c, ownershipErr, 404);
   }
 
-  // ── Process each review sequentially ──
-  // WHY SEQUENTIAL? BKT uses READ + INCREMENT + WRITE.
-  // If two cards share the same subtopic_id and we process them in
-  // parallel, the second READ would get stale data.
+  // ── Load leech threshold from algorithm_config ──
+  const leechThreshold = await loadLeechThreshold(db, user.id);
 
   let reviewsCreated = 0;
   let fsrsUpdated = 0;
   let bktUpdated = 0;
   const errors: { index: number; step: string; message: string }[] = [];
-
-  // ── PATH B response enrichment (v4.5) ──
-  // Accumulates per-item computed values for PATH B items.
-  // PATH A items do NOT generate entries here.
   const computedResults: ComputedResult[] = [];
 
   for (let i = 0; i < validatedItems.length; i++) {
@@ -373,10 +357,7 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
 
     // ── Step B: UPSERT fsrs_states ──
     if (item.fsrs_update) {
-      // ════════════════════════════════════════════════════════
-      // PATH A (legacy): frontend sent pre-computed fsrs_update
-      // Store exactly as received — no server-side computation
-      // ════════════════════════════════════════════════════════
+      // ════════ PATH A (legacy) ════════
       try {
         const fsrsRow = {
           student_id: user.id,
@@ -391,10 +372,7 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         };
 
         const { error: fsrsErr } = await atomicUpsert(
-          db,
-          "fsrs_states",
-          "student_id,flashcard_id",
-          fsrsRow,
+          db, "fsrs_states", "student_id,flashcard_id", fsrsRow,
         );
 
         if (fsrsErr) {
@@ -406,21 +384,17 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         errors.push({ index: i, step: "fsrs", message: (e as Error).message });
       }
     } else {
-      // ════════════════════════════════════════════════════════
-      // PATH B (new): no fsrs_update — compute FSRS server-side
-      // Uses lib/fsrs-v4.ts (Petrick completo, spec v4.2)
-      // ════════════════════════════════════════════════════════
+      // ════════ PATH B (server-side FSRS v4 Petrick) ════════
       try {
-        // 1. Read current FSRS state for this card (may not exist)
+        // 1. Read current FSRS state
         const { data: existingFsrs } = await db
           .from("fsrs_states")
-          .select("stability, difficulty, reps, lapses, state, last_review_at")
+          .select("stability, difficulty, reps, lapses, state, last_review_at, consecutive_lapses, is_leech")
           .eq("student_id", user.id)
           .eq("flashcard_id", item.item_id)
           .maybeSingle();
 
-        // 2. Read current BKT state for recovery cross-signal
-        //    We need to resolve subtopic_id first
+        // 2. Read BKT for recovery cross-signal
         let isRecovering = false;
         const resolvedSubtopicId = item.subtopic_id || item.bkt_update?.subtopic_id;
         if (resolvedSubtopicId) {
@@ -438,7 +412,7 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           }
         }
 
-        // 3. Map grade to FsrsGrade (1-4)
+        // 3. Map grade
         const fsrsGrade = mapToFsrsGrade(item.grade);
 
         // 4. Compute FSRS v4 update
@@ -454,7 +428,19 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           now,
         });
 
-        // 5. UPSERT computed result
+        // 5. Leech detection (v4.2)
+        const prevConsecutiveLapses = existingFsrs?.consecutive_lapses ?? 0;
+        let newConsecutiveLapses: number;
+        if (fsrsGrade === 1) {
+          // Again → increment consecutive lapses
+          newConsecutiveLapses = prevConsecutiveLapses + 1;
+        } else {
+          // Hard/Good/Easy → reset consecutive lapses
+          newConsecutiveLapses = 0;
+        }
+        const newIsLeech = newConsecutiveLapses >= leechThreshold;
+
+        // 6. UPSERT computed result + leech fields
         const fsrsRow = {
           student_id: user.id,
           flashcard_id: item.item_id,
@@ -465,13 +451,12 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           reps: fsrsResult.reps,
           lapses: fsrsResult.lapses,
           state: fsrsResult.state,
+          consecutive_lapses: newConsecutiveLapses,
+          is_leech: newIsLeech,
         };
 
         const { error: fsrsErr } = await atomicUpsert(
-          db,
-          "fsrs_states",
-          "student_id,flashcard_id",
-          fsrsRow,
+          db, "fsrs_states", "student_id,flashcard_id", fsrsRow,
         );
 
         if (fsrsErr) {
@@ -479,7 +464,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         } else {
           fsrsUpdated++;
 
-          // ── PATH B response enrichment: capture FSRS computed values ──
           computedResults.push({
             item_id: item.item_id,
             fsrs: {
@@ -489,6 +473,8 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
               state: fsrsResult.state,
               reps: fsrsResult.reps,
               lapses: fsrsResult.lapses,
+              consecutive_lapses: newConsecutiveLapses,
+              is_leech: newIsLeech,
             },
           });
         }
@@ -499,16 +485,12 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
 
     // ── Step C: READ + INCREMENT + UPSERT bkt_states ──
     if (item.bkt_update) {
-      // ════════════════════════════════════════════════════════
-      // PATH A (legacy): frontend sent pre-computed bkt_update
-      // Store with M-1 FIX increment logic — no BKT computation
-      // ════════════════════════════════════════════════════════
+      // ════════ PATH A (legacy) ════════
       try {
         const bkt = item.bkt_update;
         let finalTotalAttempts = bkt.total_attempts;
         let finalCorrectAttempts = bkt.correct_attempts;
 
-        // M-1 FIX REPLICATION: Read existing row and increment
         const { data: existing } = await db
           .from("bkt_states")
           .select("total_attempts, correct_attempts")
@@ -517,10 +499,8 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           .maybeSingle();
 
         if (existing) {
-          finalTotalAttempts =
-            (existing.total_attempts || 0) + bkt.total_attempts;
-          finalCorrectAttempts =
-            (existing.correct_attempts || 0) + bkt.correct_attempts;
+          finalTotalAttempts = (existing.total_attempts || 0) + bkt.total_attempts;
+          finalCorrectAttempts = (existing.correct_attempts || 0) + bkt.correct_attempts;
         }
 
         const bktRow = {
@@ -537,10 +517,7 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         };
 
         const { error: bktErr } = await atomicUpsert(
-          db,
-          "bkt_states",
-          "student_id,subtopic_id",
-          bktRow,
+          db, "bkt_states", "student_id,subtopic_id", bktRow,
         );
 
         if (bktErr) {
@@ -552,17 +529,13 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         errors.push({ index: i, step: "bkt", message: (e as Error).message });
       }
     } else if (item.subtopic_id) {
-      // ════════════════════════════════════════════════════════
-      // PATH B (new): no bkt_update but subtopic_id present
-      // Compute BKT v4 server-side using lib/bkt-v4.ts
-      // ════════════════════════════════════════════════════════
+      // ════════ PATH B (server-side BKT v4 Recovery) ════════
       try {
         const fsrsGrade = mapToFsrsGrade(item.grade);
         const isCorrect = fsrsGrade >= THRESHOLDS.BKT_CORRECT_MIN_GRADE;
         const instrumentType =
           item.instrument_type === "quiz" ? "quiz" as const : "flashcard" as const;
 
-        // 1. Read existing BKT state
         const { data: existingBkt } = await db
           .from("bkt_states")
           .select("p_know, max_p_know, total_attempts, correct_attempts, p_transit, p_slip, p_guess")
@@ -575,7 +548,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         const existingTotal = existingBkt?.total_attempts ?? 0;
         const existingCorrect = existingBkt?.correct_attempts ?? 0;
 
-        // 2. Compute BKT v4 update
         const bktResult = computeBktV4Update({
           currentMastery,
           maxReachedMastery,
@@ -583,11 +555,9 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           instrumentType,
         });
 
-        // 3. Increment counters (M-1 FIX)
         const finalTotalAttempts = existingTotal + 1;
         const finalCorrectAttempts = existingCorrect + (isCorrect ? 1 : 0);
 
-        // 4. UPSERT with computed values
         const bktRow = {
           student_id: user.id,
           subtopic_id: item.subtopic_id,
@@ -603,10 +573,7 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         };
 
         const { error: bktErr } = await atomicUpsert(
-          db,
-          "bkt_states",
-          "student_id,subtopic_id",
-          bktRow,
+          db, "bkt_states", "student_id,subtopic_id", bktRow,
         );
 
         if (bktErr) {
@@ -614,10 +581,8 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         } else {
           bktUpdated++;
 
-          // ── PATH B response enrichment: attach BKT to matching FSRS result ──
           const lastResult = computedResults[computedResults.length - 1];
           if (lastResult && lastResult.item_id === item.item_id) {
-            // Same item — attach BKT to existing FSRS entry
             lastResult.bkt = {
               subtopic_id: item.subtopic_id,
               p_know: bktResult.p_know,
@@ -625,7 +590,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
               delta: bktResult.delta,
             };
           } else {
-            // Different item or no FSRS entry — create standalone BKT entry
             computedResults.push({
               item_id: item.item_id,
               bkt: {
@@ -643,14 +607,12 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     }
   }
 
-  // ── Return summary ──
   return ok(c, {
     processed: validatedItems.length,
     reviews_created: reviewsCreated,
     fsrs_updated: fsrsUpdated,
     bkt_updated: bktUpdated,
     errors: errors.length > 0 ? errors : undefined,
-    // PATH B enrichment: per-item computed values (only for PATH B items)
     results: computedResults.length > 0 ? computedResults : undefined,
   });
 });
