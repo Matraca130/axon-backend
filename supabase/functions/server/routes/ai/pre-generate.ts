@@ -50,6 +50,12 @@
  *   index.ts middleware → skips /ai/pre-generate (like /ai/report)
  *   This endpoint → calls check_rate_limit() internally with its own key.
  *   Budget: 10 requests/hour × 5 items/request = max 50 Gemini calls/hour.
+ *
+ * SECURITY FIX (Gemini Code Assist review):
+ *   Rate limiter changed from fail-open to FAIL-CLOSED.
+ *   If check_rate_limit() RPC fails, the request is DENIED (500)
+ *   instead of allowed through. This prevents uncontrolled Gemini
+ *   API usage and unexpected costs when the DB is unreachable.
  */
 
 import { Hono } from "npm:hono";
@@ -155,6 +161,9 @@ aiPreGenerateRoutes.post(
     // ── Step 4: Pre-gen rate limit (D9: separate bucket) ──────
     // Uses the SAME check_rate_limit() RPC but with a different key.
     // adminClient required because rate_limit_entries may have RLS.
+    //
+    // SECURITY: Fail-closed — if rate limit check fails, DENY request.
+    // This prevents uncontrolled Gemini API usage when DB is unreachable.
     try {
       const adminDb = getAdminClient();
       const { data: rlData, error: rlError } = await adminDb.rpc(
@@ -167,10 +176,11 @@ aiPreGenerateRoutes.post(
       );
 
       if (rlError) {
-        // Graceful degradation: if rate limit check fails, log but allow
-        console.warn(
-          `[PreGenerate] Rate limit RPC failed: ${rlError.message}. Allowing request.`,
+        // Fail-closed: if rate limit check fails, deny the request.
+        console.error(
+          `[PreGenerate] Rate limit RPC failed: ${rlError.message}. Denying request.`,
         );
+        return err(c, "Could not verify rate limit status. Please try again later.", 500);
       } else if (rlData && !rlData.allowed) {
         return err(
           c,
@@ -180,9 +190,11 @@ aiPreGenerateRoutes.post(
         );
       }
     } catch (e) {
-      console.warn(
-        `[PreGenerate] Rate limit exception: ${(e as Error).message}. Allowing request.`,
+      // Fail-closed: unexpected exception → deny request.
+      console.error(
+        `[PreGenerate] Rate limit exception: ${(e as Error).message}. Denying request.`,
       );
+      return err(c, "Could not verify rate limit status. Please try again later.", 500);
     }
 
     // ── Step 5: Fetch summary content (shared across all items) ──
