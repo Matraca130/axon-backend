@@ -9,6 +9,21 @@
  * DT-02 FIX: Added completion_date, weekly_hours, metadata to
  *   study_plans createFields/updateFields. Requires Migration 001
  *   (ALTER TABLE study_plans ADD COLUMN ...) before frontend sends data.
+ *
+ * PR1a CHANGES:
+ *   study_plan_tasks — Added task_kind to createFields/updateFields.
+ *     Requires migration 20260312_02_add_task_kind.sql.
+ *
+ * BUGFIX (Phase 5 regression):
+ *   study_plan_tasks — Added original_method, scheduled_date,
+ *     estimated_minutes to createFields. These were being sent by
+ *     the frontend (useStudyPlans.createPlanFromWizard) but silently
+ *     dropped by the CRUD factory because they weren't in createFields.
+ *     Also added scheduled_date, estimated_minutes, original_method
+ *     to updateFields (for rescheduleEngine batch updates).
+ *
+ * FILE: supabase/functions/server/routes/study/sessions.ts
+ * REPO: Matraca130/axon-backend
  */
 
 import { Hono } from "npm:hono";
@@ -50,6 +65,27 @@ registerCrud(sessionRoutes, {
   hasUpdatedAt: false,
   hasOrderIndex: true,
   requiredFields: ["item_type", "item_id"],
-  createFields: ["item_type", "item_id", "status", "order_index"],
-  updateFields: ["status", "order_index", "completed_at"],
+  createFields: [
+    "item_type",
+    "item_id",
+    "status",
+    "order_index",
+    // Phase 5: wizard-generated plan data (was missing — BUGFIX)
+    "original_method",
+    "scheduled_date",
+    "estimated_minutes",
+    // PR1a: scheduling engine task kind
+    "task_kind",
+  ],
+  updateFields: [
+    "status",
+    "order_index",
+    "completed_at",
+    // Phase 5: rescheduleEngine batch updates (was missing — BUGFIX)
+    "scheduled_date",
+    "estimated_minutes",
+    "original_method",
+    // PR1a: allow updating task kind (e.g. reclassification)
+    "task_kind",
+  ],
 });
