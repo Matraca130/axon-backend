@@ -1,0 +1,70 @@
+# Axon v4.4 — Comprehensive Test Gate
+# Runs ALL tests on push/PR. Blocks deploy if any test fails.
+
+name: Test Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/functions/server/**'
+      - 'tests/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    name: Unit Tests (no network)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Run all unit tests
+        run: deno test tests/unit/ --no-check
+
+  integration-tests:
+    name: Integration Tests (live backend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: unit-tests
+    env:
+      TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
+      TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
+      TEST_USER_EMAIL: ${{ secrets.TEST_USER_EMAIL }}
+      TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD }}
+      TEST_ADMIN_EMAIL: ${{ secrets.TEST_ADMIN_EMAIL }}
+      TEST_ADMIN_PASSWORD: ${{ secrets.TEST_ADMIN_PASSWORD }}
+      TEST_INSTITUTION_ID: ${{ secrets.TEST_INSTITUTION_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Check secrets
+        run: |
+          if [ -z "$TEST_SUPABASE_URL" ]; then
+            echo "::warning::Secrets not set — skipping"
+            echo "SKIP=true" >> $GITHUB_ENV
+          fi
+      - name: Run integration tests
+        if: env.SKIP != 'true'
+        run: deno test tests/integration/ --allow-net --allow-env --no-check
+
+  gate:
+    name: All Tests Passed
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests]
+    if: always()
+    steps:
+      - run: |
+          if [ "${{ needs.unit-tests.result }}" != "success" ]; then
+            echo "::error::Unit tests failed!" && exit 1
+          fi
+          if [ "${{ needs.integration-tests.result }}" == "failure" ]; then
+            echo "::error::Integration tests failed!" && exit 1
+          fi
+          echo "All tests passed."

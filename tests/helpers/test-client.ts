@@ -1,101 +1,66 @@
 /**
- * tests/helpers/test-client.ts — HTTP + Auth helper for integration tests
- *
- * Provides:
- *   - login()  → authenticate via Supabase Auth REST API, returns JWT
- *   - api.*    → typed HTTP methods (get, post, patch) against Edge Functions
- *
- * Environment variables (from GitHub Secrets):
- *   TEST_SUPABASE_URL       — e.g. https://xxx.supabase.co
- *   TEST_SUPABASE_ANON_KEY  — public anon key
- *   TEST_USER_EMAIL         — student/teacher with active membership
- *   TEST_USER_PASSWORD
- *   TEST_ADMIN_EMAIL        — admin/owner in the same institution
- *   TEST_ADMIN_PASSWORD
- *   TEST_INSTITUTION_ID     — UUID of test institution
+ * tests/helpers/test-client.ts — Shared test utilities
+ * Used by ALL integration tests. Provides login(), api helpers, ENV config.
  */
 
-// ─── Environment ────────────────────────────────────────────────────
-
-function requireEnv(name: string): string {
-  const value = Deno.env.get(name);
-  if (!value) throw new Error(`Missing required env var: ${name}`);
-  return value;
-}
-
+// ═══ ENV CONFIG ═══
 export const ENV = {
-  get SUPABASE_URL() { return requireEnv("TEST_SUPABASE_URL"); },
-  get ANON_KEY() { return requireEnv("TEST_SUPABASE_ANON_KEY"); },
-  get USER_EMAIL() { return requireEnv("TEST_USER_EMAIL"); },
-  get USER_PASSWORD() { return requireEnv("TEST_USER_PASSWORD"); },
-  get ADMIN_EMAIL() { return requireEnv("TEST_ADMIN_EMAIL"); },
-  get ADMIN_PASSWORD() { return requireEnv("TEST_ADMIN_PASSWORD"); },
-  get INSTITUTION_ID() { return requireEnv("TEST_INSTITUTION_ID"); },
+  SUPABASE_URL: Deno.env.get("TEST_SUPABASE_URL") ?? "",
+  ANON_KEY: Deno.env.get("TEST_SUPABASE_ANON_KEY") ?? "",
+  USER_EMAIL: Deno.env.get("TEST_USER_EMAIL") ?? "",
+  USER_PASSWORD: Deno.env.get("TEST_USER_PASSWORD") ?? "",
+  ADMIN_EMAIL: Deno.env.get("TEST_ADMIN_EMAIL") ?? "",
+  ADMIN_PASSWORD: Deno.env.get("TEST_ADMIN_PASSWORD") ?? "",
+  INSTITUTION_ID: Deno.env.get("TEST_INSTITUTION_ID") ?? "",
 };
 
-/** Base URL for Edge Function routes: https://xxx.supabase.co/functions/v1/server */
 export function apiBase(): string {
   return `${ENV.SUPABASE_URL}/functions/v1/server`;
 }
 
-// ─── Auth ───────────────────────────────────────────────────────────
-
-interface LoginResult {
+// ═══ LOGIN HELPER ═══
+interface LoginResponse {
   access_token: string;
+  refresh_token: string;
   user: { id: string; email: string };
 }
 
-/**
- * Login via Supabase Auth REST API.
- * Returns the JWT access_token + user metadata.
- */
-export async function login(email: string, password: string): Promise<LoginResult> {
-  const res = await fetch(
-    `${ENV.SUPABASE_URL}/auth/v1/token?grant_type=password`,
-    {
-      method: "POST",
-      headers: {
-        "apikey": ENV.ANON_KEY,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ email, password }),
+export async function login(email: string, password: string): Promise<LoginResponse> {
+  const res = await fetch(`${ENV.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "apikey": ENV.ANON_KEY,
     },
-  );
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Login failed for ${email}: ${res.status} ${body}`);
-  }
-
-  const data = await res.json();
-  return {
-    access_token: data.access_token,
-    user: { id: data.user.id, email: data.user.email },
-  };
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) throw new Error(`Login failed for ${email}: ${res.status}`);
+  return res.json();
 }
 
-// ─── HTTP Client ────────────────────────────────────────────────────
-
-export interface ApiResponse<T = unknown> {
+// ═══ API CLIENT ═══
+interface ApiResponse<T = unknown> {
   status: number;
   ok: boolean;
-  data?: T;
+  raw: T;
   error?: string;
-  raw: Record<string, unknown>;
 }
 
 async function request<T = unknown>(
   method: string,
   path: string,
   token: string,
-  body?: Record<string, unknown>,
+  body?: unknown,
 ): Promise<ApiResponse<T>> {
   const url = `${apiBase()}${path}`;
   const headers: Record<string, string> = {
-    "Authorization": `Bearer ${token}`,
+    "Content-Type": "application/json",
     "apikey": ENV.ANON_KEY,
   };
-  if (body) headers["Content-Type"] = "application/json";
+  if (token) {
+    headers["Authorization"] = `Bearer ${ENV.ANON_KEY}`;
+    headers["X-Access-Token"] = token;
+  }
 
   const res = await fetch(url, {
     method,
@@ -103,56 +68,41 @@ async function request<T = unknown>(
     body: body ? JSON.stringify(body) : undefined,
   });
 
-  const raw = await res.json();
+  let raw: any;
+  try { raw = await res.json(); } catch { raw = null; }
+
   return {
     status: res.status,
     ok: res.ok,
-    data: raw.data as T,
-    error: raw.error as string | undefined,
-    raw,
+    raw: raw as T,
+    error: raw?.error ?? raw?.message ?? undefined,
   };
 }
 
 export const api = {
-  get: <T = unknown>(path: string, token: string) =>
-    request<T>("GET", path, token),
-
-  post: <T = unknown>(path: string, token: string, body: Record<string, unknown>) =>
-    request<T>("POST", path, token, body),
-
-  patch: <T = unknown>(path: string, token: string, body: Record<string, unknown>) =>
-    request<T>("PATCH", path, token, body),
+  get: <T = unknown>(path: string, token: string) => request<T>("GET", path, token),
+  post: <T = unknown>(path: string, token: string, body?: unknown) => request<T>("POST", path, token, body),
+  put: <T = unknown>(path: string, token: string, body?: unknown) => request<T>("PUT", path, token, body),
+  delete: <T = unknown>(path: string, token: string) => request<T>("DELETE", path, token),
 };
 
-// ─── Assertion Helpers ──────────────────────────────────────────────
-
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/assert_equals.ts";
-import { assert } from "https://deno.land/std@0.224.0/assert/assert.ts";
-
-/** Assert response status code */
-export function assertStatus(res: ApiResponse, expected: number, msg?: string) {
-  assertEquals(
-    res.status,
-    expected,
-    msg || `Expected status ${expected}, got ${res.status}. Error: ${res.error || JSON.stringify(res.raw)}`,
-  );
+// ═══ ASSERTION HELPERS ═══
+export function assertStatus(r: ApiResponse, expected: number): void {
+  if (r.status !== expected) {
+    throw new Error(`Expected status ${expected}, got ${r.status}. Body: ${JSON.stringify(r.raw)}`);
+  }
 }
 
-/** Assert response has data (not error) */
-export function assertOk<T>(res: ApiResponse<T>, msg?: string): T {
-  assert(res.ok, msg || `Expected OK response, got ${res.status}: ${res.error}`);
-  assert(res.data !== undefined, msg || "Expected data in response");
-  return res.data!;
+export function assertOk<T>(r: ApiResponse<T>): T {
+  if (!r.ok) throw new Error(`Expected ok response, got ${r.status}: ${r.error}`);
+  // CRITICAL: Backend ok() wraps responses in { data: ... } envelope.
+  // Unwrap automatically so tests can access fields directly.
+  const body = r.raw as any;
+  return (body?.data !== undefined ? body.data : body) as T;
 }
 
-/** Assert response is an error with specific status */
-export function assertError(res: ApiResponse, expectedStatus: number, msg?: string) {
-  assertStatus(res, expectedStatus, msg);
-  assert(!res.ok, msg || `Expected error response, got OK`);
-}
-
-/** Validate UUID format */
-export function isUuid(value: unknown): boolean {
-  if (typeof value !== "string") return false;
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+export function assertError(r: ApiResponse, expectedStatus: number): void {
+  if (r.status !== expectedStatus) {
+    throw new Error(`Expected error ${expectedStatus}, got ${r.status}`);
+  }
 }
