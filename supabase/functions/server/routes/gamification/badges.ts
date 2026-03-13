@@ -1,9 +1,12 @@
 /**
  * routes/gamification/badges.ts — Badge system & notifications
  *
- * AUDIT FIXES (PR #113):
- *   G-002 — student_badges INSERT now includes institution_id
+ * AUDIT FIXES:
+ *   G-002 — student_badges INSERT includes institution_id
  *   BUG-3 — GET /notifications uses created_at (correct column)
+ *   A-001 — icon_url corrected to icon (matches DB column)
+ *   A-002 — Sort function dead code removed
+ *   A-003 — Badge notifications filtered by institution_id
  */
 
 import { Hono } from "npm:hono";
@@ -102,7 +105,6 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
     return ok(c, { new_badges: [], message: "All badges already earned or no badges defined" });
   }
 
-  // Use adminDb for evaluation queries (G-002: consistent with writes)
   const [xpResult, statsResult] = await Promise.all([
     adminDb
       .from("student_xp")
@@ -183,7 +185,6 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
 });
 
 // --- GET /gamification/notifications ---
-// BUG-3 FIX: Uses created_at (correct column in student_badges)
 badgeRoutes.get(`${PREFIX}/gamification/notifications`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -206,10 +207,13 @@ badgeRoutes.get(`${PREFIX}/gamification/notifications`, async (c: Context) => {
       .eq("institution_id", institutionId)
       .order("created_at", { ascending: false })
       .limit(limit),
+    // A-001 FIX: icon (correct column, was icon_url)
+    // A-003 FIX: Filter badges by institution_id
     db
       .from("student_badges")
-      .select("badge_id, created_at, badge_definitions(name, slug, icon_url, rarity)")
+      .select("badge_id, created_at, badge_definitions(name, slug, icon, rarity)")
       .eq("student_id", user.id)
+      .eq("institution_id", institutionId)
       .order("created_at", { ascending: false })
       .limit(limit),
   ]);
@@ -236,18 +240,17 @@ badgeRoutes.get(`${PREFIX}/gamification/notifications`, async (c: Context) => {
         badge_id: badge.badge_id,
         badge_name: def?.name ?? "Unknown",
         badge_slug: def?.slug ?? null,
-        badge_icon: def?.icon_url ?? null,
+        badge_icon: def?.icon ?? null,
         badge_rarity: def?.rarity ?? null,
         timestamp: badge.created_at,
       });
     }
   }
 
-  notifications.sort((a, b) => {
-    const tA = new Date(a.timestamp as string).getTime();
-    const tB = tA;
-    return new Date(b.timestamp as string).getTime() - tA;
-  });
+  // A-002 FIX: Proper sort (removed dead tB variable)
+  notifications.sort((a, b) =>
+    new Date(b.timestamp as string).getTime() - new Date(a.timestamp as string).getTime()
+  );
 
   return ok(c, {
     notifications: notifications.slice(0, limit),
