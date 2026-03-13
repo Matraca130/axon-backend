@@ -157,7 +157,7 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
           try {
             await awardXP({
               db: adminDb,
-              studentId: userId,
+              studentId: user.id,
               institutionId,
               action: `badge_${badge.slug}`,
               xpBase: xpReward,
@@ -245,8 +245,8 @@ badgeRoutes.get(`${PREFIX}/gamification/notifications`, async (c: Context) => {
 
   notifications.sort((a, b) => {
     const tA = new Date(a.timestamp as string).getTime();
-    const tB = new Date(b.timestamp as string).getTime();
-    return tB - tA;
+    const tB = tA;
+    return new Date(b.timestamp as string).getTime() - tA;
   });
 
   return ok(c, {
