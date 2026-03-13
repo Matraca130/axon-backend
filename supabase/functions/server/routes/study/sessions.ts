@@ -25,7 +25,8 @@
  * GAMIFICATION:
  *   Sprint 1 — xpHookForSessionComplete wired to study_sessions.
  *   PR #99  — xpHookForPlanTaskComplete wired to study_plan_tasks.
- *             Automatically checks plan completion and awards 100 XP bonus.
+ *             Awards 15 XP per task completion + checks full plan
+ *             completion for 100 XP bonus.
  *
  * FILE: supabase/functions/server/routes/study/sessions.ts
  * REPO: Matraca130/axon-backend
@@ -95,5 +96,5 @@ registerCrud(sessionRoutes, {
     // PR1a: allow updating task kind (e.g. reclassification)
     "task_kind",
   ],
-  afterWrite: xpHookForPlanTaskComplete, // PR #99: XP on task complete + plan complete check
+  afterWrite: xpHookForPlanTaskComplete, // PR #99: XP on task complete + plan completion check
 });
