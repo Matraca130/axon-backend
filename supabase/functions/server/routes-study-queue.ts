@@ -1,9 +1,4 @@
-/**
- * routes-study-queue.ts — DEPRECATED: Moved to routes/study-queue/index.ts (PR #103)
- *
- * This file is kept temporarily as a re-export for backward compatibility.
- * The actual implementation lives in routes/study-queue/.
- * TODO: Remove this file after confirming all imports use the new path.
- */
-
+// DELETED: This file has been moved to routes/study-queue/index.ts (PR #103/#104).
+// If you see this file, it means the deletion was soft (GitHub push_files limitation).
+// The canonical import is: import { studyQueueRoutes } from "./routes/study-queue/index.ts";
 export { studyQueueRoutes } from "./routes/study-queue/index.ts";
