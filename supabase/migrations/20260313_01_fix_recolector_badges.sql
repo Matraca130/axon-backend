@@ -1,12 +1,12 @@
 -- ============================================================
--- Migration: Fix Recolector Badge trigger_config
+-- Migration: Fix xp_collector badge trigger_config
 -- Date: 2026-03-13
--- Purpose: Redirect 4 Recolector badges from `flashcards` table
+-- Purpose: Redirect 4 xp_collector badges from `flashcards` table
 --          (professor content, no student_id) to `fsrs_states`
 --          (student SRS state, has student_id + flashcard_id).
 --
 -- Problem:
---   Recolector badges had trigger_config pointing to `flashcards`
+--   xp_collector badges had trigger_config pointing to `flashcards`
 --   with filter "deleted_at IS NULL". But flashcards is a content
 --   table owned by professors — it has NO student_id column.
 --   The COUNT evaluator in check-badges correctly skipped these
@@ -21,15 +21,15 @@
 --   spaced repetition system. COUNT(*) gives "cards in SRS".
 --
 -- Semantic alignment (SDT/Octalysis):
---   "Recolector" = student who has STUDIED many different flashcards
+--   "XP Collector" = student who has STUDIED many different flashcards
 --   This maps to Competence (SDT) and Accomplishment (Octalysis)
 --   better than counting professor-created content.
 --
 -- Affected badges (4):
---   recolector-novato:  COUNT(*) >= 10
---   recolector:         COUNT(*) >= 50
---   gran-recolector:    COUNT(*) >= 100
---   recolector-supremo: COUNT(*) >= 250
+--   xp_collector_bronze:   COUNT(*) >= 10
+--   xp_collector_silver:   COUNT(*) >= 100
+--   xp_collector_platinum: COUNT(*) >= 500
+--   xp_collector_gold:     COUNT(*) >= 1000
 -- ============================================================
 
 -- Rebuild trigger_config: change table, keep condition, drop filter
@@ -40,10 +40,10 @@ SET trigger_config = jsonb_build_object(
   'condition', trigger_config->>'condition'
 )
 WHERE slug IN (
-  'recolector-novato',
-  'recolector',
-  'gran-recolector',
-  'recolector-supremo'
+  'xp_collector_bronze',
+  'xp_collector_silver',
+  'xp_collector_gold',
+  'xp_collector_platinum'
 )
 AND trigger_config->>'table' = 'flashcards';
 
@@ -51,20 +51,31 @@ AND trigger_config->>'table' = 'flashcards';
 DO $$
 DECLARE
   v_count INTEGER;
+  v_details TEXT;
 BEGIN
   SELECT COUNT(*) INTO v_count
   FROM badge_definitions
   WHERE slug IN (
-    'recolector-novato',
-    'recolector',
-    'gran-recolector',
-    'recolector-supremo'
+    'xp_collector_bronze',
+    'xp_collector_silver',
+    'xp_collector_gold',
+    'xp_collector_platinum'
   )
   AND trigger_config->>'table' = 'fsrs_states';
 
   IF v_count != 4 THEN
-    RAISE EXCEPTION 'Expected 4 Recolector badges pointing to fsrs_states, found %', v_count;
+    -- Show what we found for debugging
+    SELECT string_agg(slug || ' -> ' || (trigger_config->>'table'), ', ')
+    INTO v_details
+    FROM badge_definitions
+    WHERE slug IN (
+      'xp_collector_bronze',
+      'xp_collector_silver',
+      'xp_collector_gold',
+      'xp_collector_platinum'
+    );
+    RAISE EXCEPTION 'Expected 4 xp_collector badges pointing to fsrs_states, found %. Details: %', v_count, v_details;
   END IF;
 
-  RAISE NOTICE '[OK] 4 Recolector badges redirected: flashcards -> fsrs_states';
+  RAISE NOTICE '[OK] 4 xp_collector badges redirected: flashcards -> fsrs_states';
 END $$;
