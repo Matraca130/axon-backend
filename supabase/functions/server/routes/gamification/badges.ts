@@ -7,13 +7,24 @@
  *   A-001 — icon_url corrected to icon (matches DB column)
  *   A-002 — Sort function dead code removed
  *   A-003 — Badge notifications filtered by institution_id
+ *
+ * SPRINT 3 (S3-001):
+ *   Phase 2 — COUNT-based badge evaluation via trigger_config
+ *             Evaluates 16+ badges that were previously skipped
+ *             (criteria = NULL, trigger_config with COUNT conditions)
+ *   DRY     — tryAwardBadge() extracts shared INSERT + XP logic
+ *   RACE    — Handles 23505 duplicate key on concurrent check-badges
  */
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX, getAdminClient } from "../../db.ts";
 import { isUuid } from "../../validate.ts";
-import { evaluateSimpleCondition } from "./helpers.ts";
+import {
+  evaluateSimpleCondition,
+  evaluateCountBadge,
+  type TriggerConfig,
+} from "./helpers.ts";
 import { awardXP } from "../../xp-engine.ts";
 
 export const badgeRoutes = new Hono();
@@ -105,6 +116,14 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
     return ok(c, { new_badges: [], message: "All badges already earned or no badges defined" });
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // Phase 1: Criteria-based evaluation (student_stats + student_xp)
+  // Evaluates badges with criteria field using evaluateSimpleCondition.
+  // evalContext has 8 fields: total_xp, current_level, xp_today,
+  // xp_this_week, current_streak, longest_streak, total_reviews,
+  // total_sessions.
+  // ══════════════════════════════════════════════════════════════
+
   const [xpResult, statsResult] = await Promise.all([
     adminDb
       .from("student_xp")
@@ -142,38 +161,49 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
     );
 
     if (allMet) {
-      // G-002 FIX: Include institution_id in student_badges INSERT
-      const { error: insertErr } = await adminDb
-        .from("student_badges")
-        .insert({
-          student_id: user.id,
-          badge_id: badge.id,
-          institution_id: institutionId,
-        });
+      await tryAwardBadge(adminDb, user.id, institutionId, badge, newBadges);
+    }
+  }
 
-      if (!insertErr) {
-        newBadges.push(badge);
+  // ══════════════════════════════════════════════════════════════
+  // Phase 2: COUNT-based evaluation (trigger_config without criteria)
+  // S3-001: Evaluates badges that have trigger_config but no criteria.
+  // These require actual DB queries against trigger tables:
+  //   study_sessions, bkt_states, ai_conversations,
+  //   reading_states, leaderboard_weekly
+  //
+  // Skips badges already awarded in Phase 1 and badges whose
+  // trigger table is not in the ALLOWED_TABLES whitelist
+  // (e.g. flashcards — no student_id column).
+  // ══════════════════════════════════════════════════════════════
 
-        const xpReward = badge.xp_reward as number;
-        if (xpReward && xpReward > 0) {
-          try {
-            await awardXP({
-              db: adminDb,
-              studentId: user.id,
-              institutionId,
-              action: `badge_${badge.slug}`,
-              xpBase: xpReward,
-              sourceType: "badge",
-              sourceId: badge.id as string,
-            });
-          } catch (e) {
-            console.warn(
-              `[Badges] XP award for badge ${badge.slug} failed:`,
-              (e as Error).message,
-            );
-          }
-        }
+  const awardedIds = new Set(newBadges.map((b) => b.id));
+
+  const countBadges = unearnedBadges.filter(
+    (b: Record<string, unknown>) =>
+      !b.criteria &&
+      b.trigger_config &&
+      typeof b.trigger_config === "object" &&
+      (b.trigger_config as Record<string, unknown>).table &&
+      !awardedIds.has(b.id as string),
+  );
+
+  for (const badge of countBadges) {
+    try {
+      const met = await evaluateCountBadge(
+        adminDb,
+        user.id,
+        badge.trigger_config as TriggerConfig,
+      );
+
+      if (met) {
+        await tryAwardBadge(adminDb, user.id, institutionId, badge, newBadges);
       }
+    } catch (e) {
+      console.warn(
+        `[Badges] COUNT eval for "${badge.name}" failed:`,
+        (e as Error).message,
+      );
     }
   }
 
@@ -183,6 +213,61 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
     awarded: newBadges.length,
   });
 });
+
+// ─── Shared badge award helper (DRY: Phase 1 + Phase 2) ─────
+//
+// Inserts student_badges row, pushes to newBadges array,
+// and awards XP. Handles 23505 duplicate key gracefully
+// (concurrent check-badges race condition).
+
+async function tryAwardBadge(
+  adminDb: ReturnType<typeof getAdminClient>,
+  studentId: string,
+  institutionId: string,
+  badge: Record<string, unknown>,
+  newBadges: Array<Record<string, unknown>>,
+): Promise<void> {
+  // G-002 FIX: Include institution_id in student_badges INSERT
+  const { error: insertErr } = await adminDb
+    .from("student_badges")
+    .insert({
+      student_id: studentId,
+      badge_id: badge.id,
+      institution_id: institutionId,
+    });
+
+  if (insertErr) {
+    // 23505 = unique_violation (race condition on concurrent calls)
+    if (insertErr.code === "23505") return;
+    console.warn(
+      `[Badges] Insert failed for "${badge.name}":`,
+      insertErr.message,
+    );
+    return;
+  }
+
+  newBadges.push(badge);
+
+  const xpReward = badge.xp_reward as number;
+  if (xpReward && xpReward > 0) {
+    try {
+      await awardXP({
+        db: adminDb,
+        studentId,
+        institutionId,
+        action: `badge_${badge.slug}`,
+        xpBase: xpReward,
+        sourceType: "badge",
+        sourceId: badge.id as string,
+      });
+    } catch (e) {
+      console.warn(
+        `[Badges] XP award for badge ${badge.slug} failed:`,
+        (e as Error).message,
+      );
+    }
+  }
+}
 
 // --- GET /gamification/notifications ---
 badgeRoutes.get(`${PREFIX}/gamification/notifications`, async (c: Context) => {
