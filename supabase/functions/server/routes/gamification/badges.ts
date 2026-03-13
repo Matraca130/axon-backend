@@ -1,17 +1,9 @@
 /**
  * routes/gamification/badges.ts — Badge system & notifications
  *
- * Endpoints:
- *   GET  /gamification/badges        — All badge definitions + student's earned badges
- *   POST /gamification/check-badges   — Evaluate and award eligible badges
- *   GET  /gamification/notifications  — Recent gamification events timeline
- *
- * BUG-3 FIX: GET /notifications now uses `created_at` (correct column)
- *   instead of `earned_at` (which doesn't exist in student_badges).
- *
  * AUDIT FIXES (PR #113):
- *   G-002 — badge INSERT now includes institution_id (multi-tenancy)
- *   G-005 — icon_url → icon (matches DB column name)
+ *   G-002 — student_badges INSERT now includes institution_id
+ *   BUG-3 — GET /notifications uses created_at (correct column)
  */
 
 import { Hono } from "npm:hono";
@@ -23,8 +15,7 @@ import { awardXP } from "../../xp-engine.ts";
 
 export const badgeRoutes = new Hono();
 
-// ─── GET /gamification/badges ───────────────────────────────
-
+// --- GET /gamification/badges ---
 badgeRoutes.get(`${PREFIX}/gamification/badges`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -32,7 +23,6 @@ badgeRoutes.get(`${PREFIX}/gamification/badges`, async (c: Context) => {
 
   const category = c.req.query("category");
 
-  // Parallel fetch: all definitions + student's earned badges
   let defsQuery = db
     .from("badge_definitions")
     .select("*")
@@ -56,7 +46,6 @@ badgeRoutes.get(`${PREFIX}/gamification/badges`, async (c: Context) => {
     return err(c, `Badges fetch failed: ${defsResult.error.message}`, 500);
   }
 
-  // Build earned map: badge_id → earned_at
   const earnedMap = new Map<string, string>();
   if (earnedResult.data) {
     for (const badge of earnedResult.data) {
@@ -64,7 +53,6 @@ badgeRoutes.get(`${PREFIX}/gamification/badges`, async (c: Context) => {
     }
   }
 
-  // Merge: add earned_at to each badge definition
   const badges = (defsResult.data ?? []).map((def: Record<string, unknown>) => ({
     ...def,
     earned: earnedMap.has(def.id as string),
@@ -78,8 +66,7 @@ badgeRoutes.get(`${PREFIX}/gamification/badges`, async (c: Context) => {
   });
 });
 
-// ─── POST /gamification/check-badges ────────────────────────
-
+// --- POST /gamification/check-badges ---
 badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -92,7 +79,6 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
 
   const adminDb = getAdminClient();
 
-  // Step 1: Get all active badge definitions not yet earned by this student
   const { data: allBadges, error: badgeErr } = await adminDb
     .from("badge_definitions")
     .select("*")
@@ -116,22 +102,21 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
     return ok(c, { new_badges: [], message: "All badges already earned or no badges defined" });
   }
 
-  // Step 2: Get student data for evaluation
+  // Use adminDb for evaluation queries (G-002: consistent with writes)
   const [xpResult, statsResult] = await Promise.all([
-    db
+    adminDb
       .from("student_xp")
       .select("total_xp, current_level, xp_today, xp_this_week")
       .eq("student_id", user.id)
       .eq("institution_id", institutionId)
       .maybeSingle(),
-    db
+    adminDb
       .from("student_stats")
       .select("current_streak, longest_streak, total_reviews, total_sessions")
       .eq("student_id", user.id)
       .maybeSingle(),
   ]);
 
-  // Build evaluation context
   const evalContext: Record<string, unknown> = {
     total_xp: xpResult.data?.total_xp ?? 0,
     current_level: xpResult.data?.current_level ?? 1,
@@ -143,21 +128,19 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
     total_sessions: statsResult.data?.total_sessions ?? 0,
   };
 
-  // Step 3: Evaluate each unearned badge
   const newBadges: Array<Record<string, unknown>> = [];
 
   for (const badge of unearnedBadges) {
     const criteria = badge.criteria as string;
     if (!criteria) continue;
 
-    // Support multiple conditions separated by " AND "
     const conditions = criteria.split(" AND ").map((s: string) => s.trim());
     const allMet = conditions.every((cond: string) =>
       evaluateSimpleCondition(cond, evalContext),
     );
 
     if (allMet) {
-      // G-002 FIX: Include institution_id in badge award INSERT
+      // G-002 FIX: Include institution_id in student_badges INSERT
       const { error: insertErr } = await adminDb
         .from("student_badges")
         .insert({
@@ -169,13 +152,12 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
       if (!insertErr) {
         newBadges.push(badge);
 
-        // Award badge XP reward (if defined)
         const xpReward = badge.xp_reward as number;
         if (xpReward && xpReward > 0) {
           try {
             await awardXP({
               db: adminDb,
-              studentId: user.id,
+              studentId: userId,
               institutionId,
               action: `badge_${badge.slug}`,
               xpBase: xpReward,
@@ -200,11 +182,8 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
   });
 });
 
-// ─── GET /gamification/notifications ────────────────────────
-// BUG-3 FIX: Uses `created_at` (correct column in student_badges),
-// not `earned_at` which doesn't exist in the table schema.
-// G-005 FIX: Uses `icon` (correct column), not `icon_url`.
-
+// --- GET /gamification/notifications ---
+// BUG-3 FIX: Uses created_at (correct column in student_badges)
 badgeRoutes.get(`${PREFIX}/gamification/notifications`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -219,7 +198,6 @@ badgeRoutes.get(`${PREFIX}/gamification/notifications`, async (c: Context) => {
   if (isNaN(limit) || limit < 1) limit = 20;
   if (limit > 50) limit = 50;
 
-  // Parallel fetch: recent XP transactions + recent badge awards
   const [xpResult, badgeResult] = await Promise.all([
     db
       .from("xp_transactions")
@@ -228,20 +206,16 @@ badgeRoutes.get(`${PREFIX}/gamification/notifications`, async (c: Context) => {
       .eq("institution_id", institutionId)
       .order("created_at", { ascending: false })
       .limit(limit),
-    // BUG-3 FIX: select created_at (not earned_at)
-    // G-005 FIX: select icon (not icon_url)
     db
       .from("student_badges")
-      .select("badge_id, created_at, badge_definitions(name, slug, icon, rarity)")
+      .select("badge_id, created_at, badge_definitions(name, slug, icon_url, rarity)")
       .eq("student_id", user.id)
       .order("created_at", { ascending: false })
       .limit(limit),
   ]);
 
-  // Build unified timeline
   const notifications: Array<Record<string, unknown>> = [];
 
-  // Add XP events
   if (xpResult.data) {
     for (const tx of xpResult.data) {
       notifications.push({
@@ -254,7 +228,6 @@ badgeRoutes.get(`${PREFIX}/gamification/notifications`, async (c: Context) => {
     }
   }
 
-  // Add badge events
   if (badgeResult.data) {
     for (const badge of badgeResult.data) {
       const def = badge.badge_definitions as Record<string, unknown> | null;
@@ -263,15 +236,13 @@ badgeRoutes.get(`${PREFIX}/gamification/notifications`, async (c: Context) => {
         badge_id: badge.badge_id,
         badge_name: def?.name ?? "Unknown",
         badge_slug: def?.slug ?? null,
-        badge_icon: def?.icon ?? null,
+        badge_icon: def?.icon_url ?? null,
         badge_rarity: def?.rarity ?? null,
-        // BUG-3 FIX: use created_at from student_badges
         timestamp: badge.created_at,
       });
     }
   }
 
-  // Sort by timestamp descending, then slice to limit
   notifications.sort((a, b) => {
     const tA = new Date(a.timestamp as string).getTime();
     const tB = new Date(b.timestamp as string).getTime();
