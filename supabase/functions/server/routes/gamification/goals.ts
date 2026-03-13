@@ -1,14 +1,9 @@
 /**
  * routes/gamification/goals.ts — Goals, daily goal, onboarding
  *
- * Endpoints:
- *   PUT  /gamification/daily-goal     — Update daily XP goal target
- *   POST /gamification/goals/complete  — Mark a goal as completed, award bonus XP
- *   POST /gamification/onboarding      — Initialize student gamification profile
- *
- * BUG-2 FIX: PUT /daily-goal now uses getAdminClient() instead of
- *   user-scoped `db`, which was failing due to RLS policies on
- *   student_xp (students can read but not write their own XP).
+ * AUDIT FIXES (PR #113):
+ *   G-003 — POST /goals/complete now has anti-duplicate protection
+ *   BUG-2 — PUT /daily-goal uses getAdminClient() (bypasses RLS)
  */
 
 import { Hono } from "npm:hono";
@@ -20,11 +15,8 @@ import { GOAL_BONUS_XP } from "./helpers.ts";
 
 export const goalRoutes = new Hono();
 
-// ─── PUT /gamification/daily-goal ───────────────────────────
+// --- PUT /gamification/daily-goal ---
 // BUG-2 FIX: Uses getAdminClient() to bypass RLS on student_xp.
-// The user-scoped `db` client was rejected by RLS policies because
-// students can SELECT but not UPDATE their own student_xp row.
-
 goalRoutes.put(`${PREFIX}/gamification/daily-goal`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -43,12 +35,10 @@ goalRoutes.put(`${PREFIX}/gamification/daily-goal`, async (c: Context) => {
     return err(c, "daily_goal must be a non-negative integer", 400);
   }
 
-  // Validate reasonable range (10-1000 XP)
   if ((dailyGoal as number) < 10 || (dailyGoal as number) > 1000) {
     return err(c, "daily_goal must be between 10 and 1000", 400);
   }
 
-  // BUG-2 FIX: Use admin client to bypass RLS
   const adminDb = getAdminClient();
 
   const { data, error } = await adminDb
@@ -72,8 +62,8 @@ goalRoutes.put(`${PREFIX}/gamification/daily-goal`, async (c: Context) => {
   return ok(c, data);
 });
 
-// ─── POST /gamification/goals/complete ──────────────────────
-
+// --- POST /gamification/goals/complete ---
+// G-003 FIX: Anti-duplicate check prevents claiming same goal twice per day
 goalRoutes.post(`${PREFIX}/gamification/goals/complete`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -98,16 +88,36 @@ goalRoutes.post(`${PREFIX}/gamification/goals/complete`, async (c: Context) => {
   }
 
   const bonusXp = GOAL_BONUS_XP[goalType];
+  const today = new Date().toISOString().split("T")[0];
+  const sourceId = `${goalType}_${today}`;
+
+  // G-003 FIX: Check if this goal was already claimed today
+  const adminDb = getAdminClient();
+  const { count: existing, error: checkErr } = await adminDb
+    .from("xp_transactions")
+    .select("id", { count: "exact", head: true })
+    .eq("student_id", user.id)
+    .eq("institution_id", institutionId)
+    .eq("source_type", "goal")
+    .eq("source_id", sourceId);
+
+  if (checkErr) {
+    return err(c, `Goal check failed: ${checkErr.message}`, 500);
+  }
+
+  if ((existing ?? 0) > 0) {
+    return err(c, `Goal '${goalType}' ya fue completado hoy.`, 409);
+  }
 
   try {
     const result = await awardXP({
-      db: getAdminClient(),
+      db: adminDb,
       studentId: user.id,
       institutionId,
       action: `goal_${goalType}`,
       xpBase: bonusXp,
       sourceType: "goal",
-      sourceId: `${goalType}_${new Date().toISOString().split("T")[0]}`,
+      sourceId,
     });
 
     return ok(c, {
@@ -120,8 +130,7 @@ goalRoutes.post(`${PREFIX}/gamification/goals/complete`, async (c: Context) => {
   }
 });
 
-// ─── POST /gamification/onboarding ──────────────────────────
-
+// --- POST /gamification/onboarding ---
 goalRoutes.post(`${PREFIX}/gamification/onboarding`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -137,7 +146,6 @@ goalRoutes.post(`${PREFIX}/gamification/onboarding`, async (c: Context) => {
 
   const adminDb = getAdminClient();
 
-  // Check if already onboarded (idempotent)
   const { data: existing } = await adminDb
     .from("student_xp")
     .select("student_id")
@@ -149,7 +157,6 @@ goalRoutes.post(`${PREFIX}/gamification/onboarding`, async (c: Context) => {
     return ok(c, { message: "Already onboarded", already_exists: true });
   }
 
-  // Initialize student_xp row
   const { error: xpErr } = await adminDb
     .from("student_xp")
     .insert({
@@ -167,7 +174,6 @@ goalRoutes.post(`${PREFIX}/gamification/onboarding`, async (c: Context) => {
     return err(c, `Onboarding XP init failed: ${xpErr.message}`, 500);
   }
 
-  // Initialize student_stats row (upsert to avoid conflict)
   const { error: statsErr } = await adminDb
     .from("student_stats")
     .upsert(

@@ -1,30 +1,14 @@
 /**
  * xp-engine.ts — XP calculation engine for Axon v4.4 Gamification
  *
- * Calculates XP with scientific bonuses:
- *   - On-Time Review Bonus (+50%): FSRS due_at alignment (Cepeda 2006)
- *   - Flow Zone Bonus (+25%): BKT p_know 0.3-0.7 (Csikszentmihalyi 1990)
- *   - Variable Reward (10% chance 2x): Skinner VR schedule
- *   - Streak Multiplier (+50% at 7+ days): Duolingo model
- *
- * Called fire-and-forget from afterWrite hooks.
- * Uses award_xp() RPC for atomic XP grant, with JS fallback (arch-5).
- *
- * CONTRACT COMPLIANCE:
- *   §2.5 — Uses getAdminClient() singleton (NOT per-request)
- *   §3.8 — Daily cap 500 enforced in RPC
- *   §5.4 — institution_id resolved by caller (hooks)
- *   §7.14 — No XP for notes/annotations (overjustification)
- *   §10 — Multipliers SUM, don't multiply
- *
- * EXPORTS (PR #102):
- *   LEVEL_THRESHOLDS — Single source of truth for level XP boundaries
- *   calculateLevel   — XP to level conversion (also used by gamification helpers)
+ * AUDIT FIXES (PR #113):
+ *   G-005 — awardXP validates xpBase > 0 early return
+ *   G-006 — Fallback path now enforces daily cap 500
  */
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 
-// ─── Types ────────────────────────────────────────────────────
+// --- Types ---
 
 export interface AwardXPParams {
   db: SupabaseClient;
@@ -34,10 +18,9 @@ export interface AwardXPParams {
   xpBase: number;
   sourceType?: string;
   sourceId?: string;
-  // Optional context for bonus calculation
-  fsrsDueAt?: string | null; // For on-time bonus
-  bktPKnow?: number | null; // For flow zone bonus
-  currentStreak?: number; // For streak multiplier
+  fsrsDueAt?: string | null;
+  bktPKnow?: number | null;
+  currentStreak?: number;
 }
 
 export interface AwardResult {
@@ -51,26 +34,28 @@ export interface AwardResult {
   level: number;
 }
 
-// ─── XP Table (matches gamification plan) ─────────────────────
-// ⚠ NO XP for notes/annotations — overjustification effect (§7.14)
+// --- XP Table ---
+// No XP for notes/annotations — overjustification effect (§7.14)
 
 export const XP_TABLE: Record<string, number> = {
-  review_flashcard: 5, // Any flashcard review
-  review_correct: 10, // Correct flashcard review (grade >= 3)
-  quiz_answer: 5, // Quiz attempt
-  quiz_correct: 15, // Correct quiz answer
-  complete_session: 25, // Study session completed
-  complete_reading: 30, // Summary marked as read
-  complete_video: 20, // Video watched to completion
-  streak_daily: 15, // Daily login streak reward
-  complete_plan_task: 15, // Study plan task completed
-  complete_plan: 100, // Full study plan completed
-  rag_question: 5, // RAG AI question asked
+  review_flashcard: 5,
+  review_correct: 10,
+  quiz_answer: 5,
+  quiz_correct: 15,
+  complete_session: 25,
+  complete_reading: 30,
+  complete_video: 20,
+  streak_daily: 15,
+  complete_plan_task: 15,
+  complete_plan: 100,
+  rag_question: 5,
 };
 
-// ─── Level Thresholds ─────────────────────────────────────────
-// Single source of truth — used by xp-engine fallback AND
-// gamification helpers (re-exported). Keep in sync with award_xp() RPC.
+// Daily XP cap (§3.8)
+const DAILY_CAP = 500;
+
+// --- Level Thresholds ---
+// Single source of truth — used by fallback AND helpers (re-exported)
 
 export const LEVEL_THRESHOLDS: [number, number][] = [
   [10000, 12],
@@ -93,17 +78,8 @@ export function calculateLevel(totalXp: number): number {
   return 1;
 }
 
-// ─── Core: Award XP ──────────────────────────────────────────
+// --- Core: Award XP ---
 
-/**
- * Calculate bonuses and award XP via RPC (or JS fallback).
- *
- * Bonuses are ADDITIVE (§10 Combo rule):
- *   base=10, on_time+flow → multiplier = 1.0 + 0.5 + 0.25 = 1.75
- *   final = 10 * 1.75 = 17.5 → 18 XP
- *
- * Fire-and-forget safe: catches all errors, returns null on failure.
- */
 export async function awardXP(
   params: AwardXPParams,
 ): Promise<AwardResult | null> {
@@ -120,11 +96,16 @@ export async function awardXP(
     currentStreak,
   } = params;
 
+  // G-005 FIX: Validate xpBase > 0
+  if (!xpBase || xpBase <= 0) {
+    console.warn(`[XP Engine] Invalid xpBase=${xpBase} for action=${action}, skipping`);
+    return null;
+  }
+
   let multiplier = 1.0;
   let bonusType: string | null = null;
 
   // 1. On-Time Review Bonus (+50%) — Cepeda 2006
-  //    Awarded when review happens within 24h of FSRS due_at
   if (fsrsDueAt) {
     const dueDate = new Date(fsrsDueAt);
     const now = new Date();
@@ -137,7 +118,6 @@ export async function awardXP(
   }
 
   // 2. Flow Zone Bonus (+25%) — Csikszentmihalyi 1990
-  //    BKT p_know between 0.3-0.7 = optimal challenge zone
   if (bktPKnow !== null && bktPKnow !== undefined) {
     if (bktPKnow >= 0.3 && bktPKnow <= 0.7) {
       multiplier += 0.25;
@@ -146,7 +126,6 @@ export async function awardXP(
   }
 
   // 3. Variable Reward (10% chance 2x) — Skinner VR schedule
-  //    ⚠ Multipliers SUM, not multiply (§10 Combo rule)
   if (Math.random() < 0.1) {
     multiplier += 1.0;
     bonusType = bonusType ? `${bonusType}+variable` : "variable";
@@ -158,7 +137,7 @@ export async function awardXP(
     bonusType = bonusType ? `${bonusType}+streak` : "streak";
   }
 
-  // ─── RPC path (primary) ─────────────────────────────────────
+  // --- RPC path (primary) ---
   try {
     const { data, error } = await db.rpc("award_xp", {
       p_student_id: studentId,
@@ -177,15 +156,8 @@ export async function awardXP(
         error.message,
       );
       return await awardXPFallback(
-        db,
-        studentId,
-        institutionId,
-        action,
-        xpBase,
-        multiplier,
-        bonusType,
-        sourceType,
-        sourceId,
+        db, studentId, institutionId, action,
+        xpBase, multiplier, bonusType, sourceType, sourceId,
       );
     }
 
@@ -200,9 +172,8 @@ export async function awardXP(
   }
 }
 
-// ─── JS Fallback (arch-5) ─────────────────────────────────────
-// Used when award_xp() RPC is unavailable. NOT atomic — race
-// conditions possible but acceptable for fallback path.
+// --- JS Fallback (arch-5) ---
+// G-006 FIX: Now enforces daily cap 500 (was only in RPC before)
 
 async function awardXPFallback(
   db: SupabaseClient,
@@ -218,28 +189,7 @@ async function awardXPFallback(
   try {
     const xpFinal = Math.round(xpBase * multiplier);
 
-    // Insert transaction log
-    const { error: txError } = await db.from("xp_transactions").insert({
-      student_id: studentId,
-      institution_id: institutionId,
-      action,
-      xp_base: xpBase,
-      xp_final: xpFinal,
-      multiplier,
-      bonus_type: bonusType,
-      source_type: sourceType ?? null,
-      source_id: sourceId ?? null,
-    });
-
-    if (txError) {
-      console.warn(
-        "[XP Engine] Fallback tx insert failed:",
-        txError.message,
-      );
-      return null;
-    }
-
-    // Upsert student_xp aggregate
+    // G-006 FIX: Check daily cap before awarding
     const { data: existing } = await db
       .from("student_xp")
       .select("total_xp, xp_today, xp_this_week")
@@ -247,9 +197,50 @@ async function awardXPFallback(
       .eq("institution_id", institutionId)
       .single();
 
-    const newTotal = (existing?.total_xp ?? 0) + xpFinal;
-    const newToday = (existing?.xp_today ?? 0) + xpFinal;
-    const newWeek = (existing?.xp_this_week ?? 0) + xpFinal;
+    const currentDailyUsed = existing?.xp_today ?? 0;
+    const remainingCap = DAILY_CAP - currentDailyUsed;
+
+    if (remainingCap <= 0) {
+      console.log(
+        `[XP Engine] Fallback: daily cap reached for ${studentId} (${currentDailyUsed}/${DAILY_CAP})`,
+      );
+      return {
+        xp_awarded: 0,
+        xp_base: xpBase,
+        multiplier,
+        bonus_type: bonusType,
+        daily_used: currentDailyUsed,
+        daily_cap: DAILY_CAP,
+        total_xp: existing?.total_xp ?? 0,
+        level: calculateLevel(existing?.total_xp ?? 0),
+      };
+    }
+
+    // Cap the award to remaining daily allowance
+    const cappedXp = Math.min(xpFinal, remainingCap);
+
+    // Insert transaction log
+    const { error: txError } = await db.from("xp_transactions").insert({
+      student_id: studentId,
+      institution_id: institutionId,
+      action,
+      xp_base: xpBase,
+      xp_final: cappedXp,
+      multiplier,
+      bonus_type: bonusType,
+      source_type: sourceType ?? null,
+      source_id: sourceId ?? null,
+    });
+
+    if (txError) {
+      console.warn("[XP Engine] Fallback tx insert failed:", txError.message);
+      return null;
+    }
+
+    // Upsert student_xp aggregate
+    const newTotal = (existing?.total_xp ?? 0) + cappedXp;
+    const newToday = currentDailyUsed + cappedXp;
+    const newWeek = (existing?.xp_this_week ?? 0) + cappedXp;
     const newLevel = calculateLevel(newTotal);
 
     const { error: upsertError } = await db.from("student_xp").upsert(
@@ -266,23 +257,20 @@ async function awardXPFallback(
     );
 
     if (upsertError) {
-      console.warn(
-        "[XP Engine] Fallback upsert failed:",
-        upsertError.message,
-      );
+      console.warn("[XP Engine] Fallback upsert failed:", upsertError.message);
       return null;
     }
 
     console.log(
-      `[XP Engine] Fallback: awarded ${xpFinal} XP to ${studentId}`,
+      `[XP Engine] Fallback: awarded ${cappedXp} XP to ${studentId} (daily: ${newToday}/${DAILY_CAP})`,
     );
     return {
-      xp_awarded: xpFinal,
+      xp_awarded: cappedXp,
       xp_base: xpBase,
       multiplier,
       bonus_type: bonusType,
       daily_used: newToday,
-      daily_cap: 500,
+      daily_cap: DAILY_CAP,
       total_xp: newTotal,
       level: newLevel,
     };

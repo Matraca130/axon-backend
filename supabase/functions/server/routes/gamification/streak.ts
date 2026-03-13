@@ -7,9 +7,10 @@
  *   POST /gamification/streak-freeze/buy — Purchase streak freeze with XP
  *   POST /gamification/streak-repair     — Repair broken streak with XP
  *
- * BUG-5 FIX: POST /daily-check-in skips streak XP when streak breaks.
- * BUG-8 DOC: POST /streak-repair restores to longest_streak (intentional,
- *   matches Duolingo model — the repair cost already scales with streak value).
+ * AUDIT FIXES (PR #113):
+ *   G-001 — streak_freezes INSERT now includes freeze_type + xp_cost
+ *   BUG-5 — POST /daily-check-in skips streak XP when streak breaks
+ *   BUG-8 — POST /streak-repair restores to longest_streak (intentional)
  */
 
 import { Hono } from "npm:hono";
@@ -22,7 +23,7 @@ import { FREEZE_COST_XP, MAX_FREEZES, REPAIR_BASE_COST_XP } from "./helpers.ts";
 
 export const streakRoutes = new Hono();
 
-// ─── GET /gamification/streak-status ────────────────────────
+// --- GET /gamification/streak-status ---
 
 streakRoutes.get(`${PREFIX}/gamification/streak-status`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -42,10 +43,8 @@ streakRoutes.get(`${PREFIX}/gamification/streak-status`, async (c: Context) => {
   }
 });
 
-// ─── POST /gamification/daily-check-in ──────────────────────
+// --- POST /gamification/daily-check-in ---
 // BUG-5 FIX: Only awards streak_daily XP if streak did NOT break.
-// When a streak breaks (insufficient freezes), awarding XP would
-// send a confusing positive signal for a negative event.
 
 streakRoutes.post(`${PREFIX}/gamification/daily-check-in`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -60,7 +59,6 @@ streakRoutes.post(`${PREFIX}/gamification/daily-check-in`, async (c: Context) =>
   try {
     const result = await performDailyCheckIn(user.id, institutionId);
 
-    // Award streak XP only for new check-ins where streak didn't break
     const isAlreadyCheckedIn = result.events.some(
       (e) => e.type === "already_checked_in",
     );
@@ -82,10 +80,7 @@ streakRoutes.post(`${PREFIX}/gamification/daily-check-in`, async (c: Context) =>
           currentStreak: result.streak_status.current_streak,
         });
       } catch (e) {
-        console.warn(
-          "[Daily Check-in] XP award failed:",
-          (e as Error).message,
-        );
+        console.warn("[Daily Check-in] XP award failed:", (e as Error).message);
       }
     }
 
@@ -95,7 +90,7 @@ streakRoutes.post(`${PREFIX}/gamification/daily-check-in`, async (c: Context) =>
   }
 });
 
-// ─── POST /gamification/streak-freeze/buy ───────────────────
+// --- POST /gamification/streak-freeze/buy ---
 
 streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -165,11 +160,15 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
     return err(c, `XP deduction failed: ${deductErr.message}`, 500);
   }
 
+  // G-001 FIX: Include freeze_type and xp_cost in INSERT
+  // Previously only student_id and institution_id were sent
   const { data: freeze, error: freezeErr } = await adminDb
     .from("streak_freezes")
     .insert({
       student_id: user.id,
       institution_id: institutionId,
+      freeze_type: "purchased",
+      xp_cost: FREEZE_COST_XP,
     })
     .select()
     .single();
@@ -208,10 +207,8 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
   });
 });
 
-// ─── POST /gamification/streak-repair ───────────────────────
+// --- POST /gamification/streak-repair ---
 // BUG-8 DOC: Restores streak to longest_streak (intentional).
-// The repair cost scales with streak value, making it a meaningful
-// investment proportional to what's being recovered.
 
 streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -225,7 +222,6 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
 
   const adminDb = getAdminClient();
 
-  // Step 1: Check repair eligibility via streak status
   const status = await computeStreakStatus(adminDb, user.id, institutionId);
 
   if (!status.repair_eligible) {
@@ -236,11 +232,9 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
     );
   }
 
-  // Step 2: Calculate repair cost (base + streak value bonus)
   const streakToRestore = status.longest_streak;
   const repairCost = REPAIR_BASE_COST_XP + Math.floor(streakToRestore * 10);
 
-  // Step 3: Check student has enough XP
   const { data: xpData, error: xpErr } = await adminDb
     .from("student_xp")
     .select("total_xp")
@@ -261,7 +255,6 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
     );
   }
 
-  // Step 4: Deduct XP
   const { error: deductErr } = await adminDb
     .from("student_xp")
     .update({
@@ -275,7 +268,6 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
     return err(c, `XP deduction failed: ${deductErr.message}`, 500);
   }
 
-  // Step 5: Restore streak to longest_streak (BUG-8: intentional behavior)
   const today = new Date().toISOString().split("T")[0];
   const { error: statsErr } = await adminDb
     .from("student_stats")
@@ -287,7 +279,6 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
     .eq("student_id", user.id);
 
   if (statsErr) {
-    // Rollback XP
     await adminDb
       .from("student_xp")
       .update({ total_xp: totalXp })
@@ -297,7 +288,6 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
     return err(c, `Streak restore failed: ${statsErr.message}`, 500);
   }
 
-  // Step 6: Record repair
   const { data: repair, error: repairErr } = await adminDb
     .from("streak_repairs")
     .insert({
@@ -310,13 +300,9 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
     .single();
 
   if (repairErr) {
-    console.warn(
-      "[Streak Repair] Record insert failed:",
-      repairErr.message,
-    );
+    console.warn("[Streak Repair] Record insert failed:", repairErr.message);
   }
 
-  // Log XP deduction transaction
   await adminDb.from("xp_transactions").insert({
     student_id: user.id,
     institution_id: institutionId,
