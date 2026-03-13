@@ -12,6 +12,8 @@
  *   S3-001 — COUNT-based badge evaluation via trigger_config
  *   S3-002 — Parallel Phase 2 with Promise.allSettled
  *            + tryAwardBadge DRY helper with 23505 race handling
+ *   S3-004 — Removed ai_conversations & leaderboard_weekly from
+ *            ALLOWED_TABLES; 4 badges deactivated (helpers.ts)
  */
 
 import { Hono } from "npm:hono";
@@ -167,8 +169,11 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
   // Uses Promise.allSettled for parallel read queries, then sequential
   // writes for badges that passed. ~20x faster than sequential eval.
   //
-  // Tables: study_sessions, bkt_states, ai_conversations,
-  //         reading_states, leaderboard_weekly, fsrs_states
+  // Active tables (ALLOWED_TABLES in helpers.ts):
+  //   study_sessions, reading_states, bkt_states, fsrs_states
+  //
+  // Deactivated (S3-004): ai_conversations, leaderboard_weekly
+  //   (tables don't exist; 4 badges set is_active=false)
   // ══════════════════════════════════════════════════════════════
 
   const awardedIds = new Set(newBadges.map((b) => b.id));
