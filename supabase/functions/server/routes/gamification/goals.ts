@@ -1,9 +1,11 @@
 /**
  * routes/gamification/goals.ts — Goals, daily goal, onboarding
  *
- * AUDIT FIXES (PR #113):
- *   G-003 — POST /goals/complete now has anti-duplicate protection
- *   BUG-2 — PUT /daily-goal uses getAdminClient() (bypasses RLS)
+ * AUDIT FIXES:
+ *   G-003 — POST /goals/complete anti-duplicate protection
+ *   BUG-2 — PUT /daily-goal uses getAdminClient()
+ *   B-001 — daily_goal -> daily_goal_minutes (matches DB column)
+ *   B-004 — onboarding daily_goal -> daily_goal_minutes
  */
 
 import { Hono } from "npm:hono";
@@ -17,6 +19,7 @@ export const goalRoutes = new Hono();
 
 // --- PUT /gamification/daily-goal ---
 // BUG-2 FIX: Uses getAdminClient() to bypass RLS on student_xp.
+// B-001 FIX: Column is daily_goal_minutes (not daily_goal).
 goalRoutes.put(`${PREFIX}/gamification/daily-goal`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -30,24 +33,26 @@ goalRoutes.put(`${PREFIX}/gamification/daily-goal`, async (c: Context) => {
     return err(c, "institution_id must be a valid UUID", 400);
   }
 
-  const dailyGoal = body.daily_goal;
+  // Accept both daily_goal and daily_goal_minutes from frontend
+  const dailyGoal = body.daily_goal_minutes ?? body.daily_goal;
   if (!isNonNegInt(dailyGoal)) {
-    return err(c, "daily_goal must be a non-negative integer", 400);
+    return err(c, "daily_goal_minutes must be a non-negative integer", 400);
   }
 
-  if ((dailyGoal as number) < 10 || (dailyGoal as number) > 1000) {
-    return err(c, "daily_goal must be between 10 and 1000", 400);
+  if ((dailyGoal as number) < 5 || (dailyGoal as number) > 120) {
+    return err(c, "daily_goal_minutes must be between 5 and 120", 400);
   }
 
   const adminDb = getAdminClient();
 
+  // B-001 FIX: Use daily_goal_minutes (actual DB column name)
   const { data, error } = await adminDb
     .from("student_xp")
     .upsert(
       {
         student_id: user.id,
         institution_id: institutionId,
-        daily_goal: dailyGoal as number,
+        daily_goal_minutes: dailyGoal as number,
         updated_at: new Date().toISOString(),
       },
       { onConflict: "student_id,institution_id" },
@@ -131,6 +136,7 @@ goalRoutes.post(`${PREFIX}/gamification/goals/complete`, async (c: Context) => {
 });
 
 // --- POST /gamification/onboarding ---
+// B-004 FIX: Uses daily_goal_minutes (matches DB column)
 goalRoutes.post(`${PREFIX}/gamification/onboarding`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
@@ -157,6 +163,7 @@ goalRoutes.post(`${PREFIX}/gamification/onboarding`, async (c: Context) => {
     return ok(c, { message: "Already onboarded", already_exists: true });
   }
 
+  // B-004 FIX: daily_goal_minutes (not daily_goal), default 10 matches DB
   const { error: xpErr } = await adminDb
     .from("student_xp")
     .insert({
@@ -166,7 +173,7 @@ goalRoutes.post(`${PREFIX}/gamification/onboarding`, async (c: Context) => {
       xp_today: 0,
       xp_this_week: 0,
       current_level: 1,
-      daily_goal: 50,
+      daily_goal_minutes: 10,
       streak_freezes_owned: 0,
     });
 
