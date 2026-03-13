@@ -22,7 +22,10 @@
  *     Also added scheduled_date, estimated_minutes, original_method
  *     to updateFields (for rescheduleEngine batch updates).
  *
- * GAMIFICATION: Sprint 1 — xpHookForSessionComplete wired to study_sessions.
+ * GAMIFICATION:
+ *   Sprint 1 — xpHookForSessionComplete wired to study_sessions.
+ *   PR #99  — xpHookForPlanTaskComplete wired to study_plan_tasks.
+ *             Automatically checks plan completion and awards 100 XP bonus.
  *
  * FILE: supabase/functions/server/routes/study/sessions.ts
  * REPO: Matraca130/axon-backend
@@ -30,7 +33,7 @@
 
 import { Hono } from "npm:hono";
 import { registerCrud } from "../../crud-factory.ts";
-import { xpHookForSessionComplete } from "../../xp-hooks.ts";
+import { xpHookForSessionComplete, xpHookForPlanTaskComplete } from "../../xp-hooks.ts";
 
 export const sessionRoutes = new Hono();
 
@@ -92,4 +95,5 @@ registerCrud(sessionRoutes, {
     // PR1a: allow updating task kind (e.g. reclassification)
     "task_kind",
   ],
+  afterWrite: xpHookForPlanTaskComplete, // PR #99: XP on task complete + plan complete check
 });

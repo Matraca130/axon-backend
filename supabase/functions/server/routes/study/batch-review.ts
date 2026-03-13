@@ -27,6 +27,9 @@
  *
  * PERF M1: Eliminates the 3-POST-per-card pattern.
  *   New pattern: 1 HTTP request per session.
+ *
+ * GAMIFICATION (PR #99): xpHookForBatchReviews awards per-review XP
+ *   fire-and-forget after successful batch processing.
  */
 
 import { Hono } from "npm:hono";
@@ -51,6 +54,9 @@ import { computeFsrsV4Update } from "../../lib/fsrs-v4.ts";
 import { computeBktV4Update } from "../../lib/bkt-v4.ts";
 import { THRESHOLDS } from "../../lib/types.ts";
 import type { FsrsGrade, FsrsCardState } from "../../lib/types.ts";
+
+// ── Gamification: batch XP hook ──────────────────────────────
+import { xpHookForBatchReviews } from "../../xp-hooks.ts";
 
 export const batchReviewRoutes = new Hono();
 
@@ -323,6 +329,9 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   const errors: { index: number; step: string; message: string }[] = [];
   const computedResults: ComputedResult[] = [];
 
+  // Track successfully created reviews for XP hook
+  const successfulReviews: Array<{ item_id: string; grade: number; instrument_type: string }> = [];
+
   for (let i = 0; i < validatedItems.length; i++) {
     const item = validatedItems[i];
     const now = new Date();
@@ -350,6 +359,12 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         errors.push({ index: i, step: "review", message: revErr.message });
       } else {
         reviewsCreated++;
+        // Track for XP hook
+        successfulReviews.push({
+          item_id: item.item_id,
+          grade: item.grade,
+          instrument_type: item.instrument_type,
+        });
       }
     } catch (e) {
       errors.push({ index: i, step: "review", message: (e as Error).message });
@@ -432,10 +447,8 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         const prevConsecutiveLapses = existingFsrs?.consecutive_lapses ?? 0;
         let newConsecutiveLapses: number;
         if (fsrsGrade === 1) {
-          // Again → increment consecutive lapses
           newConsecutiveLapses = prevConsecutiveLapses + 1;
         } else {
-          // Hard/Good/Easy → reset consecutive lapses
           newConsecutiveLapses = 0;
         }
         const newIsLeech = newConsecutiveLapses >= leechThreshold;
@@ -604,6 +617,16 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
       } catch (e) {
         errors.push({ index: i, step: "bkt_pathb", message: (e as Error).message });
       }
+    }
+  }
+
+  // PR #99: Fire-and-forget XP for batch reviews (contract §4.3)
+  // Only fires if at least 1 review was successfully created.
+  if (successfulReviews.length > 0) {
+    try {
+      xpHookForBatchReviews(user.id, sessionId, successfulReviews);
+    } catch (hookErr) {
+      console.warn("[XP Hook] batch review setup error:", (hookErr as Error).message);
     }
   }
 
