@@ -5,6 +5,7 @@
 > For critical rules, see [AGENT_RULES.md](./AGENT_RULES.md).
 > For the AI/RAG pipeline, see [AI_PIPELINE.md](./AI_PIPELINE.md).
 > For the AI implementation roadmap, see [RAG_ROADMAP.md](./RAG_ROADMAP.md).
+> For gamification system, see [GAMIFICATION_MAP.md](./GAMIFICATION_MAP.md) and [GAMIFICATION_AUDIT.md](./GAMIFICATION_AUDIT.md).
 
 ---
 
@@ -37,6 +38,12 @@
 | **Implement advanced retrieval** | [RAG_ROADMAP.md > Fase 6](./RAG_ROADMAP.md#fase-6--retrieval-avanzado-multi-query--hyde--re-ranking) | Multi-Query (+25% recall), HyDE (+20%), Re-ranking (+40% precision) |
 | **Implement NeedScore in AI generation** | [RAG_ROADMAP.md > Fase 8](./RAG_ROADMAP.md#fase-8--ia-adaptativa-needscore--pre-generacion--calidad) | Smart generation, pre-generation, quality feedback |
 | **Understand the adaptive learning system** | [RAG_ROADMAP.md > Fase 8](./RAG_ROADMAP.md#fase-8--ia-adaptativa-needscore--pre-generacion--calidad) | BKT + FSRS + NeedScore integration |
+| **Work on gamification** | [GAMIFICATION_MAP.md](./GAMIFICATION_MAP.md) | 13 endpoints, 8 XP hooks, 11 actions, 7 DB tables, 4 RPCs |
+| **Audit gamification** | [GAMIFICATION_AUDIT.md](./GAMIFICATION_AUDIT.md) | 15 findings (G-001 to G-015), all CRITICAL fixed |
+| **Add XP to a new action** | `xp-engine.ts` (XP_TABLE) + `xp-hooks.ts` | Add entry to XP_TABLE, create hook, wire in route |
+| **Add a new badge** | `badge_definitions` table + `helpers.ts` | INSERT definition, criteria is text like `total_xp >= 1000` |
+| **Debug XP issues** | `xp_transactions` table | Immutable log of every XP award/deduction |
+| **Debug streak issues** | `streak-engine.ts` | computeStreakStatus() shows full state |
 
 ---
 
@@ -55,6 +62,10 @@ supabase/functions/server/
 |-- rate-limit.ts         <- 120 req/min sliding window
 |-- timing-safe.ts        <- Constant-time comparison
 |-- gemini.ts             <- Gemini API helpers (generateText, generateEmbedding, GENERATE_MODEL)
+|-- xp-engine.ts          <- XP calculation + award_xp() RPC call + fallback
+|-- streak-engine.ts      <- Streak computation + daily check-in
+|-- xp-hooks.ts           <- 8 afterWrite hooks for XP awarding
+|-- summary-hook.ts       <- afterWrite hook for auto-ingest
 |
 |-- routes/content/       <- Content hierarchy (6 files)
 |-- routes/study/         <- Study system (5 files)
@@ -64,6 +75,13 @@ supabase/functions/server/
 |-- routes/plans/         <- Plans + AI logs + access (5 files)
 |-- routes/search/        <- Global search + trash (4 files)
 |-- routes/settings/      <- Institution settings
+|-- routes/gamification/  <- Gamification system (6 files)
+|   |-- profile.ts        <- GET /profile, /xp-history, /leaderboard
+|   |-- badges.ts         <- GET /badges, POST /check-badges, GET /notifications
+|   |-- streak.ts         <- GET /streak-status, POST /daily-check-in, /freeze/buy, /repair
+|   |-- goals.ts          <- PUT /daily-goal, POST /goals/complete, /onboarding
+|   |-- helpers.ts        <- Constants + evaluateSimpleCondition
+|   +-- index.ts          <- Module combiner
 |
 |-- routes-auth.tsx       <- signup, /me
 |-- routes-billing.tsx    <- Stripe checkout/portal/webhooks
@@ -114,6 +132,8 @@ Two headers required from frontend:
 4. **Hardcoding Figma Make URLs** -> Production URL is `https://xdnciktarvxyhkrokbng.supabase.co/functions/v1/server`
 5. **Adding YouTube/Vimeo video code** -> Video is Mux-only. No URL fields, no platform selectors, no iframes
 6. **Making N+1 requests from frontend** -> Use `/topic-progress` unified endpoint instead of separate calls
+7. **Modifying total_xp directly** -> Always use `award_xp()` RPC via `awardXP()` in xp-engine.ts (§7.9)
+8. **Forgetting institution_id in gamification** -> All gamification operations are multi-tenant
 
 > For AI-specific mistakes, see the [AI mistakes table](#common-mistakes-with-ai-endpoints) below.
 
@@ -139,6 +159,28 @@ For pending features and implementation plan, see [RAG_ROADMAP.md](./RAG_ROADMAP
 
 ---
 
+## Gamification (in `routes/gamification/`)
+
+The module has 13 endpoints + 8 XP hooks + 11 XP actions. Full reference: [GAMIFICATION_MAP.md](./GAMIFICATION_MAP.md).
+
+### Key files
+| File | Purpose |
+|---|---|
+| `xp-engine.ts` | XP calculation + `awardXP()` + level thresholds |
+| `streak-engine.ts` | Streak computation + daily check-in logic |
+| `xp-hooks.ts` | 8 afterWrite hooks (fire-and-forget XP awarding) |
+| `routes/gamification/` | 13 REST endpoints (profile, badges, streak, goals) |
+
+### Quick facts
+- Daily XP cap: 500 (10% post-cap rate)
+- 12 levels (0 -> 10,000 XP)
+- 4 bonus types: on-time (+50%), flow zone (+25%), variable (10% chance 2x), streak (+50%)
+- Bonuses are **additive** (SUM), not multiplicative (§10 Combo rule)
+- XP log: `xp_transactions` (immutable, source_type + source_id for tracing)
+- NO XP for notes/annotations (§7.14 overjustification effect)
+
+---
+
 ## Quick Endpoint Finder
 
 ### Content Hierarchy (CRUD factory -- in `routes/content/crud.ts`)
@@ -156,6 +198,12 @@ For pending features and implementation plan, see [RAG_ROADMAP.md](./RAG_ROADMAP
 ### Study Custom (in `routes/study/`)
 `/topic-progress`, `/topics-overview`
 `/reviews`, `/quiz-attempts`, `/reading-states`, `/daily-activities`, `/student-stats`, `/fsrs-states`, `/bkt-states`
+
+### Gamification (in `routes/gamification/`)
+`/gamification/profile`, `/gamification/xp-history`, `/gamification/leaderboard`
+`/gamification/badges`, `/gamification/check-badges`, `/gamification/notifications`
+`/gamification/streak-status`, `/gamification/daily-check-in`, `/gamification/streak-freeze/buy`, `/gamification/streak-repair`
+`/gamification/daily-goal`, `/gamification/goals/complete`, `/gamification/onboarding`
 
 ### Auth (in `routes-auth.tsx`)
 `/signup`, `/me` (GET/PUT)
