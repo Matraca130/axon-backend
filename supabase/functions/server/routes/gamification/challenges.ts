@@ -1,14 +1,16 @@
 /**
  * routes/gamification/challenges.ts -- Daily/weekly challenges (Sprint 2)
  *
+ * PR #108: POST /challenges/check now reads reviews_today,
+ * sessions_today, correct_streak from student_stats instead of
+ * COUNT queries (4 parallel queries -> 2 parallel queries).
+ *
  * Endpoints:
  *   GET  /gamification/challenges          -- Active challenges + progress
  *   GET  /gamification/challenges/history   -- Completed challenges
- *   POST /gamification/challenges/check     -- Evaluate progress + auto-complete
+ *   POST /gamification/challenges/check     -- Evaluate + auto-complete
  *   POST /gamification/challenges/claim     -- Claim XP reward
  *   POST /gamification/challenges/generate  -- Generate daily challenges
- *
- * PR #106: Sprint 2 gamification
  */
 
 import { Hono } from "npm:hono";
@@ -88,6 +90,7 @@ challengeRoutes.get(`${PREFIX}/gamification/challenges/history`, async (c: Conte
 });
 
 // --- POST /gamification/challenges/check ---
+// PR #108: Optimized -- reads counters from student_stats instead of COUNT queries
 
 challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -120,9 +123,8 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Contex
     return ok(c, { checked: 0, completed: 0, results: [] });
   }
 
-  // Step 2: Get student context data (parallel)
-  const today = new Date().toISOString().split("T")[0];
-  const [xpResult, statsResult, sessionCountResult] = await Promise.all([
+  // Step 2: Get student context -- ONLY 2 queries now (was 4)
+  const [xpResult, statsResult] = await Promise.all([
     db
       .from("student_xp")
       .select("xp_today, xp_this_week, total_xp")
@@ -131,25 +133,21 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Contex
       .maybeSingle(),
     db
       .from("student_stats")
-      .select("current_streak, total_reviews, total_sessions")
+      .select("current_streak, total_reviews, total_sessions, reviews_today, sessions_today, correct_streak")
       .eq("student_id", user.id)
       .maybeSingle(),
-    db
-      .from("study_sessions")
-      .select("id", { count: "exact", head: true })
-      .eq("student_id", user.id)
-      .gte("created_at", `${today}T00:00:00Z`),
   ]);
 
+  // All context from 2 tables -- no more COUNT queries!
   const context: Record<string, number> = {
     xp_today: (xpResult.data?.xp_today as number) ?? 0,
     xp_this_week: (xpResult.data?.xp_this_week as number) ?? 0,
     total_xp: (xpResult.data?.total_xp as number) ?? 0,
     current_streak: (statsResult.data?.current_streak as number) ?? 0,
     total_reviews: (statsResult.data?.total_reviews as number) ?? 0,
-    reviews_today: 0,
-    sessions_today: (sessionCountResult.count as number) ?? 0,
-    correct_streak: 0,
+    reviews_today: (statsResult.data?.reviews_today as number) ?? 0,
+    sessions_today: (statsResult.data?.sessions_today as number) ?? 0,
+    correct_streak: (statsResult.data?.correct_streak as number) ?? 0,
   };
 
   // Step 3: Evaluate each challenge
