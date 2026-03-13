@@ -17,16 +17,8 @@
  * v4.2 ADDITIONS:
  *   - Leech detection: tracks consecutive_lapses on fsrs_states
  *   - is_leech flag when consecutive_lapses >= leech_threshold
- *   - leech_threshold read from algorithm_config (default 8)
- *   - PATH B response includes consecutive_lapses + is_leech
  *
- * BACKWARD COMPATIBILITY:
- *   Old frontends that send fsrs_update/bkt_update continue working
- *   exactly as before. New frontends that send only grade get server-side
- *   computation. Both can coexist in the same batch.
- *
- * PERF M1: Eliminates the 3-POST-per-card pattern.
- *   New pattern: 1 HTTP request per session.
+ * PR #104: Extracted validators/types to batch-review-validators.ts
  *
  * GAMIFICATION (PR #99): xpHookForBatchReviews awards per-review XP
  *   fire-and-forget after successful batch processing.
@@ -35,17 +27,7 @@
 import { Hono } from "npm:hono";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
-import {
-  isUuid,
-  isNum,
-  isNonNeg,
-  isNonNegInt,
-  isIsoTs,
-  isProbability,
-  inRange,
-  isOneOf,
-  isNonEmpty,
-} from "../../validate.ts";
+import { isUuid } from "../../validate.ts";
 import { atomicUpsert } from "./progress.ts";
 import type { Context } from "npm:hono";
 
@@ -53,20 +35,23 @@ import type { Context } from "npm:hono";
 import { computeFsrsV4Update } from "../../lib/fsrs-v4.ts";
 import { computeBktV4Update } from "../../lib/bkt-v4.ts";
 import { THRESHOLDS } from "../../lib/types.ts";
-import type { FsrsGrade, FsrsCardState } from "../../lib/types.ts";
+import type { FsrsCardState } from "../../lib/types.ts";
 
-// ── Gamification: batch XP hook ──────────────────────────────
+// ── Gamification: batch XP hook ──────────────────────────
 import { xpHookForBatchReviews } from "../../xp-hooks.ts";
+
+// ── PR #104: Extracted validators ─────────────────────────
+import type { ReviewItem, ComputedResult } from "./batch-review-validators.ts";
+import {
+  MAX_BATCH_SIZE,
+  DEFAULT_LEECH_THRESHOLD,
+  mapToFsrsGrade,
+  validateReviewItem,
+} from "./batch-review-validators.ts";
 
 export const batchReviewRoutes = new Hono();
 
-// ─── Constants ────────────────────────────────────────────────────
-
-const MAX_BATCH_SIZE = 100;
-const FSRS_STATES = ["new", "learning", "review", "relearning"] as const;
-const DEFAULT_LEECH_THRESHOLD = 8;
-
-// ─── Session Ownership (same logic as reviews.ts) ─────────────────
+// ─── Session Ownership (same logic as reviews.ts) ───────────────
 
 async function verifySessionOwnership(
   db: SupabaseClient,
@@ -82,25 +67,16 @@ async function verifySessionOwnership(
 
   if (sessionErr) return `Session lookup failed: ${sessionErr.message}`;
   if (!session) return "Session not found or does not belong to you";
-  return null; // OK
+  return null;
 }
 
-// ─── Leech Threshold Loader ───────────────────────────────────────
+// ─── Leech Threshold Loader ─────────────────────────────────
 
 async function loadLeechThreshold(
   db: SupabaseClient,
-  userId: string,
+  _userId: string,
 ): Promise<number> {
   try {
-    const { data } = await db
-      .from("algorithm_config")
-      .select("leech_threshold")
-      .in("institution_id", [
-        // Try institution-specific first via subquery workaround
-      ])
-      .maybeSingle();
-
-    // Simpler approach: global default
     const { data: globalData } = await db
       .from("algorithm_config")
       .select("leech_threshold")
@@ -113,171 +89,7 @@ async function loadLeechThreshold(
   }
 }
 
-// ─── Grade Mapping (PATH B) ───────────────────────────────────────
-
-function mapToFsrsGrade(grade: number): FsrsGrade {
-  if (grade <= 1) return 1; // Again
-  if (grade === 2) return 2; // Hard
-  if (grade === 3) return 3; // Good
-  if (grade === 4) return 4; // Easy
-  return 4; // Easy (SM-2 grade 5 legacy)
-}
-
-// ─── Item Validators ──────────────────────────────────────────────
-
-interface ReviewItem {
-  item_id: string;
-  instrument_type: string;
-  grade: number;
-  response_time_ms?: number;
-  subtopic_id?: string;
-  fsrs_update?: {
-    stability: number;
-    difficulty: number;
-    due_at: string;
-    last_review_at: string;
-    reps: number;
-    lapses: number;
-    state: string;
-  };
-  bkt_update?: {
-    subtopic_id: string;
-    p_know: number;
-    p_transit: number;
-    p_slip: number;
-    p_guess: number;
-    delta: number;
-    total_attempts: number;
-    correct_attempts: number;
-    last_attempt_at: string;
-  };
-}
-
-// ─── PATH B computed result type (returned in response) ───────────
-
-interface ComputedResult {
-  item_id: string;
-  fsrs?: {
-    stability: number;
-    difficulty: number;
-    due_at: string;
-    state: string;
-    reps: number;
-    lapses: number;
-    consecutive_lapses: number;
-    is_leech: boolean;
-  };
-  bkt?: {
-    subtopic_id: string;
-    p_know: number;
-    max_p_know: number;
-    delta: number;
-  };
-}
-
-function validateReviewItem(
-  item: Record<string, unknown>,
-  index: number,
-): { valid: ReviewItem; error: null } | { valid: null; error: string } {
-  const prefix = `reviews[${index}]`;
-
-  if (!isUuid(item.item_id))
-    return { valid: null, error: `${prefix}.item_id must be a valid UUID` };
-  if (!isNonEmpty(item.instrument_type))
-    return { valid: null, error: `${prefix}.instrument_type must be a non-empty string` };
-  if (!inRange(item.grade, 0, 5))
-    return { valid: null, error: `${prefix}.grade must be in [0, 5]` };
-  if (item.response_time_ms !== undefined && !isNonNegInt(item.response_time_ms))
-    return { valid: null, error: `${prefix}.response_time_ms must be a non-negative integer` };
-
-  let subtopicId: string | undefined = undefined;
-  if (item.subtopic_id !== undefined) {
-    if (!isUuid(item.subtopic_id))
-      return { valid: null, error: `${prefix}.subtopic_id must be a valid UUID` };
-    subtopicId = item.subtopic_id as string;
-  }
-
-  // Validate fsrs_update if present (PATH A)
-  let fsrsUpdate: ReviewItem["fsrs_update"] = undefined;
-  if (item.fsrs_update && typeof item.fsrs_update === "object") {
-    const f = item.fsrs_update as Record<string, unknown>;
-    if (!isNum(f.stability) || (f.stability as number) <= 0)
-      return { valid: null, error: `${prefix}.fsrs_update.stability must be a positive number` };
-    if (!inRange(f.difficulty, 0, 10))
-      return { valid: null, error: `${prefix}.fsrs_update.difficulty must be in [0, 10]` };
-    if (!isIsoTs(f.due_at))
-      return { valid: null, error: `${prefix}.fsrs_update.due_at must be an ISO timestamp` };
-    if (!isIsoTs(f.last_review_at))
-      return { valid: null, error: `${prefix}.fsrs_update.last_review_at must be an ISO timestamp` };
-    if (!isNonNegInt(f.reps))
-      return { valid: null, error: `${prefix}.fsrs_update.reps must be a non-negative integer` };
-    if (!isNonNegInt(f.lapses))
-      return { valid: null, error: `${prefix}.fsrs_update.lapses must be a non-negative integer` };
-    if (!isOneOf(f.state, FSRS_STATES))
-      return { valid: null, error: `${prefix}.fsrs_update.state must be one of: ${FSRS_STATES.join(", ")}` };
-
-    fsrsUpdate = {
-      stability: f.stability as number,
-      difficulty: f.difficulty as number,
-      due_at: f.due_at as string,
-      last_review_at: f.last_review_at as string,
-      reps: f.reps as number,
-      lapses: f.lapses as number,
-      state: f.state as string,
-    };
-  }
-
-  // Validate bkt_update if present (PATH A)
-  let bktUpdate: ReviewItem["bkt_update"] = undefined;
-  if (item.bkt_update && typeof item.bkt_update === "object") {
-    const b = item.bkt_update as Record<string, unknown>;
-    if (!isUuid(b.subtopic_id))
-      return { valid: null, error: `${prefix}.bkt_update.subtopic_id must be a valid UUID` };
-    if (!isProbability(b.p_know))
-      return { valid: null, error: `${prefix}.bkt_update.p_know must be in [0, 1]` };
-    if (!isProbability(b.p_transit))
-      return { valid: null, error: `${prefix}.bkt_update.p_transit must be in [0, 1]` };
-    if (!isProbability(b.p_slip))
-      return { valid: null, error: `${prefix}.bkt_update.p_slip must be in [0, 1]` };
-    if (!isProbability(b.p_guess))
-      return { valid: null, error: `${prefix}.bkt_update.p_guess must be in [0, 1]` };
-    if (!isNum(b.delta))
-      return { valid: null, error: `${prefix}.bkt_update.delta must be a finite number` };
-    if (!isNonNegInt(b.total_attempts))
-      return { valid: null, error: `${prefix}.bkt_update.total_attempts must be a non-negative integer` };
-    if (!isNonNegInt(b.correct_attempts))
-      return { valid: null, error: `${prefix}.bkt_update.correct_attempts must be a non-negative integer` };
-    if (!isIsoTs(b.last_attempt_at))
-      return { valid: null, error: `${prefix}.bkt_update.last_attempt_at must be an ISO timestamp` };
-
-    bktUpdate = {
-      subtopic_id: b.subtopic_id as string,
-      p_know: b.p_know as number,
-      p_transit: b.p_transit as number,
-      p_slip: b.p_slip as number,
-      p_guess: b.p_guess as number,
-      delta: b.delta as number,
-      total_attempts: b.total_attempts as number,
-      correct_attempts: b.correct_attempts as number,
-      last_attempt_at: b.last_attempt_at as string,
-    };
-  }
-
-  return {
-    valid: {
-      item_id: item.item_id as string,
-      instrument_type: item.instrument_type as string,
-      grade: item.grade as number,
-      response_time_ms: item.response_time_ms as number | undefined,
-      subtopic_id: subtopicId,
-      fsrs_update: fsrsUpdate,
-      bkt_update: bktUpdate,
-    },
-    error: null,
-  };
-}
-
-// ─── POST /review-batch ───────────────────────────────────────────
+// ─── POST /review-batch ───────────────────────────────────────
 
 batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -320,7 +132,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     return err(c, ownershipErr, 404);
   }
 
-  // ── Load leech threshold from algorithm_config ──
   const leechThreshold = await loadLeechThreshold(db, user.id);
 
   let reviewsCreated = 0;
@@ -328,8 +139,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   let bktUpdated = 0;
   const errors: { index: number; step: string; message: string }[] = [];
   const computedResults: ComputedResult[] = [];
-
-  // Track successfully created reviews for XP hook
   const successfulReviews: Array<{ item_id: string; grade: number; instrument_type: string }> = [];
 
   for (let i = 0; i < validatedItems.length; i++) {
@@ -359,7 +168,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         errors.push({ index: i, step: "review", message: revErr.message });
       } else {
         reviewsCreated++;
-        // Track for XP hook
         successfulReviews.push({
           item_id: item.item_id,
           grade: item.grade,
@@ -401,7 +209,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     } else {
       // ════════ PATH B (server-side FSRS v4 Petrick) ════════
       try {
-        // 1. Read current FSRS state
         const { data: existingFsrs } = await db
           .from("fsrs_states")
           .select("stability, difficulty, reps, lapses, state, last_review_at, consecutive_lapses, is_leech")
@@ -409,7 +216,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           .eq("flashcard_id", item.item_id)
           .maybeSingle();
 
-        // 2. Read BKT for recovery cross-signal
         let isRecovering = false;
         const resolvedSubtopicId = item.subtopic_id || item.bkt_update?.subtopic_id;
         if (resolvedSubtopicId) {
@@ -427,10 +233,8 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           }
         }
 
-        // 3. Map grade
         const fsrsGrade = mapToFsrsGrade(item.grade);
 
-        // 4. Compute FSRS v4 update
         const fsrsResult = computeFsrsV4Update({
           currentStability: existingFsrs?.stability ?? 0,
           currentDifficulty: existingFsrs?.difficulty ?? 5.0,
@@ -443,7 +247,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           now,
         });
 
-        // 5. Leech detection (v4.2)
         const prevConsecutiveLapses = existingFsrs?.consecutive_lapses ?? 0;
         let newConsecutiveLapses: number;
         if (fsrsGrade === 1) {
@@ -453,7 +256,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         }
         const newIsLeech = newConsecutiveLapses >= leechThreshold;
 
-        // 6. UPSERT computed result + leech fields
         const fsrsRow = {
           student_id: user.id,
           flashcard_id: item.item_id,
@@ -476,7 +278,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           errors.push({ index: i, step: "fsrs_pathb", message: fsrsErr.message });
         } else {
           fsrsUpdated++;
-
           computedResults.push({
             item_id: item.item_id,
             fsrs: {
@@ -621,7 +422,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   }
 
   // PR #99: Fire-and-forget XP for batch reviews (contract §4.3)
-  // Only fires if at least 1 review was successfully created.
   if (successfulReviews.length > 0) {
     try {
       xpHookForBatchReviews(user.id, sessionId, successfulReviews);
