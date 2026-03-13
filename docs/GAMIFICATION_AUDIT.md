@@ -4,6 +4,7 @@
 **Scope:** DB schema (42 tables) + Backend TS code (6 gamification files + xp-engine + streak-engine + xp-hooks)
 **Contract Version:** v2.0 (34 rules)
 **Status:** 4 CRITICAL DB fixes applied, 7 code fixes in PR #113, 3 items documented for future
+**Updated:** 2026-03-13 — D-4/D-5 fixes applied (G-009 resolved, G-011 status corrected)
 
 ---
 
@@ -99,15 +100,20 @@ quiz_question_id → quiz_questions.summary_id → resolve_parent_institution RP
 
 ---
 
-#### G-009: student_stats counters never incremented — DOCUMENTED
+#### G-009: student_stats counters never incremented — FIXED (D-4)
 
-**File:** Multiple (reviews.ts, batch-review.ts, progress.ts)
+**File:** `xp-hooks.ts` (hooks 1, 3, 5)
 
-**Issue:** `student_stats.total_reviews` and `student_stats.total_sessions` are never incremented by backend code. The XP hooks fire correctly, but the stat counters remain at 0 unless the frontend manually calls POST /student-stats.
+**Was:** `student_stats.total_reviews` and `student_stats.total_sessions` were never incremented by backend code. The XP hooks fired correctly, but the stat counters remained at 0.
 
-**Impact:** Badge criteria that depend on `total_reviews >= N` or `total_sessions >= N` will never trigger automatically.
+**Impact:** Badge criteria that depended on `total_reviews >= N` or `total_sessions >= N` would never trigger automatically (~8 badges permanently unearnable).
 
-**Fix needed:** Add counter increment to the XP hooks or create a separate stat-tracking hook. Deferred to Sprint 3 since badge evaluation currently works via POST /check-badges (manual trigger).
+**Fix (D-4):** Added `_incrementStudentStat()` helper to `xp-hooks.ts`. Now:
+- Hook 1 (`xpHookForReview`): increments `total_reviews` by 1
+- Hook 3 (`xpHookForSessionComplete`): increments `total_sessions` by 1
+- Hook 5 (`xpHookForBatchReviews`): increments `total_reviews` by batch size
+
+Uses read-then-write (not atomic RPC) — acceptable because badge thresholds are coarse (≥1, ≥100, ≥500) and concurrent reviews by same student are practically impossible.
 
 ---
 
@@ -143,13 +149,13 @@ quiz_question_id → quiz_questions.summary_id → resolve_parent_institution RP
 
 ---
 
-#### G-011: streak-engine nested .then() chain — DOCUMENTED
+#### G-011: streak-engine nested .then() chain — FIXED (A-014/PR #115)
 
-**File:** `streak-engine.ts` (performDailyCheckIn BUG-4 fix)
+**File:** `streak-engine.ts` (performDailyCheckIn freeze counter decrement)
 
-**Issue:** The streak_freezes_owned decrement uses a nested `.then()` chain (fire-and-forget read-then-write) which has a theoretical race condition.
+**Was:** The streak_freezes_owned decrement used a nested `.then()` chain (fire-and-forget read-then-write) which had a theoretical TOCTOU race condition.
 
-**Assessment:** Practically impossible for same student to check in simultaneously. Acceptable.
+**Fix (A-014):** Changed to awaited atomic read-then-write with `try/catch`. Counter now decrements reliably.
 
 ---
 
@@ -202,11 +208,11 @@ quiz_question_id → quiz_questions.summary_id → resolve_parent_institution RP
 | G-008 | CRITICAL | Backend TS | FIXED — PR #113 |
 | G-003 | HIGH | Backend TS | FIXED — PR #113 |
 | G-004 | HIGH | Backend TS | DOCUMENTED — intentional for purchases |
-| G-009 | HIGH | Backend TS | DOCUMENTED — deferred to Sprint 3 |
+| G-009 | HIGH | Backend TS | FIXED — D-4 (xp-hooks.ts stat counters) |
 | G-005 | MEDIUM | Backend TS | FIXED — PR #113 |
 | G-006 | MEDIUM | Backend TS | FIXED — PR #113 |
 | G-010 | MEDIUM | Backend TS | FIXED — PR #113 |
-| G-011 | MEDIUM | Backend TS | DOCUMENTED — acceptable risk |
+| G-011 | MEDIUM | Backend TS | FIXED — A-014/PR #115 |
 | G-014 | MEDIUM | Backend TS | DOCUMENTED — deferred |
 | G-007 | LOW | Backend TS | DOCUMENTED — product decision |
 | G-015 | LOW | Backend TS | FIXED — PR #113 |
@@ -221,11 +227,16 @@ quiz_question_id → quiz_questions.summary_id → resolve_parent_institution RP
 - G-010: goals.ts dedup check on daily goal completion
 - G-015: xp-engine.ts skip bonuses for negative xpBase
 
+### Post-PR fixes:
+- G-009: FIXED — D-4 commit (xp-hooks.ts `_incrementStudentStat`)
+- G-011: FIXED — A-014/PR #115 (streak-engine.ts awaited atomic update)
+
 ### Sprint 3 prerequisites resolved:
 - All DB schema issues fixed
 - All CRITICAL code issues fixed
 - Quiz XP now works (was 100% broken since Sprint 1)
 - Multi-tenancy badges/repairs now work
+- Student stat counters now increment (review/session badges work)
 
 ---
 
@@ -240,14 +251,14 @@ routes/gamification/ (13 endpoints)
   ├── badges.ts     GET /badges, POST /check-badges, GET /notifications
   ├── streak.ts     GET /streak-status, POST /daily-check-in, /streak-freeze/buy, /streak-repair
   ├── goals.ts      PUT /daily-goal, POST /goals/complete, /onboarding
-  ├── helpers.ts    Constants + evaluateSimpleCondition
+  ├── helpers.ts    Constants + evaluateSimpleCondition + evaluateCountBadge
   └── index.ts      Module combiner
   │
 xp-engine.ts        awardXP() + XP_TABLE + calculateLevel()
   │
 streak-engine.ts    computeStreakStatus() + performDailyCheckIn()
   │
-xp-hooks.ts         8 afterWrite hooks (11/11 XP actions)
+xp-hooks.ts         8 afterWrite hooks (11/11 XP actions) + stat counter increment
   │
   ▼
 award_xp() RPC      Atomic XP grant + daily cap (500) + 10% post-cap + level calc
@@ -256,10 +267,10 @@ award_xp() RPC      Atomic XP grant + daily cap (500) + 10% post-cap + level cal
 DB Tables:
   student_xp          — XP aggregates (per student per institution)
   xp_transactions     — Immutable XP log
-  student_stats       — Streak + activity counters
+  student_stats       — Streak + activity counters (total_reviews, total_sessions incremented by hooks)
   badge_definitions   — Admin-managed badge catalog
   student_badges      — Earned badges (with institution_id)
   streak_freezes      — Purchasable streak protection (with freeze_type + xp_cost)
   streak_repairs      — Streak repair log (with institution_id + repair_date)
-  leaderboard_weekly  — Materialized view (refreshed hourly)
+  leaderboard_weekly  — Materialized view (code has fallback if MV unavailable)
 ```

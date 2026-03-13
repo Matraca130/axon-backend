@@ -5,6 +5,7 @@
  *   G-008 — xpHookForQuizAttempt resolves via quiz_question_id
  *   A-011 — Removed unused summaryId return value
  *   A-013 — Batch review uses shared bonus + per-card only for flashcards
+ *   D-4   — student_stats total_reviews/total_sessions now incremented (G-009 fix)
  */
 
 import type { AfterWriteParams } from "./crud-factory.ts";
@@ -122,6 +123,63 @@ async function getBonusContext(
   return result;
 }
 
+// --- D-4 FIX: Increment student_stats counters ---
+//
+// G-009 resolution: total_reviews and total_sessions are now
+// incremented by the relevant XP hooks, enabling badge evaluation
+// for review-count and session-count criteria badges.
+//
+// Uses read-then-write (not atomic RPC) because:
+//   - Counters are for badge thresholds (>=1, >=100, >=500)
+//   - Off-by-1 from concurrent reviews is irrelevant
+//   - Same student reviewing simultaneously is practically impossible
+//
+// If student_stats row doesn't exist (pre-onboarding), creates it
+// with defaults. Failures are non-critical (warn + continue).
+
+async function _incrementStudentStat(
+  studentId: string,
+  field: "total_reviews" | "total_sessions",
+  amount: number = 1,
+): Promise<void> {
+  const db = getAdminClient();
+  try {
+    const { data } = await db
+      .from("student_stats")
+      .select(field)
+      .eq("student_id", studentId)
+      .maybeSingle();
+
+    if (data) {
+      const current = (data as Record<string, unknown>)[field] as number ?? 0;
+      await db
+        .from("student_stats")
+        .update({
+          [field]: current + amount,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("student_id", studentId);
+    } else {
+      // Student hasn't onboarded yet — create stats row with defaults
+      await db.from("student_stats").insert({
+        student_id: studentId,
+        current_streak: 0,
+        longest_streak: 0,
+        total_reviews: field === "total_reviews" ? amount : 0,
+        total_sessions: field === "total_sessions" ? amount : 0,
+        total_time_seconds: 0,
+        last_study_date: null,
+      });
+    }
+  } catch (e) {
+    // Non-critical: badge evaluation still works, just counters won't update
+    console.warn(
+      `[XP Hooks] _incrementStudentStat(${field}) failed:`,
+      (e as Error).message,
+    );
+  }
+}
+
 // --- Hook 1: Flashcard Review XP ---
 export function xpHookForReview(params: AfterWriteParams): void {
   const { row, userId } = params;
@@ -149,6 +207,8 @@ export function xpHookForReview(params: AfterWriteParams): void {
         sourceId: flashcardId,
         ...bonus,
       });
+      // D-4: Increment total_reviews for badge criteria evaluation
+      await _incrementStudentStat(userId, "total_reviews");
     } catch (e) {
       console.warn("[XP Hook] review error:", (e as Error).message);
     }
@@ -209,6 +269,8 @@ export function xpHookForSessionComplete(params: AfterWriteParams): void {
         sourceId: row.id as string,
         currentStreak: bonus.currentStreak,
       });
+      // D-4: Increment total_sessions for badge criteria evaluation
+      await _incrementStudentStat(userId, "total_sessions");
     } catch (e) {
       console.warn("[XP Hook] session complete error:", (e as Error).message);
     }
@@ -300,6 +362,10 @@ export function xpHookForBatchReviews(
         });
         await Promise.all(promises);
       }
+
+      // D-4: Increment total_reviews for badge criteria evaluation
+      // Single increment for the whole batch (more efficient than per-review)
+      await _incrementStudentStat(userId, "total_reviews", reviews.length);
     } catch (e) {
       console.warn("[XP Hook] batch reviews error:", (e as Error).message);
     }

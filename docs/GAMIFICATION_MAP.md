@@ -20,7 +20,7 @@
 | POST | `/gamification/daily-check-in` | `streak.ts` | Daily login streak check-in + XP |
 | POST | `/gamification/streak-freeze/buy` | `streak.ts` | Purchase streak freeze with XP |
 | POST | `/gamification/streak-repair` | `streak.ts` | Repair broken streak with XP |
-| PUT | `/gamification/daily-goal` | `goals.ts` | Update daily XP goal (10-1000) |
+| PUT | `/gamification/daily-goal` | `goals.ts` | Update daily study goal (5-120 minutes) |
 | POST | `/gamification/goals/complete` | `goals.ts` | Mark goal as completed + bonus XP |
 | POST | `/gamification/onboarding` | `goals.ts` | Initialize student gamification profile |
 
@@ -42,6 +42,8 @@ All hooks are in `xp-hooks.ts`. They are called after successful CRUD writes.
 | 8 | `xpHookForPlanTaskComplete` | PUT /study-plan-tasks (status→completed) | complete_plan_task + complete_plan | 15 + 100 |
 
 **Note:** `streak_daily` (15 XP) is handled inline in POST /daily-check-in, not via hooks.
+
+**D-4 FIX:** Hooks 1, 3, and 5 now also increment `student_stats.total_reviews` / `total_sessions` counters, enabling badge criteria evaluation for review-count and session-count badges.
 
 ---
 
@@ -105,7 +107,7 @@ final = 10 * 1.75 = 17.5 → 18 XP
 
 | Table | Type | Key Columns |
 |---|---|---|
-| `student_xp` | Aggregate | student_id, institution_id, total_xp, current_level, xp_today, daily_goal |
+| `student_xp` | Aggregate | student_id, institution_id, total_xp, current_level, xp_today, daily_goal_minutes |
 | `xp_transactions` | Log (immutable) | student_id, institution_id, action, xp_base, xp_final, multiplier, bonus_type |
 | `student_stats` | Aggregate | student_id, current_streak, longest_streak, total_reviews, total_sessions |
 | `badge_definitions` | Catalog | slug, name, category, criteria, xp_reward, icon, rarity |
@@ -114,7 +116,7 @@ final = 10 * 1.75 = 17.5 → 18 XP
 | `streak_repairs` | Log | student_id, institution_id, repair_cost, repair_date |
 
 **Supporting:**
-- `leaderboard_weekly` — Materialized view (refreshed hourly by pg_cron)
+- `leaderboard_weekly` — Materialized view (refreshed hourly by pg_cron). May not exist in all environments; `profile.ts` GET /leaderboard has a fallback to `student_xp` when MV is unavailable.
 - `daily_activities` — Per-day activity log (existing, not gamification-specific)
 
 ---
@@ -148,5 +150,5 @@ final = 10 * 1.75 = 17.5 → 18 XP
 |---|---|---|
 | `xp-engine.ts` | XP calculation + award | `awardXP()`, `XP_TABLE`, `calculateLevel()`, `LEVEL_THRESHOLDS` |
 | `streak-engine.ts` | Streak computation | `computeStreakStatus()`, `performDailyCheckIn()` |
-| `xp-hooks.ts` | afterWrite hooks | 8 exported hook functions |
-| `helpers.ts` | Constants + badge eval | `evaluateSimpleCondition()`, cost constants |
+| `xp-hooks.ts` | afterWrite hooks + stat counters | 8 exported hook functions + `_incrementStudentStat` (private) |
+| `helpers.ts` | Constants + badge eval | `evaluateSimpleCondition()`, `evaluateCountBadge()`, cost constants |

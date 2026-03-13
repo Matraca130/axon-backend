@@ -6,6 +6,7 @@
  *   2. GOAL_BONUS_XP: values and completeness
  *   3. Level thresholds: correct level for each XP range
  *   4. Edge cases: malformed conditions, missing fields
+ *   5. evaluateCountBadge: whitelist rejection + unparseable conditions (D-6)
  *
  * These functions are now properly exported from routes/gamification/helpers.ts
  * (previously duplicated here because they were private in routes-gamification.tsx).
@@ -17,10 +18,17 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 
+// ─── Environment Setup ───
+Deno.env.set("SUPABASE_URL", "http://127.0.0.1:1");
+Deno.env.set("SUPABASE_ANON_KEY", "fake-anon-key-for-testing");
+Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "fake-service-role-key-for-testing");
+
 import {
   evaluateSimpleCondition,
+  evaluateCountBadge,
   calculateLevel,
   GOAL_BONUS_XP,
+  type TriggerConfig,
 } from "../routes/gamification/helpers.ts";
 
 // ═══════════════════════════════════════════════════════════════
@@ -157,4 +165,81 @@ Deno.test("GOAL_BONUS_XP: all values are positive", () => {
       `${key} bonus must be positive, got ${val}`,
     );
   }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 4. evaluateCountBadge — Whitelist & Early Returns (D-6)
+//
+// These tests verify the whitelist guard and unparseable condition
+// paths. No DB connection is needed because these paths return
+// false before any query is executed.
+// ═══════════════════════════════════════════════════════════════
+
+// deno-lint-ignore no-explicit-any
+const fakeDb = {} as any;
+
+Deno.test("evaluateCountBadge: rejects table not in ALLOWED_TABLES", async () => {
+  const config: TriggerConfig = {
+    table: "nonexistent_table",
+    condition: "COUNT(*) >= 1",
+  };
+  const result = await evaluateCountBadge(fakeDb, "student-1", config);
+  assertEquals(result, false);
+});
+
+Deno.test("evaluateCountBadge: rejects empty table name", async () => {
+  const config: TriggerConfig = {
+    table: "",
+    condition: "COUNT(*) >= 1",
+  };
+  const result = await evaluateCountBadge(fakeDb, "student-1", config);
+  assertEquals(result, false);
+});
+
+Deno.test("evaluateCountBadge: rejects ai_conversations (deactivated S3-004)", async () => {
+  const config: TriggerConfig = {
+    table: "ai_conversations",
+    condition: "COUNT(*) >= 1",
+  };
+  const result = await evaluateCountBadge(fakeDb, "student-1", config);
+  assertEquals(result, false);
+});
+
+Deno.test("evaluateCountBadge: rejects leaderboard_weekly (deactivated S3-004)", async () => {
+  const config: TriggerConfig = {
+    table: "leaderboard_weekly",
+    condition: "rank <= 10",
+  };
+  const result = await evaluateCountBadge(fakeDb, "student-1", config);
+  assertEquals(result, false);
+});
+
+Deno.test("evaluateCountBadge: rejects flashcards table (no student_id)", async () => {
+  const config: TriggerConfig = {
+    table: "flashcards",
+    condition: "COUNT(*) >= 10",
+  };
+  const result = await evaluateCountBadge(fakeDb, "student-1", config);
+  assertEquals(result, false);
+});
+
+Deno.test("evaluateCountBadge: rejects unparseable condition on whitelisted table", async () => {
+  // study_sessions IS in the whitelist, but the condition is garbage.
+  // The 3 regex patterns all fail, so it falls through to the
+  // warning + return false — no DB query is attempted.
+  const config: TriggerConfig = {
+    table: "study_sessions",
+    condition: "INVALID!!CONDITION",
+  };
+  const result = await evaluateCountBadge(fakeDb, "student-1", config);
+  assertEquals(result, false);
+});
+
+Deno.test("evaluateCountBadge: rejects empty condition on whitelisted table", async () => {
+  const config: TriggerConfig = {
+    table: "study_sessions",
+    condition: "",
+  };
+  const result = await evaluateCountBadge(fakeDb, "student-1", config);
+  assertEquals(result, false);
 });
