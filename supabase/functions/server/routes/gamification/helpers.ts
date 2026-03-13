@@ -20,6 +20,9 @@
  * Sprint 3:
  *   S3-001: evaluateCountBadge + applyTriggerFilter + TriggerConfig
  *   S3-002: Added fsrs_states to ALLOWED_TABLES (Recolector badges)
+ *   S3-003: Fixed xp_collector slugs in migration (flashcards → fsrs_states)
+ *   S3-004: Removed ai_conversations & leaderboard_weekly from ALLOWED_TABLES
+ *           (tables don't exist in DB; 4 badges deactivated)
  */
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
@@ -111,7 +114,6 @@ export function evaluateSimpleCondition(
 //   {"table":"bkt_states","condition":"COUNT(*) >= 1","filter":"p_know > 0.80"}
 //   {"table":"study_sessions","condition":"COUNT(DISTINCT summary_id) >= 25","filter":"..."}
 //   {"table":"fsrs_states","condition":"COUNT(*) >= 10"}
-//   {"table":"leaderboard_weekly","condition":"rank <= 10"}
 
 export interface TriggerConfig {
   table: string;
@@ -123,15 +125,20 @@ export interface TriggerConfig {
  * Whitelist of tables the badge evaluator can query.
  * Maps table name → student identifier column.
  *
- * S3-002: Added fsrs_states for Recolector badges.
- * Each fsrs_states row = 1 flashcard in the student's SRS system.
+ * S3-002: Added fsrs_states for xp_collector badges.
+ * S3-004: Removed ai_conversations & leaderboard_weekly (tables don't exist).
+ *
+ * TODO: When ai_conversations and leaderboard_weekly tables are created,
+ *       re-add them here and reactivate the 4 deactivated badges:
+ *         - ai_conversations: curioso_1, investigador_1
+ *         - leaderboard_weekly: campeon_semanal, socializador
+ *       Verify the correct student column name (student_id vs user_id)
+ *       before adding.
  */
 const ALLOWED_TABLES: Record<string, string> = {
   study_sessions: "student_id",
-  ai_conversations: "student_id",
   reading_states: "student_id",
   bkt_states: "student_id",
-  leaderboard_weekly: "student_id",
   fsrs_states: "student_id",
 };
 
