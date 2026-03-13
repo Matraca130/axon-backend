@@ -13,6 +13,9 @@
  *   - Evaluation respects tier ordering: bronze < silver < gold < platinum
  *   - Non-tiered badges (tier='none') evaluated independently
  *   - All qualifying tiers awarded in one pass (Duolingo model)
+ *
+ * FIX: evalContext now includes challenges_completed for
+ * Challenge Hunter badges.
  */
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
@@ -33,6 +36,7 @@ export interface BadgeEvalContext {
   reviews_today: number;
   sessions_today: number;
   correct_streak: number;
+  challenges_completed: number;
   [key: string]: unknown;
 }
 
@@ -74,7 +78,6 @@ export function hasPrerequisiteTier(
   const requiredTier = prerequisiteTiers[badgeTier];
   if (!requiredTier) return true;
 
-  // Check if student has the prerequisite tier for this achievement group
   for (const [, earned] of earnedBadges) {
     if (
       earned.achievement_group === achievementGroup &&
@@ -178,7 +181,7 @@ export async function evaluateAndAwardBadges(
       .maybeSingle(),
     userDb
       .from("student_stats")
-      .select("current_streak, longest_streak, total_reviews, total_sessions, reviews_today, sessions_today, correct_streak")
+      .select("current_streak, longest_streak, total_reviews, total_sessions, reviews_today, sessions_today, correct_streak, challenges_completed")
       .eq("student_id", studentId)
       .maybeSingle(),
   ]);
@@ -195,6 +198,7 @@ export async function evaluateAndAwardBadges(
     reviews_today: (statsResult.data?.reviews_today as number) ?? 0,
     sessions_today: (statsResult.data?.sessions_today as number) ?? 0,
     correct_streak: (statsResult.data?.correct_streak as number) ?? 0,
+    challenges_completed: (statsResult.data?.challenges_completed as number) ?? 0,
   };
 
   // Step 4: Evaluate each unearned badge
