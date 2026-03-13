@@ -1,14 +1,9 @@
 /**
  * routes/gamification/streak.ts — Streak management
  *
- * Endpoints:
- *   GET  /gamification/streak-status    — Detailed streak info
- *   POST /gamification/daily-check-in    — Daily login streak check-in
- *   POST /gamification/streak-freeze/buy — Purchase streak freeze with XP
- *   POST /gamification/streak-repair     — Repair broken streak with XP
- *
- * AUDIT FIXES (PR #113):
- *   G-001 — streak_freezes INSERT now includes freeze_type + xp_cost
+ * AUDIT FIXES:
+ *   G-001 — streak_freezes INSERT includes freeze_type + xp_cost
+ *   A-004 — streak_repairs INSERT includes institution_id + repair_date
  *   BUG-5 — POST /daily-check-in skips streak XP when streak breaks
  *   BUG-8 — POST /streak-repair restores to longest_streak (intentional)
  */
@@ -62,7 +57,6 @@ streakRoutes.post(`${PREFIX}/gamification/daily-check-in`, async (c: Context) =>
     const isAlreadyCheckedIn = result.events.some(
       (e) => e.type === "already_checked_in",
     );
-    // BUG-5 FIX: Don't award XP when streak breaks
     const streakBroke = result.events.some(
       (e) => e.type === "streak_broken",
     );
@@ -104,7 +98,6 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
 
   const adminDb = getAdminClient();
 
-  // Step 1: Check current freeze count
   const { count: currentFreezes, error: countErr } = await adminDb
     .from("streak_freezes")
     .select("id", { count: "exact", head: true })
@@ -124,7 +117,6 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
     );
   }
 
-  // Step 2: Check student has enough XP
   const { data: xpData, error: xpErr } = await adminDb
     .from("student_xp")
     .select("total_xp, streak_freezes_owned")
@@ -145,7 +137,6 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
     );
   }
 
-  // Step 3: Deduct XP and create freeze
   const { error: deductErr } = await adminDb
     .from("student_xp")
     .update({
@@ -161,7 +152,6 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
   }
 
   // G-001 FIX: Include freeze_type and xp_cost in INSERT
-  // Previously only student_id and institution_id were sent
   const { data: freeze, error: freezeErr } = await adminDb
     .from("streak_freezes")
     .insert({
@@ -174,7 +164,6 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
     .single();
 
   if (freezeErr) {
-    // Rollback XP deduction
     await adminDb
       .from("student_xp")
       .update({
@@ -187,7 +176,6 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
     return err(c, `Freeze creation failed: ${freezeErr.message}`, 500);
   }
 
-  // Log the XP deduction as a transaction
   await adminDb.from("xp_transactions").insert({
     student_id: user.id,
     institution_id: institutionId,
@@ -288,12 +276,15 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
     return err(c, `Streak restore failed: ${statsErr.message}`, 500);
   }
 
+  // A-004 FIX: Include institution_id and repair_date in INSERT
   const { data: repair, error: repairErr } = await adminDb
     .from("streak_repairs")
     .insert({
       student_id: user.id,
+      institution_id: institutionId,
       repair_cost: repairCost,
       previous_streak: streakToRestore,
+      repair_date: today,
       repaired_at: new Date().toISOString(),
     })
     .select()
