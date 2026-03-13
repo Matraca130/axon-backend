@@ -10,6 +10,7 @@
  * PR #102: Renamed .tsx → .ts (no JSX), deduplicated calculateLevel.
  * PR #103: Modularized billing → routes/billing/, study-queue → routes/study-queue/.
  *   CORS restricted to Vercel + localhost origins (BUG-004).
+ * PR #105: Modularized models → routes/models/.
  */
 
 import { Hono } from "npm:hono";
@@ -24,7 +25,7 @@ import { content } from "./routes/content/index.ts";
 import { studentRoutes } from "./routes-student.ts";
 import { studyRoutes } from "./routes/study/index.ts";
 import { studyQueueRoutes } from "./routes/study-queue/index.ts";
-import { modelRoutes } from "./routes-models.ts";
+import { modelRoutes } from "./routes/models/index.ts";
 import { planRoutes } from "./routes/plans/index.ts";
 import { billingRoutes } from "./routes/billing/index.ts";
 import { muxRoutes } from "./routes/mux/index.ts";
@@ -88,7 +89,7 @@ app.get(`${PREFIX}/health`, (c) => {
   });
 });
 
-// ─── Mount Route Modules ─────────────────────────────────────────
+// ─── Mount Route Modules ───────────────────────────────────────
 
 app.route("/", authRoutes);
 app.route("/", memberRoutes);

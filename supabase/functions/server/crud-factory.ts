@@ -16,23 +16,14 @@
  * N-9 FIX: Pagination limit capped at 500, offset validated >= 0.
  * O-5 FIX: GET /:id now applies scopeToUser filter (was missing before).
  * S-1 FIX: Default count mode changed to "estimated" for performance.
- *          Clients can opt-in to exact count via ?exact_count=true.
  *
  * H-5 FIX: Institution scoping added to all 6 endpoint types.
- *   - READ ops (LIST, GET): requireInstitutionRole(ALL_ROLES)
- *   - WRITE ops (POST, PUT, DELETE, RESTORE): requireInstitutionRole(CONTENT_WRITE_ROLES)
- *   - Skipped for scopeToUser tables (student data, already user-scoped)
- *   - courses (parentKey=institution_id): shortcut, no RPC needed
- *   - All other tables: resolve via resolve_parent_institution() RPC
+ * A-10 FIX: Institution scoping only applies to KNOWN content-hierarchy parentKeys.
+ * A-2 FIX: POST validates requiredFields BEFORE calling checkContentScope.
  *
- * A-10 FIX: Institution scoping only applies to KNOWN content-hierarchy
- *   parentKeys. Tables with parentKeys not in the mapping (e.g.
- *   study_plan_tasks → study_plan_id) are not part of the content
- *   hierarchy and are skipped. This prevents false 404s on tables
- *   whose parents are user-scoped or otherwise outside the hierarchy.
- *
- * A-2 FIX: POST endpoint validates requiredFields BEFORE calling
- *   checkContentScope, avoiding unnecessary RPC calls on invalid bodies.
+ * PR #105: Exported pure helpers for testing:
+ *   isContentHierarchyParent, PARENT_KEY_TO_TABLE,
+ *   MAX_PAGINATION_LIMIT, DEFAULT_PAGINATION_LIMIT
  */
 
 import { Hono } from "npm:hono";
@@ -45,44 +36,29 @@ import {
 } from "./auth-helpers.ts";
 import type { Context } from "npm:hono";
 
-// ─── Constants ────────────────────────────────────────────────────
+// ─── Constants (PR #105: exported for testing) ─────────────────
 
-const MAX_PAGINATION_LIMIT = 500;
-const DEFAULT_PAGINATION_LIMIT = 100;
+export const MAX_PAGINATION_LIMIT = 500;
+export const DEFAULT_PAGINATION_LIMIT = 100;
 
-// ─── H-5 + A-10: Parent key to table mapping ─────────────────────
-// Maps FK column names to their parent table for institution resolution.
-// "institution_id" is handled as a special case (direct, no RPC needed).
-//
-// IMPORTANT: Only parentKeys that connect to the content hierarchy
-// (courses → subtopics) are listed here. ParentKeys for non-content
-// tables (e.g. study_plan_id) are intentionally excluded — those tables
-// are either user-scoped or don't have a clean FK path to institution_id.
+// ─── H-5 + A-10: Parent key to table mapping (PR #105: exported) ──
 
-const PARENT_KEY_TO_TABLE: Record<string, string> = {
+export const PARENT_KEY_TO_TABLE: Record<string, string> = {
   course_id: "courses",
   semester_id: "semesters",
   section_id: "sections",
   topic_id: "topics",
   summary_id: "summaries",
   keyword_id: "keywords",
-  model_id: "models_3d",    // A-10 FIX: model_3d_pins → models_3d → topics → ... → courses
+  model_id: "models_3d",
 };
 
 // ─── Types ──────────────────────────────────────────────────────
 
-/**
- * Parameters passed to the afterWrite lifecycle hook.
- * Exported for use by hook implementations (e.g. summary-hook.ts).
- */
 export interface AfterWriteParams {
-  /** Whether the write was a create (POST) or update (PUT) */
   action: "create" | "update";
-  /** The full row returned by Supabase after .select() */
   row: Record<string, unknown>;
-  /** For "update" only: the field names the client actually sent (excludes updated_at) */
   updatedFields?: string[];
-  /** The authenticated user's ID */
   userId: string;
 }
 
@@ -100,17 +76,6 @@ export interface CrudConfig {
   requiredFields?: string[];
   createFields: string[];
   updateFields: string[];
-
-  /**
-   * Optional lifecycle hook called after successful POST or PUT.
-   *
-   * Invoked synchronously (fire-and-forget) — the factory does NOT
-   * await the hook. If the hook starts async work (e.g. embedding
-   * generation), it manages its own error handling via .catch().
-   *
-   * The HTTP response is NEVER delayed by this hook.
-   * NOT called on DELETE or RESTORE operations.
-   */
   afterWrite?: (params: AfterWriteParams) => void;
 }
 
@@ -128,28 +93,22 @@ function parsePagination(c: Context): { limit: number; offset: number } {
 }
 
 // ─── Count Mode Helper ─────────────────────────────────────────
-// S-1 FIX: Use "estimated" count by default to avoid full table scans.
 
 function parseCountMode(c: Context): "exact" | "estimated" {
   return c.req.query("exact_count") === "true" ? "exact" : "estimated";
 }
 
-// ─── H-5 + A-10: Institution Resolution Helpers ──────────────────
+// ─── H-5 + A-10: Institution Resolution Helpers (PR #105: exported) ─
 
 /**
  * Determine if a parentKey connects to the content hierarchy.
  * Returns true for "institution_id" (direct) or any key in PARENT_KEY_TO_TABLE.
  * Returns false for unknown keys like "study_plan_id".
  */
-function isContentHierarchyParent(parentKey: string): boolean {
+export function isContentHierarchyParent(parentKey: string): boolean {
   return parentKey === "institution_id" || parentKey in PARENT_KEY_TO_TABLE;
 }
 
-/**
- * Resolve institution_id from a parent FK key + value.
- * For "institution_id": returns the value directly (it IS the institution).
- * For others: calls resolve_parent_institution RPC.
- */
 async function resolveInstitutionFromParent(
   db: any,
   parentKey: string,
@@ -158,7 +117,7 @@ async function resolveInstitutionFromParent(
   if (parentKey === "institution_id") return parentValue;
 
   const parentTable = PARENT_KEY_TO_TABLE[parentKey];
-  if (!parentTable) return null; // Unknown parent key → fail-closed
+  if (!parentTable) return null;
 
   try {
     const { data, error } = await db.rpc("resolve_parent_institution", {
@@ -172,10 +131,6 @@ async function resolveInstitutionFromParent(
   }
 }
 
-/**
- * Resolve institution_id from a row's own table + ID.
- * Used for GET/PUT/DELETE/RESTORE where we don't have the parent value.
- */
 async function resolveInstitutionFromRow(
   db: any,
   table: string,
@@ -193,34 +148,18 @@ async function resolveInstitutionFromRow(
   }
 }
 
-/**
- * Check institution scoping for a content operation.
- * Returns Response (error) if denied, or null if access is granted.
- *
- * Skips the check entirely when:
- *   - cfg.scopeToUser is set (student data, already user-scoped)
- *   - cfg.parentKey is absent (no parent, top-level table)
- *   - cfg.parentKey is NOT in the content hierarchy mapping (A-10 fix:
- *     tables like study_plan_tasks whose parent is user-scoped)
- */
 async function checkContentScope(
   c: Context,
   db: any,
   userId: string,
   cfg: CrudConfig,
   opts: {
-    parentValue?: string; // For LIST/POST: the parent FK value
-    rowId?: string;       // For GET/PUT/DELETE/RESTORE: the row's own ID
-    isWrite: boolean;     // true = CONTENT_WRITE_ROLES, false = ALL_ROLES
+    parentValue?: string;
+    rowId?: string;
+    isWrite: boolean;
   },
 ): Promise<Response | null> {
-  // Skip for user-scoped tables or tables without a parent
   if (cfg.scopeToUser || !cfg.parentKey) return null;
-
-  // A-10 FIX: Only apply institution scoping to known content-hierarchy parents.
-  // Tables with parentKeys NOT in the mapping (e.g. study_plan_id → study_plans)
-  // are not part of the content hierarchy and don't have a clean FK path to
-  // institution_id. Skipping is safe because their parents are user-scoped.
   if (!isContentHierarchyParent(cfg.parentKey)) return null;
 
   let institutionId: string | null = null;
@@ -241,10 +180,10 @@ async function checkContentScope(
     return err(c, roleCheck.message, roleCheck.status);
   }
 
-  return null; // Access granted
+  return null;
 }
 
-// ─── Factory ───────────────────────────────────────────────────
+// ─── Factory ─────────────────────────────────────────────────────
 
 export function registerCrud(app: Hono, cfg: CrudConfig) {
   const base = `${PREFIX}/${cfg.slug}`;
@@ -269,7 +208,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       query = query.eq(cfg.parentKey, parentValue);
     }
 
-    // H-5 FIX: Verify caller has membership in this resource's institution
     const scopeErr = await checkContentScope(c, db, user.id, cfg, {
       parentValue,
       isWrite: false,
@@ -313,7 +251,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
 
     const id = c.req.param("id");
 
-    // H-5 FIX: Verify caller has membership in this resource's institution
     const scopeErr = await checkContentScope(c, db, user.id, cfg, {
       rowId: id,
       isWrite: false,
@@ -351,8 +288,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       row[cfg.parentKey] = parentValue;
     }
 
-    // A-2 FIX: Validate required fields BEFORE institution check.
-    // Avoids unnecessary RPC call when body is incomplete.
     if (cfg.requiredFields) {
       const missing = cfg.requiredFields.filter((f) => {
         const v = body[f];
@@ -366,7 +301,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       }
     }
 
-    // H-5 FIX: Verify caller has write access in this resource's institution
     const scopeErr = await checkContentScope(c, db, user.id, cfg, {
       parentValue,
       isWrite: true,
@@ -388,9 +322,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     if (error)
       return err(c, `Create ${cfg.table} failed: ${error.message}`, 500);
 
-    // Fase 5: Fire-and-forget afterWrite hook (e.g. auto-ingest for summaries).
-    // Wrapped in try/catch to absorb synchronous exceptions from hook setup.
-    // The HTTP response is NEVER delayed or affected by hook failures.
     if (cfg.afterWrite) {
       try {
         cfg.afterWrite({ action: "create", row: data, userId: user.id });
@@ -413,7 +344,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
 
     const id = c.req.param("id");
 
-    // H-5 FIX: Verify caller has write access in this resource's institution
     const scopeErr = await checkContentScope(c, db, user.id, cfg, {
       rowId: id,
       isWrite: true,
@@ -432,9 +362,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       return err(c, "No valid fields to update", 400);
     }
 
-    // Capture which fields the client actually sent BEFORE appending updated_at.
-    // Used by afterWrite hooks to decide whether to trigger side effects
-    // (e.g. only re-chunk summaries when content_markdown changed).
     const updatedFields = Object.keys(row);
 
     if (cfg.hasUpdatedAt) row.updated_at = new Date().toISOString();
@@ -446,8 +373,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     if (error)
       return err(c, `Update ${cfg.table} ${id} failed: ${error.message}`, 500);
 
-    // Fase 5: Fire-and-forget afterWrite hook.
-    // updatedFields reflects ONLY what the client sent (not updated_at).
     if (cfg.afterWrite) {
       try {
         cfg.afterWrite({ action: "update", row: data, updatedFields, userId: user.id });
@@ -470,7 +395,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
 
     const id = c.req.param("id");
 
-    // H-5 FIX: Verify caller has write access in this resource's institution
     const scopeErr = await checkContentScope(c, db, user.id, cfg, {
       rowId: id,
       isWrite: true,
@@ -523,7 +447,6 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
 
       const id = c.req.param("id");
 
-      // H-5 FIX: Verify caller has write access in this resource's institution
       const scopeErr = await checkContentScope(c, db, user.id, cfg, {
         rowId: id,
         isWrite: true,
