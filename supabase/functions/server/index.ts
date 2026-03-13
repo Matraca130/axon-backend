@@ -7,6 +7,7 @@
  *   → MVP: Temporarily reverted to "*" for development flexibility.
  *   → TODO: Re-restrict before production launch.
  * D57: Health check now reports openai status alongside gemini.
+ * GAMIFICATION: Sprint 1 — gamificationRoutes mounted.
  */
 
 import { Hono } from "npm:hono";
@@ -30,6 +31,7 @@ import { storageRoutes } from "./routes-storage.tsx";
 import { settingsRoutes } from "./routes/settings/index.ts";
 import { aiRoutes } from "./routes/ai/index.ts";
 import { whatsappRoutes } from "./routes/whatsapp/index.ts"; // WA: WhatsApp webhook + bot (feature-flagged via WHATSAPP_ENABLED)
+import { gamificationRoutes } from "./routes-gamification.tsx"; // Sprint 1: XP, badges, leaderboard
 
 const app = new Hono();
 
@@ -86,6 +88,7 @@ app.route("/", storageRoutes);
 app.route("/", settingsRoutes);
 app.route("/", aiRoutes);
 app.route("/", whatsappRoutes); // WA: WhatsApp webhook + bot (feature-flagged via WHATSAPP_ENABLED)
+app.route("/", gamificationRoutes); // Sprint 1: Gamification (XP, badges, leaderboard)
 
 // ─── Catch-all 404 ────────────────────────────────────────────────
 
