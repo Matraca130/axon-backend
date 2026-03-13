@@ -13,6 +13,7 @@
  * P-2 FIX: Pagination caps added to daily-activities.
  * F3 FIX: topics-overview now filters by status = 'published'
  *         (consistency with topic-progress which already did).
+ * GAMIFICATION: Sprint 1 — xpHookForReadingComplete wired to POST /reading-states.
  */
 
 import { Hono } from "npm:hono";
@@ -28,6 +29,7 @@ import {
   validateFields,
 } from "../../validate.ts";
 import type { Context } from "npm:hono";
+import { xpHookForReadingComplete } from "../../xp-hooks.ts";
 
 export const progressRoutes = new Hono();
 
@@ -298,8 +300,8 @@ progressRoutes.post(`${PREFIX}/reading-states`, async (c: Context) => {
     return err(c, "summary_id must be a valid UUID", 400);
 
   const { fields, error: valErr } = validateFields(body, [
-    { key: "scroll_position", check: isNonNeg, msg: "must be ≥ 0" },
-    { key: "time_spent_seconds", check: isNonNeg, msg: "must be ≥ 0" },
+    { key: "scroll_position", check: isNonNeg, msg: "must be >= 0" },
+    { key: "time_spent_seconds", check: isNonNeg, msg: "must be >= 0" },
     { key: "completed", check: isBool, msg: "must be a boolean" },
     { key: "last_read_at", check: isIsoTs, msg: "must be an ISO timestamp" },
   ]);
@@ -308,6 +310,23 @@ progressRoutes.post(`${PREFIX}/reading-states`, async (c: Context) => {
   const row = { student_id: user.id, summary_id: body.summary_id, ...fields };
   const { data, error } = await atomicUpsert(db, "reading_states", "student_id,summary_id", row);
   if (error) return err(c, `Upsert reading_state failed: ${error.message}`, 500);
+
+  // Sprint 1: Fire-and-forget XP hook when reading is marked complete (contract §4.3)
+  // Only triggers when completed=true is in the request body.
+  // The hook internally checks action === "update" && updatedFields.includes("completed").
+  if (body.completed === true) {
+    try {
+      xpHookForReadingComplete({
+        action: "update",
+        row: data as Record<string, unknown>,
+        updatedFields: Object.keys(fields),
+        userId: user.id,
+      });
+    } catch (hookErr) {
+      console.warn("[XP Hook] reading-state setup error:", (hookErr as Error).message);
+    }
+  }
+
   return ok(c, data);
 });
 
@@ -357,7 +376,7 @@ progressRoutes.post(`${PREFIX}/daily-activities`, async (c: Context) => {
   const { fields, error: valErr } = validateFields(body, [
     { key: "reviews_count", check: isNonNegInt, msg: "must be a non-negative integer" },
     { key: "correct_count", check: isNonNegInt, msg: "must be a non-negative integer" },
-    { key: "time_spent_seconds", check: isNonNeg, msg: "must be ≥ 0" },
+    { key: "time_spent_seconds", check: isNonNeg, msg: "must be >= 0" },
     { key: "sessions_count", check: isNonNegInt, msg: "must be a non-negative integer" },
   ]);
   if (valErr) return err(c, valErr, 400);
@@ -393,7 +412,7 @@ progressRoutes.post(`${PREFIX}/student-stats`, async (c: Context) => {
     { key: "current_streak", check: isNonNegInt, msg: "must be a non-negative integer" },
     { key: "longest_streak", check: isNonNegInt, msg: "must be a non-negative integer" },
     { key: "total_reviews", check: isNonNegInt, msg: "must be a non-negative integer" },
-    { key: "total_time_seconds", check: isNonNeg, msg: "must be ≥ 0" },
+    { key: "total_time_seconds", check: isNonNeg, msg: "must be >= 0" },
     { key: "total_sessions", check: isNonNegInt, msg: "must be a non-negative integer" },
     { key: "last_study_date", check: isDateOnly, msg: "must be YYYY-MM-DD format" },
   ]);

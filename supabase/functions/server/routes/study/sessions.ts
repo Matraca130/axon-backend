@@ -22,12 +22,15 @@
  *     Also added scheduled_date, estimated_minutes, original_method
  *     to updateFields (for rescheduleEngine batch updates).
  *
+ * GAMIFICATION: Sprint 1 — xpHookForSessionComplete wired to study_sessions.
+ *
  * FILE: supabase/functions/server/routes/study/sessions.ts
  * REPO: Matraca130/axon-backend
  */
 
 import { Hono } from "npm:hono";
 import { registerCrud } from "../../crud-factory.ts";
+import { xpHookForSessionComplete } from "../../xp-hooks.ts";
 
 export const sessionRoutes = new Hono();
 
@@ -42,6 +45,7 @@ registerCrud(sessionRoutes, {
   requiredFields: ["session_type"],
   createFields: ["course_id", "session_type"],
   updateFields: ["completed_at", "total_reviews", "correct_reviews"],
+  afterWrite: xpHookForSessionComplete, // Sprint 1: XP on session complete
 });
 
 registerCrud(sessionRoutes, {

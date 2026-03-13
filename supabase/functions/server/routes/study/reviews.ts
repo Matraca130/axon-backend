@@ -7,6 +7,7 @@
  *
  * U-3 FIX: Pagination added to both LIST endpoints.
  * M-2 FIX: POST /reviews now persists response_time_ms.
+ * GAMIFICATION: Sprint 1 — XP hooks wired to POST /reviews and POST /quiz-attempts.
  */
 
 import { Hono } from "npm:hono";
@@ -20,6 +21,7 @@ import {
   inRange,
 } from "../../validate.ts";
 import type { Context } from "npm:hono";
+import { xpHookForReview, xpHookForQuizAttempt } from "../../xp-hooks.ts";
 
 export const reviewRoutes = new Hono();
 
@@ -144,6 +146,15 @@ reviewRoutes.post(`${PREFIX}/reviews`, async (c: Context) => {
     .single();
 
   if (error) return err(c, `Create review failed: ${error.message}`, 500);
+
+  // Sprint 1: Fire-and-forget XP hook (contract §4.3)
+  // Never delays HTTP response. Hook resolves institution internally.
+  try {
+    xpHookForReview({ action: "create", row: data, userId: user.id });
+  } catch (hookErr) {
+    console.warn("[XP Hook] review setup error:", (hookErr as Error).message);
+  }
+
   return ok(c, data, 201);
 });
 
@@ -227,5 +238,14 @@ reviewRoutes.post(`${PREFIX}/quiz-attempts`, async (c: Context) => {
 
   if (error)
     return err(c, `Create quiz_attempt failed: ${error.message}`, 500);
+
+  // Sprint 1: Fire-and-forget XP hook (contract §4.3)
+  // quiz_attempts has summary_id via quiz_question → resolves institution internally.
+  try {
+    xpHookForQuizAttempt({ action: "create", row: data, userId: user.id });
+  } catch (hookErr) {
+    console.warn("[XP Hook] quiz-attempt setup error:", (hookErr as Error).message);
+  }
+
   return ok(c, data, 201);
 });
