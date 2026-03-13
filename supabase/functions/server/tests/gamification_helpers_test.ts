@@ -1,5 +1,5 @@
 /**
- * Tests for gamification helper functions in routes-gamification.tsx
+ * Tests for gamification helper functions
  *
  * Tests cover:
  *   1. evaluateSimpleCondition: operator matrix
@@ -7,8 +7,8 @@
  *   3. Level thresholds: correct level for each XP range
  *   4. Edge cases: malformed conditions, missing fields
  *
- * These functions are extracted/duplicated here for pure unit testing
- * since they're private to routes-gamification.tsx.
+ * These functions are now properly exported from routes/gamification/helpers.ts
+ * (previously duplicated here because they were private in routes-gamification.tsx).
  *
  * Run: deno test supabase/functions/server/tests/gamification_helpers_test.ts
  */
@@ -17,61 +17,11 @@ import {
   assertEquals,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 
-// ═══════════════════════════════════════════════════════════════
-// Functions Under Test (duplicated from routes-gamification.tsx)
-// These are private functions in the routes file, so we duplicate
-// them here for isolated unit testing.
-// ═══════════════════════════════════════════════════════════════
-
-function evaluateSimpleCondition(
-  condition: string,
-  row: Record<string, unknown>,
-): boolean {
-  const match = condition.match(
-    /^(\w+)\s*(>=|>|<=|<|=|==)\s*([\d.]+)$/,
-  );
-  if (!match) return false;
-
-  const [, field, op, valueStr] = match;
-  const actual = Number(row[field] ?? 0);
-  const target = parseFloat(valueStr);
-
-  switch (op) {
-    case ">=":
-      return actual >= target;
-    case ">":
-      return actual > target;
-    case "<=":
-      return actual <= target;
-    case "<":
-      return actual < target;
-    case "=":
-    case "==":
-      return actual === target;
-    default:
-      return false;
-  }
-}
-
-const LEVEL_THRESHOLDS: [number, number][] = [
-  [10000, 12], [7500, 11], [5500, 10], [4000, 9], [3000, 8],
-  [2200, 7], [1500, 6], [1000, 5], [600, 4], [300, 3], [100, 2],
-];
-
-function calculateLevel(totalXp: number): number {
-  for (const [threshold, level] of LEVEL_THRESHOLDS) {
-    if (totalXp >= threshold) return level;
-  }
-  return 1;
-}
-
-const GOAL_BONUS_XP: Record<string, number> = {
-  review_due: 50,
-  weak_area: 75,
-  daily_xp: 25,
-  study_time: 30,
-  complete_session: 25,
-};
+import {
+  evaluateSimpleCondition,
+  calculateLevel,
+  GOAL_BONUS_XP,
+} from "../routes/gamification/helpers.ts";
 
 // ═══════════════════════════════════════════════════════════════
 // 1. evaluateSimpleCondition — Operator Matrix
@@ -120,7 +70,7 @@ Deno.test("evaluateSimpleCondition: malformed condition returns false", () => {
   assertEquals(evaluateSimpleCondition("", {}), false);
   assertEquals(evaluateSimpleCondition("invalid", {}), false);
   assertEquals(evaluateSimpleCondition("field ?? 5", {}), false);
-  assertEquals(evaluateSimpleCondition("COUNT(*) >= 5", {}), false); // COUNT not supported
+  assertEquals(evaluateSimpleCondition("COUNT(*) >= 5", {}), false);
   assertEquals(evaluateSimpleCondition("field >= abc", {}), false);
 });
 
