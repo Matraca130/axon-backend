@@ -8,6 +8,7 @@
  *   → TODO: Re-restrict before production launch.
  * D57: Health check now reports openai status alongside gemini.
  * GAMIFICATION: Sprint 1 — gamificationRoutes mounted.
+ * PR #101: Modularized gamificationRoutes from monolithic 53KB file.
  */
 
 import { Hono } from "npm:hono";
@@ -31,11 +32,11 @@ import { storageRoutes } from "./routes-storage.tsx";
 import { settingsRoutes } from "./routes/settings/index.ts";
 import { aiRoutes } from "./routes/ai/index.ts";
 import { whatsappRoutes } from "./routes/whatsapp/index.ts"; // WA: WhatsApp webhook + bot (feature-flagged via WHATSAPP_ENABLED)
-import { gamificationRoutes } from "./routes-gamification.tsx"; // Sprint 1: XP, badges, leaderboard
+import { gamificationRoutes } from "./routes/gamification/index.ts"; // PR #101: Modularized (was routes-gamification.tsx)
 
 const app = new Hono();
 
-// ─── Middleware ────────────────────────────────────────────────────
+// ─── Middleware ───────────────────────────────────────────────────
 
 app.use("*", logger(console.log));
 
@@ -55,7 +56,7 @@ app.use(
 // O-8 FIX: Rate limiting (after CORS, before routes)
 app.use("*", rateLimitMiddleware);
 
-// ─── Health Check ─────────────────────────────────────────────────
+// ─── Health Check ────────────────────────────────────────────────
 // PF-10 FIX: Added gemini status (does NOT expose the actual key)
 // D57: Added openai status for embedding migration
 
@@ -71,7 +72,7 @@ app.get(`${PREFIX}/health`, (c) => {
   });
 });
 
-// ─── Mount Route Modules ──────────────────────────────────────────
+// ─── Mount Route Modules ─────────────────────────────────────────
 
 app.route("/", authRoutes);
 app.route("/", memberRoutes);
@@ -88,9 +89,9 @@ app.route("/", storageRoutes);
 app.route("/", settingsRoutes);
 app.route("/", aiRoutes);
 app.route("/", whatsappRoutes); // WA: WhatsApp webhook + bot (feature-flagged via WHATSAPP_ENABLED)
-app.route("/", gamificationRoutes); // Sprint 1: Gamification (XP, badges, leaderboard)
+app.route("/", gamificationRoutes); // PR #101: Modularized gamification (XP, badges, streak, goals)
 
-// ─── Catch-all 404 ────────────────────────────────────────────────
+// ─── Catch-all 404 ───────────────────────────────────────────────
 
 app.all("*", (c) => {
   console.log(`[404] ${c.req.method} ${c.req.path}`);
