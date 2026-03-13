@@ -5,6 +5,9 @@
  * sessions_today, correct_streak from student_stats instead of
  * COUNT queries (4 parallel queries -> 2 parallel queries).
  *
+ * PR #108 FIX: POST /challenges/claim now increments
+ * challenges_completed on student_stats for Challenge Hunter badges.
+ *
  * Endpoints:
  *   GET  /gamification/challenges          -- Active challenges + progress
  *   GET  /gamification/challenges/history   -- Completed challenges
@@ -18,6 +21,7 @@ import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX, getAdminClient } from "../../db.ts";
 import { isUuid } from "../../validate.ts";
 import { awardXP } from "../../xp-engine.ts";
+import { incrementChallengesCompleted } from "../../stat-counters.ts";
 import {
   evaluateChallenge,
   selectDailyChallenges,
@@ -90,7 +94,6 @@ challengeRoutes.get(`${PREFIX}/gamification/challenges/history`, async (c: Conte
 });
 
 // --- POST /gamification/challenges/check ---
-// PR #108: Optimized -- reads counters from student_stats instead of COUNT queries
 
 challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -105,7 +108,6 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Contex
   const adminDb = getAdminClient();
   const now = new Date().toISOString();
 
-  // Step 1: Get active challenges
   const { data: activeChallenges, error: fetchErr } = await db
     .from("student_challenges")
     .select("*")
@@ -123,7 +125,7 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Contex
     return ok(c, { checked: 0, completed: 0, results: [] });
   }
 
-  // Step 2: Get student context -- ONLY 2 queries now (was 4)
+  // PR #108: ONLY 2 queries now (was 4)
   const [xpResult, statsResult] = await Promise.all([
     db
       .from("student_xp")
@@ -138,7 +140,6 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Contex
       .maybeSingle(),
   ]);
 
-  // All context from 2 tables -- no more COUNT queries!
   const context: Record<string, number> = {
     xp_today: (xpResult.data?.xp_today as number) ?? 0,
     xp_this_week: (xpResult.data?.xp_this_week as number) ?? 0,
@@ -150,7 +151,6 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Contex
     correct_streak: (statsResult.data?.correct_streak as number) ?? 0,
   };
 
-  // Step 3: Evaluate each challenge
   const results: Array<{ id: string; slug: string; completed: boolean; progress_pct: number }> = [];
   let completedCount = 0;
 
@@ -188,6 +188,7 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Contex
 });
 
 // --- POST /gamification/challenges/claim ---
+// PR #108 FIX: Now increments challenges_completed counter
 
 challengeRoutes.post(`${PREFIX}/gamification/challenges/claim`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -245,6 +246,9 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/claim`, async (c: Contex
   if (claimErr) {
     return err(c, `Claim update failed: ${claimErr.message}`, 500);
   }
+
+  // PR #108: Increment challenges_completed for Challenge Hunter badges
+  incrementChallengesCompleted(user.id);
 
   return ok(c, { claimed: true, challenge_slug: challenge.challenge_slug, xp_awarded: xpReward });
 });

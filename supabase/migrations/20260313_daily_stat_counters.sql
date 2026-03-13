@@ -1,10 +1,12 @@
 -- Daily stat counters for efficient challenge evaluation
 -- Eliminates O(n) COUNT queries for reviews_today/sessions_today
+-- Also adds challenges_completed for Challenge Hunter badges
 
 ALTER TABLE student_stats
   ADD COLUMN IF NOT EXISTS reviews_today INTEGER NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS sessions_today INTEGER NOT NULL DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS correct_streak INTEGER NOT NULL DEFAULT 0;
+  ADD COLUMN IF NOT EXISTS correct_streak INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS challenges_completed INTEGER NOT NULL DEFAULT 0;
 
 -- Atomic increment RPC -- whitelisted field names to prevent SQL injection
 CREATE OR REPLACE FUNCTION increment_daily_stat(
@@ -26,6 +28,10 @@ BEGIN
   ELSIF p_field = 'correct_streak' THEN
     UPDATE student_stats
       SET correct_streak = COALESCE(correct_streak, 0) + p_amount
+      WHERE student_id = p_student_id;
+  ELSIF p_field = 'challenges_completed' THEN
+    UPDATE student_stats
+      SET challenges_completed = COALESCE(challenges_completed, 0) + p_amount
       WHERE student_id = p_student_id;
   ELSE
     RAISE EXCEPTION 'Invalid field: %', p_field;

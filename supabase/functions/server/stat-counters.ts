@@ -1,10 +1,11 @@
 /**
  * stat-counters.ts -- Fire-and-forget daily stat counter helpers
  *
- * Provides atomic increment/reset for student_stats daily counters:
- *   reviews_today   -- incremented per review, reset at midnight
- *   sessions_today  -- incremented per session complete, reset at midnight
- *   correct_streak  -- incremented on correct, reset on incorrect
+ * Provides atomic increment/reset for student_stats counters:
+ *   reviews_today        -- incremented per review, reset at midnight
+ *   sessions_today       -- incremented per session complete, reset at midnight
+ *   correct_streak       -- incremented on correct, reset on incorrect
+ *   challenges_completed -- incremented when challenge is claimed (NEVER reset)
  *
  * Uses increment_daily_stat() RPC for atomic updates.
  * Falls back to read-then-write if RPC unavailable.
@@ -24,6 +25,7 @@ export const VALID_STAT_FIELDS = [
   "reviews_today",
   "sessions_today",
   "correct_streak",
+  "challenges_completed",
 ] as const;
 
 export type StatField = typeof VALID_STAT_FIELDS[number];
@@ -74,7 +76,6 @@ export async function resetCorrectStreak(studentId: string): Promise<void> {
     });
 
     if (error) {
-      // Fallback: direct update
       await db
         .from("student_stats")
         .update({ correct_streak: 0 })
@@ -88,20 +89,16 @@ export async function resetCorrectStreak(studentId: string): Promise<void> {
   }
 }
 
-// --- Convenience wrappers (used by xp-hooks) ---
+// --- Convenience wrappers (used by xp-hooks + challenges) ---
 
 /**
  * Increment reviews_today and handle correct_streak.
  * Called from review hooks after XP award.
- *
- * @param studentId -- student UUID
- * @param isCorrect -- whether the review was correct (grade >= 3)
  */
 export function incrementReviewCounter(
   studentId: string,
   isCorrect: boolean,
 ): void {
-  // Fire-and-forget: don't await
   (async () => {
     await incrementStat(studentId, "reviews_today", 1);
 
@@ -122,6 +119,17 @@ export function incrementReviewCounter(
 export function incrementSessionCounter(studentId: string): void {
   incrementStat(studentId, "sessions_today", 1).catch((e) =>
     console.warn("[Stat Counters] incrementSessionCounter:", (e as Error).message),
+  );
+}
+
+/**
+ * Increment challenges_completed.
+ * Called from POST /challenges/claim after successful claim.
+ * This counter is NEVER reset (lifetime total).
+ */
+export function incrementChallengesCompleted(studentId: string): void {
+  incrementStat(studentId, "challenges_completed", 1).catch((e) =>
+    console.warn("[Stat Counters] incrementChallengesCompleted:", (e as Error).message),
   );
 }
 
