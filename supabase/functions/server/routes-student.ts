@@ -1,5 +1,5 @@
 /**
- * routes-student.tsx — Student-facing content & notes for Axon v4.4
+ * routes-student.ts — Student-facing content & notes for Axon v4.4
  *
  * Professor-created learning instruments (CRUD via factory):
  *   flashcards      — keyword + summary scoped, soft-delete
@@ -25,9 +25,6 @@ const studentRoutes = new Hono();
 // ═══════════════════════════════════════════════════════════════════════
 
 // 1. Flashcards — Keyword + Summary -> Flashcard (SACRED, soft-delete)
-//    LIST requires summary_id. Optional filter by keyword_id.
-//    CREATE requires both keyword_id and summary_id (via parentKey + requiredFields).
-//    front_image_url / back_image_url: optional Supabase Storage paths for images.
 registerCrud(studentRoutes, {
   table: "flashcards",
   slug: "flashcards",
@@ -44,8 +41,6 @@ registerCrud(studentRoutes, {
 });
 
 // 2. Quiz Questions — Keyword + Summary -> QuizQuestion (SACRED, soft-delete)
-//    LIST requires summary_id. Optional filter by keyword_id.
-//    quiz_id is OPTIONAL on create (loose questions allowed; quiz_id in createFields not requiredFields).
 registerCrud(studentRoutes, {
   table: "quiz_questions",
   slug: "quiz-questions",
@@ -84,8 +79,6 @@ registerCrud(studentRoutes, {
 });
 
 // 2b. Quizzes — Summary -> Quiz (CRUD, soft-delete)
-//    LIST requires summary_id. Optional filter by source, is_active.
-//    created_by auto-set via hasCreatedBy. source is REQUIRED.
 registerCrud(studentRoutes, {
   table: "quizzes",
   slug: "quizzes",
@@ -125,11 +118,9 @@ registerCrud(studentRoutes, {
 
 // ═══════════════════════════════════════════════════════════════════════
 // STUDENT-OWNED NOTES
-// scopeToUser = "student_id" → auto-set on create, auto-filtered on list/update/delete
 // ═══════════════════════════════════════════════════════════════════════
 
 // 4. Keyword Student Notes — per-keyword personal notes
-//    Has deleted_at but NO is_active column.
 registerCrud(studentRoutes, {
   table: "kw_student_notes",
   slug: "kw-student-notes",
@@ -146,7 +137,6 @@ registerCrud(studentRoutes, {
 });
 
 // 5. Text Annotations — highlights + notes on summaries
-//    Has deleted_at but NO is_active column.
 registerCrud(studentRoutes, {
   table: "text_annotations",
   slug: "text-annotations",
@@ -163,7 +153,6 @@ registerCrud(studentRoutes, {
 });
 
 // 6. Video Notes — timestamped notes on videos
-//    Has deleted_at but NO is_active column.
 registerCrud(studentRoutes, {
   table: "video_notes",
   slug: "video-notes",

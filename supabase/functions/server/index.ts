@@ -9,6 +9,7 @@
  * D57: Health check now reports openai status alongside gemini.
  * GAMIFICATION: Sprint 1 — gamificationRoutes mounted.
  * PR #101: Modularized gamificationRoutes from monolithic 53KB file.
+ * PR #102: Renamed .tsx → .ts (no JSX), deduplicated calculateLevel.
  */
 
 import { Hono } from "npm:hono";
@@ -17,22 +18,22 @@ import { logger } from "npm:hono/logger";
 import { PREFIX } from "./db.ts";
 import { rateLimitMiddleware } from "./rate-limit.ts";
 
-import { authRoutes } from "./routes-auth.tsx";
+import { authRoutes } from "./routes-auth.ts";
 import { memberRoutes } from "./routes/members/index.ts";
 import { content } from "./routes/content/index.ts";
-import { studentRoutes } from "./routes-student.tsx";
+import { studentRoutes } from "./routes-student.ts";
 import { studyRoutes } from "./routes/study/index.ts";
-import { studyQueueRoutes } from "./routes-study-queue.tsx";
-import { modelRoutes } from "./routes-models.tsx";
+import { studyQueueRoutes } from "./routes-study-queue.ts";
+import { modelRoutes } from "./routes-models.ts";
 import { planRoutes } from "./routes/plans/index.ts";
-import { billingRoutes } from "./routes-billing.tsx";
+import { billingRoutes } from "./routes-billing.ts";
 import { muxRoutes } from "./routes/mux/index.ts";
 import { searchRoutes } from "./routes/search/index.ts";
-import { storageRoutes } from "./routes-storage.tsx";
+import { storageRoutes } from "./routes-storage.ts";
 import { settingsRoutes } from "./routes/settings/index.ts";
 import { aiRoutes } from "./routes/ai/index.ts";
-import { whatsappRoutes } from "./routes/whatsapp/index.ts"; // WA: WhatsApp webhook + bot (feature-flagged via WHATSAPP_ENABLED)
-import { gamificationRoutes } from "./routes/gamification/index.ts"; // PR #101: Modularized (was routes-gamification.tsx)
+import { whatsappRoutes } from "./routes/whatsapp/index.ts";
+import { gamificationRoutes } from "./routes/gamification/index.ts";
 
 const app = new Hono();
 
@@ -88,8 +89,8 @@ app.route("/", searchRoutes);
 app.route("/", storageRoutes);
 app.route("/", settingsRoutes);
 app.route("/", aiRoutes);
-app.route("/", whatsappRoutes); // WA: WhatsApp webhook + bot (feature-flagged via WHATSAPP_ENABLED)
-app.route("/", gamificationRoutes); // PR #101: Modularized gamification (XP, badges, streak, goals)
+app.route("/", whatsappRoutes);
+app.route("/", gamificationRoutes);
 
 // ─── Catch-all 404 ───────────────────────────────────────────────
 

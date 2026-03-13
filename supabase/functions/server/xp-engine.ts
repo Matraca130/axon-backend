@@ -16,6 +16,10 @@
  *   §5.4 — institution_id resolved by caller (hooks)
  *   §7.14 — No XP for notes/annotations (overjustification)
  *   §10 — Multipliers SUM, don't multiply
+ *
+ * EXPORTS (PR #102):
+ *   LEVEL_THRESHOLDS — Single source of truth for level XP boundaries
+ *   calculateLevel   — XP to level conversion (also used by gamification helpers)
  */
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
@@ -65,9 +69,10 @@ export const XP_TABLE: Record<string, number> = {
 };
 
 // ─── Level Thresholds ─────────────────────────────────────────
-// Same formula as award_xp() RPC — keep in sync
+// Single source of truth — used by xp-engine fallback AND
+// gamification helpers (re-exported). Keep in sync with award_xp() RPC.
 
-const LEVEL_THRESHOLDS: [number, number][] = [
+export const LEVEL_THRESHOLDS: [number, number][] = [
   [10000, 12],
   [7500, 11],
   [5500, 10],
@@ -81,7 +86,7 @@ const LEVEL_THRESHOLDS: [number, number][] = [
   [100, 2],
 ];
 
-function calculateLevel(totalXp: number): number {
+export function calculateLevel(totalXp: number): number {
   for (const [threshold, level] of LEVEL_THRESHOLDS) {
     if (totalXp >= threshold) return level;
   }

@@ -1,5 +1,5 @@
 /**
- * routes-study-queue.tsx — Study Queue (Algorithmic Priority Queue) for Axon v4.4
+ * routes-study-queue.ts — Study Queue (Algorithmic Priority Queue) for Axon v4.4
  *
  * GET /study-queue — Returns a prioritized list of flashcards to study.
  *
@@ -32,7 +32,7 @@ const NEED_CONFIG = {
   graceDays: 1,
 };
 
-// ─── Constants ────────────────────────────────────────────────────
+// ─── Constants ──────────────────────────────────────────────────────
 
 const MAX_FALLBACK_FLASHCARDS = 10_000;
 const DEFAULT_DOMINATION_BASE = 0.70;
@@ -74,13 +74,12 @@ function calculateNeedScore(input: NeedScoreInput, now: Date): number {
     NEED_CONFIG.fragilityWeight * needFragility +
     NEED_CONFIG.noveltyWeight * needNovelty;
 
-  // §6.4: clinical_priority exponential multiplier
   const priorityMultiplier = 1.0 + Math.pow(2.0, clinicalPriority * 2.0);
 
   return Math.max(0, baseScore * priorityMultiplier);
 }
 
-// ─── Retention: FSRS v4 power-law (matches fsrs-v4.ts) ───────────
+// ─── Retention: FSRS v4 power-law (matches fsrs-v4.ts) ───────────────
 
 function calculateRetention(
   lastReviewAt: string | null,
@@ -89,7 +88,6 @@ function calculateRetention(
 ): number {
   if (!lastReviewAt || stabilityDays <= 0) return 0;
   const daysSince = (now.getTime() - new Date(lastReviewAt).getTime()) / (1000 * 60 * 60 * 24);
-  // FSRS v4 power-law forgetting curve (NOT exponential)
   return Math.max(0, Math.min(1, Math.pow(1 + daysSince / (9 * stabilityDays), -1)));
 }
 
@@ -102,20 +100,15 @@ function getMasteryColor(
 ): "blue" | "green" | "yellow" | "orange" | "red" | "gray" {
   if (pKnow <= 0) return "gray";
 
-  // Display mastery = p_know × R
   const displayMastery = pKnow * (retention > 0 ? retention : (pKnow > 0 ? 1.0 : 0.0));
-
-  // Domination threshold (§6.3): threshold = 0.70 + (priority × 0.20)
   const threshold = DEFAULT_DOMINATION_BASE + clinicalPriority * DEFAULT_DOMINATION_PRIORITY_SCALE;
-
-  // Relative Δ = displayMastery / threshold
   const delta = threshold > 0 ? displayMastery / threshold : 0;
 
-  if (delta >= 1.10) return "blue";    // Superado
-  if (delta >= 1.00) return "green";   // Dominado
-  if (delta >= 0.85) return "yellow";  // Casi
-  if (delta >= 0.50) return "orange";  // En progreso
-  return "red";                         // Critico
+  if (delta >= 1.10) return "blue";
+  if (delta >= 1.00) return "green";
+  if (delta >= 0.85) return "yellow";
+  if (delta >= 0.50) return "orange";
+  return "red";
 }
 
 // ─── Course → Summary IDs resolution (fallback) ─────────────────
@@ -229,7 +222,7 @@ async function getStudyQueueFromRpc(
   }
 }
 
-// ─── Fallback: JS-based study queue ────────────────────────────────
+// ─── Fallback: JS-based study queue ──────────────────────────────
 
 async function getStudyQueueFromJs(
   db: SupabaseClient,
@@ -261,7 +254,6 @@ async function getStudyQueueFromJs(
     .select("subtopic_id, p_know, max_p_know, total_attempts, correct_attempts, delta")
     .eq("student_id", userId);
 
-  // Fetch keywords for clinical_priority
   const keywordsQuery = db
     .from("keywords")
     .select("id, clinical_priority")
@@ -286,7 +278,6 @@ async function getStudyQueueFromJs(
     return { queue: [], totalDue: 0, totalNew: 0, totalInQueue: 0 };
   }
 
-  // Build lookup maps
   const bktMap = new Map<string, { p_know: number; max_p_know: number; total_attempts: number }>();
   for (const bkt of bktResult.data ?? []) {
     bktMap.set(bkt.subtopic_id, {

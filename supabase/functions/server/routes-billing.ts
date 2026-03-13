@@ -1,5 +1,5 @@
 /**
- * routes-billing.tsx — Stripe Billing integration for Axon v4.4
+ * routes-billing.ts — Stripe Billing integration for Axon v4.4
  *
  * N-10 FIX: Timing-safe Stripe signature verification.
  * O-7 FIX: Webhook idempotency via processed_webhook_events table.
@@ -176,8 +176,7 @@ billingRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
   const event = JSON.parse(rawBody);
   const admin = getAdminClient();
 
-  // O-7 FIX: Idempotency check — prevent double-processing on retries.
-  // Graceful: if table doesn't exist yet, skip the check and process anyway.
+  // O-7 FIX: Idempotency check
   const eventId: string | undefined = event.id;
   if (eventId) {
     try {
@@ -193,7 +192,6 @@ billingRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
         return ok(c, { received: true, deduplicated: true });
       }
     } catch {
-      // Table doesn't exist yet — proceed without idempotency check
       console.warn("[Stripe Webhook] processed_webhook_events table not found, skipping idempotency");
     }
   }
@@ -212,19 +210,15 @@ billingRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
           break;
         }
 
-        // W7-BILL02 FIX: Validate metadata UUIDs before DB operations.
-        // These come from our own checkout-session creation, but an attacker
-        // could forge a webhook event with malformed UUIDs.
+        // W7-BILL02 FIX: Validate metadata UUIDs
         if (!isUuid(institutionId) || !isUuid(planId) || !isUuid(userId)) {
           console.error(
             `[Stripe Webhook] Invalid UUID in metadata: institution_id=${institutionId}, plan_id=${planId}, user_id=${userId}`,
           );
-          // Return 200 so Stripe doesn't retry with the same bad data
           break;
         }
 
-        // W7-BILL01 FIX: Check INSERT error — throw to trigger Stripe retry.
-        // A failed subscription INSERT means the user paid but has no access.
+        // W7-BILL01 FIX: Check INSERT error
         const { error: insertErr } = await admin.from("institution_subscriptions").insert({
           institution_id: institutionId,
           plan_id: planId,
@@ -240,9 +234,7 @@ billingRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
           throw new Error(`Insert subscription failed: ${insertErr.message}`);
         }
 
-        // W7-BILL01 FIX: Check UPDATE error — log but don't throw.
-        // The subscription INSERT succeeded, so the user has access.
-        // Membership plan_id update is secondary and can be retried.
+        // W7-BILL01 FIX: Check UPDATE error (non-fatal)
         const { error: updateErr } = await admin.from("memberships")
           .update({ institution_plan_id: planId, updated_at: new Date().toISOString() })
           .eq("user_id", userId).eq("institution_id", institutionId);
@@ -257,7 +249,6 @@ billingRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
 
       case "customer.subscription.updated": {
         const sub = event.data.object;
-        // W7-BILL01 FIX: Check UPDATE error — throw to trigger Stripe retry.
         const { error: updateErr } = await admin.from("institution_subscriptions").update({
           status: sub.status,
           current_period_start: sub.current_period_start ? new Date(sub.current_period_start * 1000).toISOString() : null,
@@ -277,7 +268,6 @@ billingRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
 
       case "customer.subscription.deleted": {
         const sub = event.data.object;
-        // W7-BILL01 FIX: Check UPDATE error — throw to trigger Stripe retry.
         const { error: deleteErr } = await admin.from("institution_subscriptions").update({
           status: "canceled",
           canceled_at: new Date().toISOString(),
@@ -294,7 +284,6 @@ billingRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
       case "invoice.payment_failed": {
         const invoice = event.data.object;
         if (invoice.subscription) {
-          // W7-BILL01 FIX: Check UPDATE error — throw to trigger Stripe retry.
           const { error: failErr } = await admin.from("institution_subscriptions").update({
             status: "past_due",
             updated_at: new Date().toISOString(),
@@ -312,7 +301,7 @@ billingRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
         console.log(`[Stripe Webhook] Unhandled event type: ${event.type}`);
     }
 
-    // O-7: Mark event as processed (best-effort, don't fail on error)
+    // O-7: Mark event as processed (best-effort)
     if (eventId) {
       try {
         await admin.from("processed_webhook_events").insert({
@@ -321,7 +310,7 @@ billingRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
           source: "stripe",
         });
       } catch {
-        // Table might not exist yet — log but don't fail
+        // Table might not exist yet
       }
     }
 
@@ -373,7 +362,7 @@ async function verifyStripeSignature(
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
 
-    // N-10 FIX: Constant-time comparison (was === before)
+    // N-10 FIX: Constant-time comparison
     return parts.signatures.some((s) => timingSafeEqual(s, expected));
   } catch {
     return false;
@@ -381,16 +370,12 @@ async function verifyStripeSignature(
 }
 
 // ─── GET /billing/subscription-status ────────────────────────────────
-// W3-11 FIX: IDOR vulnerability — was accepting user_id from query param,
-// allowing any authenticated user to view another user's subscription.
-// Now uses the authenticated user's ID from the JWT token.
 
 billingRoutes.get(`${PREFIX}/billing/subscription-status`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { user, db } = auth;  // W3-11 FIX: extract user from auth
+  const { user, db } = auth;
 
-  // W3-11 FIX: Use authenticated user's ID, NOT query param
   const userId = user.id;
   const institutionId = c.req.query("institution_id");
   if (!isUuid(institutionId)) return err(c, "institution_id must be a valid UUID", 400);

@@ -1,5 +1,5 @@
 /**
- * routes-models.tsx — 3D Models, Pins, Notes, Layers, Parts & Upload for Axon v4.4
+ * routes-models.ts — 3D Models, Pins, Notes, Layers, Parts & Upload for Axon v4.4
  *
  * CRUD factory entities:
  *   models_3d       — professor-created 3D models per topic (SACRED, soft-delete)
@@ -25,22 +25,9 @@ import type { Context } from "npm:hono";
 
 const modelRoutes = new Hono();
 
-// ═══════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 // ── Custom: GET /models-3d/batch (H2 audit fix) ───────────────
-// ═══════════════════════════════════════════════════════════════
-//
-// Batch-fetch models for multiple topics in a single DB query.
-// Replaces N individual GET /models-3d?topic_id=X calls with 1 request.
-//
-// Query:    GET /models-3d/batch?topic_ids=uuid1,uuid2,uuid3
-// Response: { data: { [topicId]: Model3D[] } }
-//
-// Security: Uses user client (RLS) + institution scoping via first
-// topic_id (all topics in a batch come from the same content tree).
-//
-// IMPORTANT: This route MUST be registered BEFORE registerCrud
-// for "models-3d" to prevent Hono from matching "batch" as ":id".
-// ═══════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 
 modelRoutes.get(`${PREFIX}/models-3d/batch`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -57,7 +44,6 @@ modelRoutes.get(`${PREFIX}/models-3d/batch`, async (c: Context) => {
     return err(c, "Maximum 200 topic_ids per batch request", 400);
   }
 
-  // Validate UUID format to prevent injection
   const uuidRegex =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const invalidIds = topicIds.filter((id) => !uuidRegex.test(id));
@@ -69,8 +55,6 @@ modelRoutes.get(`${PREFIX}/models-3d/batch`, async (c: Context) => {
     );
   }
 
-  // Institution scoping: resolve from first topic_id (all topics come
-  // from the same institution's content tree in ThreeDView).
   try {
     const { data: instData, error: instErr } = await db.rpc(
       "resolve_parent_institution",
@@ -92,7 +76,6 @@ modelRoutes.get(`${PREFIX}/models-3d/batch`, async (c: Context) => {
     return err(c, "Institution scoping check failed", 500);
   }
 
-  // Use user client (respects RLS) — consistent with CRUD factory
   const { data: models, error: dbErr } = await db
     .from("models_3d")
     .select("*")
@@ -105,7 +88,6 @@ modelRoutes.get(`${PREFIX}/models-3d/batch`, async (c: Context) => {
     return err(c, `Database error: ${dbErr.message}`, 500);
   }
 
-  // Group by topic_id — initialize all requested IDs with empty arrays
   const grouped: Record<string, typeof models> = {};
   for (const tid of topicIds) {
     grouped[tid] = [];
@@ -120,11 +102,10 @@ modelRoutes.get(`${PREFIX}/models-3d/batch`, async (c: Context) => {
   return ok(c, grouped);
 });
 
-// ═══════════════════════════════════════════════════════════════
-// ── CRUD Factory Entities ─────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
+// ── CRUD Factory Entities ─────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════
 
-// 1. Models 3D — Topic -> Model3D (SACRED, soft-delete, orderable)
 registerCrud(modelRoutes, {
   table: "models_3d",
   slug: "models-3d",
@@ -154,9 +135,6 @@ registerCrud(modelRoutes, {
   ],
 });
 
-// 2. Model 3D Pins — Model -> Pin (professor-created, orderable, hard delete)
-//    NOTE: DB column is "title" (not "label"). Verified in schema-3d-ai.md.
-//    Frontend sends { title: "..." } — must match createFields/updateFields.
 registerCrud(modelRoutes, {
   table: "model_3d_pins",
   slug: "model-3d-pins",
@@ -188,8 +166,6 @@ registerCrud(modelRoutes, {
   ],
 });
 
-// 3. Model 3D Notes — student personal notes on models
-//    Has deleted_at but NO is_active column.
 registerCrud(modelRoutes, {
   table: "model_3d_notes",
   slug: "model-3d-notes",
@@ -205,8 +181,6 @@ registerCrud(modelRoutes, {
   updateFields: ["geometry", "note"],
 });
 
-// 4. Model Layers — Grouping layers for model parts (e.g. "Skeletal System")
-//    No soft-delete, no created_by, no is_active. Hard delete.
 registerCrud(modelRoutes, {
   table: "model_layers",
   slug: "model-layers",
@@ -227,8 +201,6 @@ registerCrud(modelRoutes, {
   ],
 });
 
-// 5. Model Parts — Individual meshes that can be toggled/colored
-//    No soft-delete, no created_by, no is_active. Hard delete.
 registerCrud(modelRoutes, {
   table: "model_parts",
   slug: "model-parts",
@@ -257,21 +229,14 @@ registerCrud(modelRoutes, {
   ],
 });
 
-// ═══════════════════════════════════════════════════════════════
-// ── Custom: POST /upload-model-3d ─────────────────────────────
-// ═══════════════════════════════════════════════════════════════
-//
-// Uploads .glb/.gltf files to Supabase Storage bucket "axon-models-3d".
-// Validates extension, size (≤100MB), and GLB magic bytes.
-// Returns { file_url, file_size_bytes, file_format }.
-//
-// The frontend calls this BEFORE POST /models-3d to get the file_url.
-// Frontend code: model3d-api.ts → uploadAndCreateModel()
+// ═════════════════════════════════════════════════════════════════
+// ── Custom: POST /upload-model-3d ─────────────────────────────────
+// ═════════════════════════════════════════════════════════════════
 
 const MODEL_BUCKET = "axon-models-3d";
-const MAX_MODEL_SIZE = 100 * 1024 * 1024; // 100 MB
+const MAX_MODEL_SIZE = 100 * 1024 * 1024;
 const ALLOWED_MODEL_EXTENSIONS = [".glb", ".gltf"];
-const GLB_MAGIC = new Uint8Array([0x67, 0x6c, 0x54, 0x46]); // "glTF"
+const GLB_MAGIC = new Uint8Array([0x67, 0x6c, 0x54, 0x46]);
 
 let modelBucketReady = false;
 
@@ -282,7 +247,7 @@ async function ensureModelBucket(): Promise<void> {
   const exists = buckets?.some((b: { name: string }) => b.name === MODEL_BUCKET);
   if (!exists) {
     const { error: createErr } = await admin.storage.createBucket(MODEL_BUCKET, {
-      public: true, // GLB files need to be publicly fetchable by Three.js
+      public: true,
       fileSizeLimit: MAX_MODEL_SIZE,
     });
     if (createErr) {
@@ -316,7 +281,6 @@ modelRoutes.post(`${PREFIX}/upload-model-3d`, async (c: Context) => {
     return err(c, "Missing 'file' field in form data", 400);
   }
 
-  // Validate extension
   const fileName = file.name.toLowerCase();
   const ext = fileName.substring(fileName.lastIndexOf("."));
   if (!ALLOWED_MODEL_EXTENSIONS.includes(ext)) {
@@ -327,7 +291,6 @@ modelRoutes.post(`${PREFIX}/upload-model-3d`, async (c: Context) => {
     );
   }
 
-  // Validate size
   if (file.size > MAX_MODEL_SIZE) {
     return err(
       c,
@@ -336,7 +299,6 @@ modelRoutes.post(`${PREFIX}/upload-model-3d`, async (c: Context) => {
     );
   }
 
-  // Validate GLB magic bytes
   if (ext === ".glb") {
     try {
       const header = new Uint8Array(await file.slice(0, 4).arrayBuffer());
@@ -345,18 +307,16 @@ modelRoutes.post(`${PREFIX}/upload-model-3d`, async (c: Context) => {
         return err(c, "Invalid GLB file (bad magic bytes)", 400);
       }
     } catch {
-      // If header read fails, skip check (Edge Function env may behave differently)
+      // Skip check if header read fails
     }
   }
 
-  // Ensure bucket exists
   try {
     await ensureModelBucket();
   } catch (e) {
     return err(c, `Storage initialization failed: ${(e as Error).message}`, 500);
   }
 
-  // Generate unique storage path
   const timestamp = Date.now();
   const random = Math.random().toString(36).substring(2, 8);
   const sanitized = fileName
@@ -365,7 +325,6 @@ modelRoutes.post(`${PREFIX}/upload-model-3d`, async (c: Context) => {
     .substring(0, 60);
   const storagePath = `models/${user.id}/${timestamp}-${random}-${sanitized}`;
 
-  // Upload to Supabase Storage
   const admin = getAdminClient();
   const fileBuffer = await file.arrayBuffer();
 
@@ -380,7 +339,6 @@ modelRoutes.post(`${PREFIX}/upload-model-3d`, async (c: Context) => {
     return err(c, `Upload failed: ${uploadError.message}`, 500);
   }
 
-  // Get public URL (bucket is public)
   const { data: urlData } = admin.storage
     .from(MODEL_BUCKET)
     .getPublicUrl(storagePath);

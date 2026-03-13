@@ -1,5 +1,5 @@
 /**
- * routes-storage.tsx — File storage routes for Axon v4.4
+ * routes-storage.ts — File storage routes for Axon v4.4
  *
  * O-2 FIX: signed-url and delete routes use safeJson().
  * O-6 FIX: base64 upload wraps atob() in try/catch.
@@ -13,21 +13,21 @@ import type { Context } from "npm:hono";
 
 const storageRoutes = new Hono();
 
-// ─── Constants ────────────────────────────────────────────────────────
+// ─── Constants ──────────────────────────────────────────────────────
 
 const BUCKET_NAME = "axon-images";
-const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+const MAX_FILE_SIZE = 5 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = [
   "image/jpeg",
   "image/png",
   "image/webp",
   "image/gif",
 ];
-const SIGNED_URL_EXPIRY = 3600; // 1 hour
+const SIGNED_URL_EXPIRY = 3600;
 const VALID_FOLDERS = ["flashcards", "summaries", "general"];
-const MAX_BATCH_PATHS = 100; // P-7 FIX
+const MAX_BATCH_PATHS = 100;
 
-// ─── Bucket Init ─────────────────────────────────────────────────────
+// ─── Bucket Init ───────────────────────────────────────────────────
 
 let bucketReady = false;
 
@@ -51,7 +51,7 @@ async function ensureBucket(): Promise<void> {
   bucketReady = true;
 }
 
-// ─── POST /storage/upload ─────────────────────────────────────────
+// ─── POST /storage/upload ───────────────────────────────────────────
 
 storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -71,7 +71,6 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
   let originalName: string;
 
   if (contentType.includes("multipart/form-data")) {
-    // ── Multipart upload ────────────────────────────────────────
     const formData = await c.req.formData();
     const file = formData.get("file") as File | null;
     folder = (formData.get("folder") as string) || "general";
@@ -98,8 +97,6 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
     mimeType = file.type;
     originalName = file.name;
   } else if (contentType.includes("application/json")) {
-    // ── Base64 JSON upload (fallback) ───────────────────────────
-    // P-4 FIX: Use safeJson instead of raw c.req.json()
     const body = await safeJson(c);
     if (!body) return err(c, "Invalid or missing JSON body", 400);
 
@@ -114,7 +111,6 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
       );
     }
 
-    // O-6 FIX: Wrap atob() in try/catch
     let binaryString: string;
     try {
       binaryString = atob(body.base64 as string);
@@ -147,12 +143,10 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
     );
   }
 
-  // Sanitize folder
   if (!VALID_FOLDERS.includes(folder)) {
     folder = "general";
   }
 
-  // Generate unique storage path
   const ext = originalName.split(".").pop() || "jpg";
   const timestamp = Date.now();
   const random = Math.random().toString(36).substring(2, 8);
@@ -195,7 +189,7 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
   );
 });
 
-// ─── POST /storage/signed-url ─────────────────────────────────────
+// ─── POST /storage/signed-url ───────────────────────────────────────
 
 storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -206,12 +200,10 @@ storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
 
   const admin = getAdminClient();
 
-  // ── Batch mode ──────────────────────────────────────────────
   if (body.paths && Array.isArray(body.paths)) {
     if (body.paths.length === 0) {
       return ok(c, { signedUrls: [], expiresIn: SIGNED_URL_EXPIRY });
     }
-    // P-7 FIX: Cap batch size
     if (body.paths.length > MAX_BATCH_PATHS) {
       return err(c, `Maximum ${MAX_BATCH_PATHS} paths per batch request`, 400);
     }
@@ -227,7 +219,6 @@ storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
     return ok(c, { signedUrls: data, expiresIn: SIGNED_URL_EXPIRY });
   }
 
-  // ── Single mode ─────────────────────────────────────────────
   if (!body.path) {
     return err(c, "Missing 'path' or 'paths' in request body", 400);
   }
@@ -247,7 +238,7 @@ storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
   });
 });
 
-// ─── DELETE /storage/delete ───────────────────────────────────────
+// ─── DELETE /storage/delete ─────────────────────────────────────────
 
 storageRoutes.delete(`${PREFIX}/storage/delete`, async (c: Context) => {
   const auth = await authenticate(c);

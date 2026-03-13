@@ -1,5 +1,5 @@
 /**
- * routes-auth.tsx — Authentication & Profile management for Axon v4.4
+ * routes-auth.ts — Authentication & Profile management for Axon v4.4
  *
  * Routes:
  *   POST /signup  — Register new user (admin client, no auth required)
