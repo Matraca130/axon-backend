@@ -9,6 +9,8 @@
  * It is resolved server-side from video→summary→resolve_parent_institution.
  * This prevents an attacker from associating view data with arbitrary
  * institutions or tracking views against videos they don't have access to.
+ *
+ * GAMIFICATION (PR #99): xpHookForVideoComplete wired on first completion.
  */
 
 import { Hono } from "npm:hono";
@@ -21,6 +23,7 @@ import {
   ALL_ROLES,
 } from "../../auth-helpers.ts";
 import { fireFirstCompletionSignal } from "./helpers.ts";
+import { xpHookForVideoComplete } from "../../xp-hooks.ts";
 
 export const muxTrackingRoutes = new Hono();
 
@@ -76,7 +79,11 @@ muxTrackingRoutes.post(`${PREFIX}/mux/track-view`, async (c: Context) => {
   if (!rpcError && rpcData) {
     const view = rpcData.view;
     const isFirstCompletion = rpcData.first_completion;
-    if (isFirstCompletion) await fireFirstCompletionSignal(db, user.id, video_id);
+    if (isFirstCompletion) {
+      await fireFirstCompletionSignal(db, user.id, video_id);
+      // PR #99: Award video completion XP (20 XP, fire-and-forget)
+      xpHookForVideoComplete(user.id, video_id, institution_id);
+    }
     return ok(c, { ...view, first_completion: isFirstCompletion });
   }
 
@@ -98,6 +105,10 @@ muxTrackingRoutes.post(`${PREFIX}/mux/track-view`, async (c: Context) => {
   }, { onConflict: "video_id,user_id" }).select().single();
 
   if (upsertErr) return err(c, `Track view failed: ${upsertErr.message}`, 500);
-  if (isFirstCompletion) await fireFirstCompletionSignal(db, user.id, video_id);
+  if (isFirstCompletion) {
+    await fireFirstCompletionSignal(db, user.id, video_id);
+    // PR #99: Award video completion XP (20 XP, fire-and-forget)
+    xpHookForVideoComplete(user.id, video_id, institution_id);
+  }
   return ok(c, { ...view, first_completion: isFirstCompletion });
 });

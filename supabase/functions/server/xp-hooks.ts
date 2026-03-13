@@ -12,6 +12,19 @@
  *   §4.3 — Fire-and-forget, never awaited
  *   §5.4 — institution_id resolved via course lookup chain
  *   §7.14 — No XP for notes/annotations
+ *
+ * COMPLETE COVERAGE (PR #99):
+ *   All 11 XP_TABLE actions now have hooks:
+ *   - review_flashcard / review_correct → xpHookForReview
+ *   - quiz_answer / quiz_correct → xpHookForQuizAttempt
+ *   - complete_session → xpHookForSessionComplete
+ *   - complete_reading → xpHookForReadingComplete
+ *   - complete_video → xpHookForVideoComplete (NEW)
+ *   - complete_plan_task → xpHookForPlanTaskComplete (NEW)
+ *   - complete_plan → xpHookForPlanComplete (NEW)
+ *   - rag_question → xpHookForRagQuestion (NEW)
+ *   - streak_daily → handled inline in POST /daily-check-in
+ *   + xpHookForBatchReviews (NEW) — batch-aware review XP
  */
 
 import type { AfterWriteParams } from "./crud-factory.ts";
@@ -297,6 +310,266 @@ export function xpHookForReadingComplete(params: AfterWriteParams): void {
       });
     } catch (e) {
       console.warn("[XP Hook] reading error:", (e as Error).message);
+    }
+  })();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// NEW HOOKS (PR #99) — Complete XP_TABLE coverage
+// ═══════════════════════════════════════════════════════════════
+
+// ─── Hook: Video Complete XP ─────────────────────────────────
+/**
+ * Called directly from tracking.ts on first video completion.
+ * Awards complete_video (20 XP).
+ *
+ * NOT an afterWrite hook — called explicitly because tracking.ts
+ * uses upsert_video_view RPC (not CRUD factory).
+ *
+ * @param studentId — The student's UUID
+ * @param videoId — The video UUID
+ * @param institutionId — Already resolved by tracking.ts
+ */
+export function xpHookForVideoComplete(
+  studentId: string,
+  videoId: string,
+  institutionId: string,
+): void {
+  (async () => {
+    try {
+      const bonus = await getBonusContext(studentId);
+
+      await awardXP({
+        db: getAdminClient(),
+        studentId,
+        institutionId,
+        action: "complete_video",
+        xpBase: XP_TABLE.complete_video,
+        sourceType: "video",
+        sourceId: videoId,
+        currentStreak: bonus.currentStreak,
+      });
+    } catch (e) {
+      console.warn("[XP Hook] video complete error:", (e as Error).message);
+    }
+  })();
+}
+
+// ─── Hook: Study Plan Task Complete XP ───────────────────────
+/**
+ * Triggered after PUT /study-plan-tasks/:id (when status → completed).
+ * Awards complete_plan_task (15 XP).
+ *
+ * Also checks if ALL tasks in the parent plan are now completed;
+ * if so, fires xpHookForPlanComplete as well.
+ *
+ * Uses afterWrite pattern from CRUD factory.
+ */
+export function xpHookForPlanTaskComplete(params: AfterWriteParams): void {
+  const { row, userId, updatedFields } = params;
+  if (params.action !== "update") return;
+
+  // Only trigger when status changes
+  if (!updatedFields?.includes("status")) return;
+  if (row.status !== "completed") return;
+
+  (async () => {
+    try {
+      const db = getAdminClient();
+      const studyPlanId = row.study_plan_id as string;
+      if (!studyPlanId) return;
+
+      // Resolve institution: study_plan → course → institution
+      const { data: plan } = await db
+        .from("study_plans")
+        .select("course_id")
+        .eq("id", studyPlanId)
+        .single();
+
+      if (!plan?.course_id) return;
+
+      const { data: course } = await db
+        .from("courses")
+        .select("institution_id")
+        .eq("id", plan.course_id)
+        .single();
+
+      if (!course?.institution_id) return;
+      const institutionId = course.institution_id;
+
+      const bonus = await getBonusContext(userId);
+
+      // Award task completion XP
+      await awardXP({
+        db,
+        studentId: userId,
+        institutionId,
+        action: "complete_plan_task",
+        xpBase: XP_TABLE.complete_plan_task,
+        sourceType: "plan_task",
+        sourceId: row.id as string,
+        currentStreak: bonus.currentStreak,
+      });
+
+      // Check if ALL tasks in this plan are now completed
+      const { count: totalTasks } = await db
+        .from("study_plan_tasks")
+        .select("id", { count: "exact", head: true })
+        .eq("study_plan_id", studyPlanId);
+
+      const { count: completedTasks } = await db
+        .from("study_plan_tasks")
+        .select("id", { count: "exact", head: true })
+        .eq("study_plan_id", studyPlanId)
+        .eq("status", "completed");
+
+      if (
+        totalTasks !== null &&
+        completedTasks !== null &&
+        totalTasks > 0 &&
+        completedTasks >= totalTasks
+      ) {
+        // All tasks completed → award plan completion XP!
+        console.log(
+          `[XP Hook] All ${totalTasks} tasks completed for plan ${studyPlanId}. Awarding plan XP.`,
+        );
+        await awardXP({
+          db,
+          studentId: userId,
+          institutionId,
+          action: "complete_plan",
+          xpBase: XP_TABLE.complete_plan,
+          sourceType: "plan",
+          sourceId: studyPlanId,
+          currentStreak: bonus.currentStreak,
+        });
+      }
+    } catch (e) {
+      console.warn("[XP Hook] plan task complete error:", (e as Error).message);
+    }
+  })();
+}
+
+// ─── Hook: RAG Question XP ──────────────────────────────────
+/**
+ * Called directly from chat.ts after successful RAG chat response.
+ * Awards rag_question (5 XP).
+ *
+ * NOT an afterWrite hook — called explicitly because chat.ts
+ * is a custom endpoint (not CRUD factory).
+ *
+ * @param studentId — The student's UUID
+ * @param institutionId — Already resolved by chat.ts
+ * @param logId — The rag_query_log UUID (for source tracking)
+ */
+export function xpHookForRagQuestion(
+  studentId: string,
+  institutionId: string,
+  logId: string,
+): void {
+  (async () => {
+    try {
+      const bonus = await getBonusContext(studentId);
+
+      await awardXP({
+        db: getAdminClient(),
+        studentId,
+        institutionId,
+        action: "rag_question",
+        xpBase: XP_TABLE.rag_question,
+        sourceType: "rag_chat",
+        sourceId: logId,
+        currentStreak: bonus.currentStreak,
+      });
+    } catch (e) {
+      console.warn("[XP Hook] RAG question error:", (e as Error).message);
+    }
+  })();
+}
+
+// ─── Hook: Batch Reviews XP ─────────────────────────────────
+/**
+ * Called from batch-review.ts after successfully processing a batch.
+ * Resolves institution ONCE from session_id, then awards XP for
+ * each review in a fire-and-forget loop.
+ *
+ * Optimization: getBonusContext is called once for the batch
+ * (streak doesn't change mid-batch). Each review gets its own
+ * FSRS/BKT bonus context for on-time/flow-zone bonuses.
+ *
+ * @param studentId — The student's UUID
+ * @param sessionId — The study session UUID
+ * @param reviews — Array of { item_id, grade, instrument_type }
+ */
+export function xpHookForBatchReviews(
+  studentId: string,
+  sessionId: string,
+  reviews: Array<{ item_id: string; grade: number; instrument_type: string }>,
+): void {
+  if (reviews.length === 0) return;
+
+  (async () => {
+    try {
+      const institutionId = await resolveInstitutionFromSession(sessionId);
+      if (!institutionId) {
+        console.warn(
+          "[XP Hook] Batch: Could not resolve institution for session:",
+          sessionId,
+        );
+        return;
+      }
+
+      const db = getAdminClient();
+
+      // Get streak once for the entire batch
+      let currentStreak = 0;
+      try {
+        const { data: stats } = await db
+          .from("student_stats")
+          .select("current_streak")
+          .eq("student_id", studentId)
+          .single();
+        currentStreak = stats?.current_streak ?? 0;
+      } catch {
+        // Non-critical, continue without streak bonus
+      }
+
+      // Process each review (fire-and-forget per review)
+      for (const review of reviews) {
+        try {
+          const isCorrect = review.grade >= 3;
+          const xpBase = isCorrect
+            ? XP_TABLE.review_correct
+            : XP_TABLE.review_flashcard;
+
+          // Get per-review bonus context (FSRS due_at, BKT p_know)
+          const bonus = await getBonusContext(studentId, review.item_id);
+
+          await awardXP({
+            db,
+            studentId,
+            institutionId,
+            action: isCorrect ? "review_correct" : "review_flashcard",
+            xpBase,
+            sourceType: "flashcard",
+            sourceId: review.item_id,
+            fsrsDueAt: bonus.fsrsDueAt,
+            bktPKnow: bonus.bktPKnow,
+            currentStreak,
+          });
+        } catch (e) {
+          console.warn(
+            `[XP Hook] Batch review ${review.item_id} error:`,
+            (e as Error).message,
+          );
+        }
+      }
+
+      console.log(
+        `[XP Hook] Batch: Processed ${reviews.length} reviews for ${studentId}`,
+      );
+    } catch (e) {
+      console.warn("[XP Hook] Batch reviews error:", (e as Error).message);
     }
   })();
 }
