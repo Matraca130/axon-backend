@@ -6,37 +6,22 @@
  *
  * Exports:
  *   evaluateSimpleCondition — Badge criteria parser
- *   calculateLevel — XP to level conversion
- *   LEVEL_THRESHOLDS — Level XP boundaries
+ *   calculateLevel — XP to level conversion (re-exported from xp-engine.ts)
+ *   LEVEL_THRESHOLDS — Level XP boundaries (re-exported from xp-engine.ts)
  *   GOAL_BONUS_XP — Bonus XP per goal type
  *   FREEZE_COST_XP — Cost to buy a streak freeze
  *   REPAIR_BASE_COST_XP — Base cost for streak repair
  *   MAX_FREEZES — Maximum streak freezes a student can own
+ *
+ * PR #102: calculateLevel + LEVEL_THRESHOLDS now imported from xp-engine.ts
+ *   (single source of truth, was duplicated before).
  */
 
-// ─── Level Thresholds ─────────────────────────────────────────
-// Keep in sync with xp-engine.ts and award_xp() RPC
+// ─── Level Thresholds (single source of truth: xp-engine.ts) ──
+// Re-exported so gamification modules can import from helpers.ts
+// without knowing about xp-engine.ts internals.
 
-export const LEVEL_THRESHOLDS: [number, number][] = [
-  [10000, 12],
-  [7500, 11],
-  [5500, 10],
-  [4000, 9],
-  [3000, 8],
-  [2200, 7],
-  [1500, 6],
-  [1000, 5],
-  [600, 4],
-  [300, 3],
-  [100, 2],
-];
-
-export function calculateLevel(totalXp: number): number {
-  for (const [threshold, level] of LEVEL_THRESHOLDS) {
-    if (totalXp >= threshold) return level;
-  }
-  return 1;
-}
+export { calculateLevel, LEVEL_THRESHOLDS } from "../../xp-engine.ts";
 
 // ─── Gamification Constants ──────────────────────────────────
 
