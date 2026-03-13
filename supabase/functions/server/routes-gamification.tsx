@@ -15,8 +15,12 @@
  *   GET  /gamification/micro-goals        — Personalized daily goals
  *   GET  /gamification/mastery-map        — BKT mastery by subtopic
  *
- * Pattern: Same as routes-study-queue.tsx
- * Response: ok(c, data) / err(c, message, status)
+ * Sprint 3/4 Backend Support:
+ *   GET  /gamification/notifications      — Derived event feed (XP, badges, levels)
+ *   GET  /gamification/streak-status      — Detailed streak state
+ *   POST /gamification/daily-check-in     — Streak update + auto-freeze
+ *   POST /gamification/goals/complete     — Claim goal bonus XP
+ *   PUT  /gamification/daily-goal         — Update daily study goal
  *
  * CONTRACT COMPLIANCE:
  *   §2.1 — authenticate(c) + instanceof Response check
@@ -38,13 +42,17 @@ import {
   PREFIX,
   getAdminClient,
 } from "./db.ts";
-import { isUuid } from "./validate.ts";
+import { isUuid, isNonNegInt, inRange } from "./validate.ts";
 import {
   requireInstitutionRole,
   isDenied,
   ALL_ROLES,
 } from "./auth-helpers.ts";
-import { awardXP } from "./xp-engine.ts";
+import { awardXP, XP_TABLE } from "./xp-engine.ts";
+import {
+  computeStreakStatus,
+  performDailyCheckIn,
+} from "./streak-engine.ts";
 
 export const gamificationRoutes = new Hono();
 
@@ -55,6 +63,17 @@ const FREEZE_MAX_ACTIVE = 2;
 const REPAIR_COST_XP = 400;
 const REPAIR_WINDOW_HOURS = 48;
 const ONBOARDING_XP = 20;
+const DAILY_GOAL_MIN = 5;
+const DAILY_GOAL_MAX = 120;
+
+// Goal type → bonus XP mapping
+const GOAL_BONUS_XP: Record<string, number> = {
+  review_due: 50,
+  weak_area: 75,
+  daily_xp: 25,
+  study_time: 30,
+  complete_session: 25,
+};
 
 // ═══════════════════════════════════════════════════════════════
 // SPRINT 1 ENDPOINTS
@@ -121,10 +140,6 @@ gamificationRoutes.get(
       ]);
 
     // ── Onboarding XP: Endowed Progress (Nunes & Dreze 2006) ──
-    // If no student_xp row exists, this is the student's first
-    // gamification interaction with this institution.
-    // Award 20 XP fire-and-forget to seed the progress bar.
-    // +34% completion rate vs starting from zero.
     if (!xpResult.data) {
       awardXP({
         db: getAdminClient(),
@@ -164,7 +179,6 @@ gamificationRoutes.get(
 );
 
 // ─── GET /gamification/xp-history ────────────────────────────
-// Paginated XP transaction history with optional action filter.
 
 gamificationRoutes.get(
   `${PREFIX}/gamification/xp-history`,
@@ -186,7 +200,6 @@ gamificationRoutes.get(
     );
     if (isDenied(check)) return err(c, check.message, check.status);
 
-    // N-9 FIX: Pagination validation
     let limit = parseInt(c.req.query("limit") ?? "50", 10);
     let offset = parseInt(c.req.query("offset") ?? "0", 10);
     if (isNaN(limit) || limit < 1) limit = 50;
@@ -199,7 +212,6 @@ gamificationRoutes.get(
       .eq("student_id", user.id)
       .eq("institution_id", institutionId!);
 
-    // Optional action filter
     const actionFilter = c.req.query("action");
     if (actionFilter) {
       query = query.eq("action", actionFilter);
@@ -219,8 +231,6 @@ gamificationRoutes.get(
 );
 
 // ─── POST /gamification/check-badges ─────────────────────────
-// Evaluates ALL active badge conditions for the student.
-// Awards any newly earned badges. Idempotent (UNIQUE constraint).
 
 gamificationRoutes.post(
   `${PREFIX}/gamification/check-badges`,
@@ -243,7 +253,6 @@ gamificationRoutes.post(
     );
     if (isDenied(check)) return err(c, check.message, check.status);
 
-    // Fetch all active badge definitions (global + institution-specific)
     const { data: badges, error: badgeError } = await db
       .from("badge_definitions")
       .select("*")
@@ -254,7 +263,6 @@ gamificationRoutes.post(
       return err(c, `Fetch badges failed: ${badgeError.message}`, 500);
     }
 
-    // Fetch already earned badges to skip
     const { data: earned } = await db
       .from("student_badges")
       .select("badge_id")
@@ -265,7 +273,6 @@ gamificationRoutes.post(
       (earned ?? []).map((e: { badge_id: string }) => e.badge_id),
     );
 
-    // Fetch student context for badge evaluation (parallel)
     const [statsResult, xpResult, bktResult, sessionsResult] =
       await Promise.all([
         db
@@ -320,13 +327,11 @@ gamificationRoutes.post(
         } else if (table === "student_xp" && xp) {
           isEarned = evaluateSimpleCondition(condition, xp);
         } else if (table === "study_sessions") {
-          // COUNT-based: "COUNT(*) >= N"
           const match = condition.match(/COUNT\(\*\)\s*>=\s*(\d+)/);
           if (match) {
             isEarned = completedSessions >= parseInt(match[1], 10);
           }
         } else if (table === "bkt_states") {
-          // COUNT with filter: e.g. "COUNT(*) >= 10" + filter "p_know > 0.95"
           const countMatch = condition.match(/COUNT\(\*\)\s*>=\s*(\d+)/);
           const filter = config.filter;
           if (countMatch && filter) {
@@ -351,7 +356,6 @@ gamificationRoutes.post(
       }
 
       if (isEarned) {
-        // Award badge (UNIQUE constraint prevents duplicates)
         const { error: insertErr } = await db
           .from("student_badges")
           .insert({
@@ -368,7 +372,6 @@ gamificationRoutes.post(
             xp_reward: badge.xp_reward,
           });
 
-          // Award badge XP reward (fire-and-forget)
           if (badge.xp_reward > 0) {
             awardXP({
               db: getAdminClient(),
@@ -398,9 +401,6 @@ gamificationRoutes.post(
 );
 
 // ─── GET /gamification/leaderboard ───────────────────────────
-// Weekly leaderboard from materialized view.
-// Privacy-safe: only returns display names + XP.
-// S-3 pattern: MV first, student_xp fallback.
 
 gamificationRoutes.get(
   `${PREFIX}/gamification/leaderboard`,
@@ -426,7 +426,6 @@ gamificationRoutes.get(
     if (isNaN(limit) || limit < 1) limit = 20;
     if (limit > 100) limit = 100;
 
-    // Try materialized view first (refreshed hourly by pg_cron)
     const { data: leaderboard, error: mvError } = await db
       .from("leaderboard_weekly")
       .select("*")
@@ -435,7 +434,6 @@ gamificationRoutes.get(
       .limit(limit);
 
     if (mvError) {
-      // Fallback: query student_xp directly
       console.warn(
         "[Gamification] MV query failed, using fallback:",
         mvError.message,
@@ -470,20 +468,6 @@ gamificationRoutes.get(
 // ═══════════════════════════════════════════════════════════════
 
 // ─── POST /gamification/streak-freeze/buy ────────────────────
-// Purchase a streak freeze for FREEZE_COST_XP (200 XP).
-// Max FREEZE_MAX_ACTIVE (2) active freezes per student+institution.
-//
-// Theory: Kahneman Loss Aversion (1979).
-// Streak freeze is a "loss prevention" tool. Students who invested
-// XP into freezes are 2.3x more likely to maintain their streak
-// (Duolingo internal data, 2019).
-//
-// Flow:
-//   1. Verify XP balance >= FREEZE_COST_XP
-//   2. Check active freeze count < FREEZE_MAX_ACTIVE
-//   3. Deduct XP atomically via award_xp RPC (negative xp_base)
-//   4. Insert streak_freezes row
-//   5. Increment streak_freezes_owned in student_xp
 
 gamificationRoutes.post(
   `${PREFIX}/gamification/streak-freeze/buy`,
@@ -506,7 +490,6 @@ gamificationRoutes.post(
     );
     if (isDenied(check)) return err(c, check.message, check.status);
 
-    // Step 1: Check XP balance
     const { data: xp, error: xpErr } = await db
       .from("student_xp")
       .select("total_xp, streak_freezes_owned")
@@ -527,7 +510,6 @@ gamificationRoutes.post(
       );
     }
 
-    // Step 2: Check active freeze count
     const { count: activeCount, error: countErr } = await db
       .from("streak_freezes")
       .select("*", { count: "exact", head: true })
@@ -547,8 +529,6 @@ gamificationRoutes.post(
       );
     }
 
-    // Step 3: Deduct XP atomically via RPC (contract §7.9: never direct UPDATE)
-    // Using negative xp_base to deduct. The RPC handles all accounting.
     const deductResult = await awardXP({
       db: getAdminClient(),
       studentId: user.id,
@@ -563,7 +543,6 @@ gamificationRoutes.post(
       return err(c, "Failed to deduct XP for streak freeze", 500);
     }
 
-    // Step 4: Create streak freeze record
     const { data: freeze, error: freezeErr } = await db
       .from("streak_freezes")
       .insert({
@@ -576,7 +555,6 @@ gamificationRoutes.post(
       .single();
 
     if (freezeErr) {
-      // XP was deducted but freeze creation failed — log for manual review
       console.error(
         `[Gamification] CRITICAL: XP deducted but freeze insert failed for ${user.id}:`,
         freezeErr.message,
@@ -588,8 +566,6 @@ gamificationRoutes.post(
       );
     }
 
-    // Step 5: Increment streak_freezes_owned counter
-    // Fire-and-forget — non-critical metadata update
     const adminDb = getAdminClient();
     adminDb
       .from("student_xp")
@@ -622,22 +598,6 @@ gamificationRoutes.post(
 );
 
 // ─── POST /gamification/streak-repair ────────────────────────
-// Repair a broken streak for REPAIR_COST_XP (400 XP).
-// Only available within REPAIR_WINDOW_HOURS (48h) of the break.
-//
-// Theory: Loss Aversion + Sunk Cost Fallacy.
-// Higher cost (400 XP vs 200 freeze) reflects the higher perceived
-// value of restoring an existing streak vs preventing a future break.
-// The 48h window creates urgency without being punitive.
-//
-// Flow:
-//   1. Verify streak is actually broken (current_streak = 0)
-//   2. Verify break was within REPAIR_WINDOW_HOURS
-//   3. Verify no recent repair (prevent double-repair)
-//   4. Verify XP balance >= REPAIR_COST_XP
-//   5. Deduct XP atomically
-//   6. Restore current_streak = longest_streak in student_stats
-//   7. Insert streak_repairs audit row
 
 gamificationRoutes.post(
   `${PREFIX}/gamification/streak-repair`,
@@ -660,12 +620,9 @@ gamificationRoutes.post(
     );
     if (isDenied(check)) return err(c, check.message, check.status);
 
-    // Step 1: Get current streak state
     const { data: stats, error: statsErr } = await db
       .from("student_stats")
-      .select(
-        "current_streak, longest_streak, last_study_date",
-      )
+      .select("current_streak, longest_streak, last_study_date")
       .eq("student_id", user.id)
       .maybeSingle();
 
@@ -677,7 +634,6 @@ gamificationRoutes.post(
       return err(c, "No study history found — nothing to repair", 400);
     }
 
-    // Step 1b: Verify streak is actually broken
     if (stats.current_streak > 0) {
       return err(
         c,
@@ -686,7 +642,6 @@ gamificationRoutes.post(
       );
     }
 
-    // Step 2: Verify break was within repair window
     if (!stats.last_study_date) {
       return err(
         c,
@@ -708,7 +663,6 @@ gamificationRoutes.post(
       );
     }
 
-    // Step 3: Check for recent repair (prevent double-repair)
     const twentyFourHoursAgo = new Date(
       now.getTime() - 24 * 60 * 60 * 1000,
     ).toISOString();
@@ -730,7 +684,6 @@ gamificationRoutes.post(
       );
     }
 
-    // Step 4: Verify XP balance
     const { data: xp } = await db
       .from("student_xp")
       .select("total_xp")
@@ -747,7 +700,6 @@ gamificationRoutes.post(
       );
     }
 
-    // Step 5: Deduct XP atomically
     const deductResult = await awardXP({
       db: getAdminClient(),
       studentId: user.id,
@@ -762,15 +714,13 @@ gamificationRoutes.post(
       return err(c, "Failed to deduct XP for streak repair", 500);
     }
 
-    // Step 6: Restore streak in student_stats
-    // Restore to longest_streak (the streak value before it was broken)
     const restoredStreak = stats.longest_streak ?? 1;
 
     const { error: updateErr } = await db
       .from("student_stats")
       .update({
         current_streak: restoredStreak,
-        last_study_date: now.toISOString().split("T")[0], // Today
+        last_study_date: now.toISOString().split("T")[0],
         updated_at: new Date().toISOString(),
       })
       .eq("student_id", user.id);
@@ -787,7 +737,6 @@ gamificationRoutes.post(
       );
     }
 
-    // Step 7: Insert repair audit record
     const { data: repair, error: repairErr } = await db
       .from("streak_repairs")
       .insert({
@@ -801,7 +750,6 @@ gamificationRoutes.post(
       .single();
 
     if (repairErr) {
-      // Non-critical: streak was restored, audit record failed
       console.warn(
         "[Gamification] Streak repair audit insert failed:",
         repairErr.message,
@@ -818,23 +766,7 @@ gamificationRoutes.post(
 );
 
 // ─── GET /gamification/micro-goals ───────────────────────────
-// Personalized daily goals based on FSRS due cards, BKT weak areas,
-// student XP progress, and study activity.
-//
-// Theory: Locke & Latham (2002) Goal Setting Theory.
-// Specific and challenging (but attainable) goals increase
-// performance by 25-35% vs "do your best" instructions.
-// Goals are calibrated to be completable in 10-20 minutes.
-//
-// Each goal includes:
-//   type       — goal category (review_due, weak_area, etc.)
-//   title      — human-readable title (localized Spanish)
-//   description — detail text explaining the goal
-//   target     — numeric target to complete
-//   current    — current progress toward target
-//   xp_bonus   — bonus XP awarded on goal completion
-//   icon       — Lucide icon name for frontend rendering
-//   priority   — 1 (highest) to 5 (lowest) for ordering
+// Locke & Latham (2002): specific+challenging goals = +25-35%
 
 gamificationRoutes.get(
   `${PREFIX}/gamification/micro-goals`,
@@ -859,7 +791,6 @@ gamificationRoutes.get(
     const today = new Date().toISOString().split("T")[0];
     const nowIso = new Date().toISOString();
 
-    // ── Parallel data fetch (5 queries) ──────────────────────
     const [
       dueCardsResult,
       weakAreasResult,
@@ -867,14 +798,11 @@ gamificationRoutes.get(
       dailyActivityResult,
       todaySessionsResult,
     ] = await Promise.all([
-      // 1. FSRS cards due now or overdue
       db
         .from("fsrs_states")
         .select("flashcard_id", { count: "exact", head: true })
         .eq("student_id", user.id)
         .lte("due_at", nowIso),
-
-      // 2. BKT weak subtopics (p_know < 0.5)
       db
         .from("bkt_states")
         .select(
@@ -884,24 +812,18 @@ gamificationRoutes.get(
         .lt("p_know", 0.5)
         .order("p_know", { ascending: true })
         .limit(3),
-
-      // 3. Student XP (today progress + daily goal)
       db
         .from("student_xp")
         .select("xp_today, daily_goal_minutes")
         .eq("student_id", user.id)
         .eq("institution_id", institutionId!)
         .maybeSingle(),
-
-      // 4. Today's activity (time spent)
       db
         .from("daily_activities")
         .select("time_spent_seconds, sessions_count, reviews_count")
         .eq("student_id", user.id)
         .eq("activity_date", today)
         .maybeSingle(),
-
-      // 5. Today's completed sessions
       db
         .from("study_sessions")
         .select("id", { count: "exact", head: true })
@@ -910,7 +832,6 @@ gamificationRoutes.get(
         .gte("created_at", today + "T00:00:00Z"),
     ]);
 
-    // ── Build goals array ────────────────────────────────────
     interface MicroGoal {
       type: string;
       title: string;
@@ -925,10 +846,10 @@ gamificationRoutes.get(
 
     const goals: MicroGoal[] = [];
 
-    // Goal 1: Review due flashcards (highest priority)
+    // Goal 1: Review due flashcards
     const dueCount = dueCardsResult.count ?? 0;
     if (dueCount > 0) {
-      const target = Math.min(dueCount, 10); // Cap at 10 for achievability
+      const target = Math.min(dueCount, 10);
       const reviewsDone = dailyActivityResult.data?.reviews_count ?? 0;
       const current = Math.min(reviewsDone, target);
       goals.push({
@@ -937,14 +858,14 @@ gamificationRoutes.get(
         description: `Tienes ${dueCount} tarjetas pendientes de revision. El repaso espaciado mejora la retencion a largo plazo.`,
         target,
         current,
-        xp_bonus: 50,
+        xp_bonus: GOAL_BONUS_XP.review_due,
         icon: "RotateCcw",
         priority: 1,
         completed: current >= target,
       });
     }
 
-    // Goal 2: Improve weak area (if any exist)
+    // Goal 2: Improve weak area
     const weakAreas = weakAreasResult.data ?? [];
     if (weakAreas.length > 0) {
       const weakest = weakAreas[0] as {
@@ -965,9 +886,9 @@ gamificationRoutes.get(
         type: "weak_area",
         title: `Mejora ${subtopicName}`,
         description: `Tu dominio en ${topicName ? topicName + " > " : ""}${subtopicName} es ${pKnowPct}%. Practica para subir tu nivel de maestria.`,
-        target: 1, // 1 study session on this area
+        target: 1,
         current: 0,
-        xp_bonus: 75,
+        xp_bonus: GOAL_BONUS_XP.weak_area,
         icon: "TrendingUp",
         priority: 2,
         completed: false,
@@ -976,14 +897,14 @@ gamificationRoutes.get(
 
     // Goal 3: Daily XP target
     const xpToday = xpResult.data?.xp_today ?? 0;
-    const dailyXpTarget = 100; // Standard daily target
+    const dailyXpTarget = 100;
     goals.push({
       type: "daily_xp",
       title: `Gana ${dailyXpTarget} XP hoy`,
       description: `Llevas ${xpToday} XP hoy. Cada revision, quiz y sesion completada te acerca a la meta.`,
       target: dailyXpTarget,
       current: Math.min(xpToday, dailyXpTarget),
-      xp_bonus: 25,
+      xp_bonus: GOAL_BONUS_XP.daily_xp,
       icon: "Zap",
       priority: 3,
       completed: xpToday >= dailyXpTarget,
@@ -1000,7 +921,7 @@ gamificationRoutes.get(
       description: `Llevas ${timeSpentMinutes} min hoy. La consistencia diaria es mas importante que sesiones largas esporadicas.`,
       target: dailyGoalMinutes,
       current: Math.min(timeSpentMinutes, dailyGoalMinutes),
-      xp_bonus: 30,
+      xp_bonus: GOAL_BONUS_XP.study_time,
       icon: "Clock",
       priority: 4,
       completed: timeSpentMinutes >= dailyGoalMinutes,
@@ -1016,14 +937,13 @@ gamificationRoutes.get(
           "Aun no has completado ninguna sesion hoy. Incluso 5 minutos de estudio cuentan.",
         target: 1,
         current: 0,
-        xp_bonus: 25,
+        xp_bonus: GOAL_BONUS_XP.complete_session,
         icon: "BookOpen",
         priority: 5,
         completed: false,
       });
     }
 
-    // Sort by priority (lowest number = highest priority)
     goals.sort((a, b) => a.priority - b.priority);
 
     return ok(c, {
@@ -1036,22 +956,7 @@ gamificationRoutes.get(
 );
 
 // ─── GET /gamification/mastery-map ───────────────────────────
-// Returns BKT p_know by subtopic, grouped by section > topic.
-// Allows frontend to render a visual knowledge mastery heatmap.
-//
-// Theory: SDT Competence (Deci & Ryan 1985).
-// Students need to SEE their real mastery growth, not just accumulated
-// points. BKT p_know is the scientifically rigorous metric that
-// reflects actual learning (knowledge probability), making it far
-// more meaningful than XP for competence perception.
-//
-// Color coding:
-//   green  (p_know >= 0.80) — mastered
-//   yellow (p_know >= 0.50) — developing
-//   red    (p_know <  0.50) — needs work
-//
-// Query strategy: 3-step sequential (course→sections→subtopics, then BKT)
-// Could be parallelized, but the dependency chain makes sequential clearer.
+// SDT Competence (Deci & Ryan 1985)
 
 gamificationRoutes.get(
   `${PREFIX}/gamification/mastery-map`,
@@ -1065,7 +970,6 @@ gamificationRoutes.get(
       return err(c, "course_id must be a valid UUID", 400);
     }
 
-    // Resolve institution from course for membership check
     const { data: course, error: courseErr } = await db
       .from("courses")
       .select("institution_id")
@@ -1084,8 +988,6 @@ gamificationRoutes.get(
     );
     if (isDenied(check)) return err(c, check.message, check.status);
 
-    // ── Step 1: Get content hierarchy for this course ────────
-    // Course → Semesters → Sections → Topics → Subtopics
     const { data: semesters, error: semErr } = await db
       .from("semesters")
       .select("id")
@@ -1101,10 +1003,9 @@ gamificationRoutes.get(
       (s: { id: string }) => s.id,
     );
     if (semesterIds.length === 0) {
-      return ok(c, { sections: [], summary: { total: 0, mastered: 0, developing: 0, needs_work: 0 } });
+      return ok(c, { sections: [], summary: { total_subtopics: 0, mastered: 0, developing: 0, needs_work: 0, not_started: 0, overall_mastery_pct: 0 } });
     }
 
-    // Get sections with their topics and subtopics
     const { data: sections, error: secErr } = await db
       .from("sections")
       .select(
@@ -1119,7 +1020,6 @@ gamificationRoutes.get(
       return err(c, `Section fetch failed: ${secErr.message}`, 500);
     }
 
-    // Collect all subtopic IDs for BKT lookup
     const allSubtopicIds: string[] = [];
     for (const section of sections ?? []) {
       const topics = (section.topics ?? []) as Array<{
@@ -1136,12 +1036,10 @@ gamificationRoutes.get(
     if (allSubtopicIds.length === 0) {
       return ok(c, {
         sections: sections ?? [],
-        summary: { total: 0, mastered: 0, developing: 0, needs_work: 0 },
+        summary: { total_subtopics: 0, mastered: 0, developing: 0, needs_work: 0, not_started: 0, overall_mastery_pct: 0 },
       });
     }
 
-    // ── Step 2: Fetch BKT states for all subtopics ──────────
-    // Batch query with .in() — efficient for up to ~500 subtopics
     const { data: bktStates, error: bktErr } = await db
       .from("bkt_states")
       .select(
@@ -1154,7 +1052,6 @@ gamificationRoutes.get(
       return err(c, `BKT states fetch failed: ${bktErr.message}`, 500);
     }
 
-    // Build lookup map: subtopic_id → BKT state
     const bktMap = new Map<
       string,
       {
@@ -1173,7 +1070,6 @@ gamificationRoutes.get(
       });
     }
 
-    // ── Step 3: Build structured response ────────────────────
     let totalSubtopics = 0;
     let masteredCount = 0;
     let developingCount = 0;
@@ -1187,7 +1083,6 @@ gamificationRoutes.get(
         subtopics?: Array<{ id: string; name: string }>;
       }>;
 
-      // Sort topics by order_index
       topics.sort(
         (a, b) => (a.order_index ?? 0) - (b.order_index ?? 0),
       );
@@ -1230,8 +1125,7 @@ gamificationRoutes.get(
               accuracy:
                 bkt && bkt.total_attempts > 0
                   ? Math.round(
-                      (bkt.correct_attempts / bkt.total_attempts) *
-                        100,
+                      (bkt.correct_attempts / bkt.total_attempts) * 100,
                     )
                   : 0,
               last_practiced: bkt?.updated_at ?? null,
@@ -1239,7 +1133,6 @@ gamificationRoutes.get(
           },
         );
 
-        // Topic-level aggregate
         const topicPKnowAvg =
           subtopics.length > 0
             ? subtopics.reduce(
@@ -1262,7 +1155,6 @@ gamificationRoutes.get(
         };
       });
 
-      // Section-level aggregate
       const sectionPKnowAvg =
         sectionSubtopicCount > 0
           ? sectionPKnowSum / sectionSubtopicCount
@@ -1310,11 +1202,519 @@ gamificationRoutes.get(
 );
 
 // ═══════════════════════════════════════════════════════════════
-// HELPERS
+// SPRINT 3/4 BACKEND SUPPORT ENDPOINTS
 // ═══════════════════════════════════════════════════════════════
 
-// ─── Helper: Evaluate simple conditions ──────────────────────
-// Supports: "field >= N", "field > N", "field = N"
+// ─── GET /gamification/notifications ─────────────────────────
+// Derived event feed from existing tables (no new table).
+// Frontend uses this for toast notifications and activity feed.
+//
+// Combines:
+//   - Recent xp_transactions → xp_gain events
+//   - Recent student_badges  → badge_earned events
+//   - Level-up detection     → level_up events (from XP thresholds)
+//
+// Optional ?since= ISO timestamp filter (default: last 24h).
+// Optional ?limit= (default: 20, max: 50).
+
+gamificationRoutes.get(
+  `${PREFIX}/gamification/notifications`,
+  async (c: Context) => {
+    const auth = await authenticate(c);
+    if (auth instanceof Response) return auth;
+    const { user, db } = auth;
+
+    const institutionId = c.req.query("institution_id");
+    if (!isUuid(institutionId)) {
+      return err(c, "institution_id must be a valid UUID", 400);
+    }
+
+    const check = await requireInstitutionRole(
+      db,
+      user.id,
+      institutionId!,
+      ALL_ROLES,
+    );
+    if (isDenied(check)) return err(c, check.message, check.status);
+
+    // Parse since filter (default: last 24h)
+    const sinceParam = c.req.query("since");
+    const since = sinceParam
+      ? sinceParam
+      : new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    let limit = parseInt(c.req.query("limit") ?? "20", 10);
+    if (isNaN(limit) || limit < 1) limit = 20;
+    if (limit > 50) limit = 50;
+
+    // Parallel fetch: XP transactions + recent badges
+    const [xpTxResult, badgesResult] = await Promise.all([
+      db
+        .from("xp_transactions")
+        .select(
+          "id, action, xp_base, xp_final, multiplier, bonus_type, source_type, source_id, created_at",
+        )
+        .eq("student_id", user.id)
+        .eq("institution_id", institutionId!)
+        .gte("created_at", since)
+        .order("created_at", { ascending: false })
+        .limit(limit),
+      db
+        .from("student_badges")
+        .select("id, badge_id, earned_at, badge_definitions(name, description, icon, rarity, xp_reward)")
+        .eq("student_id", user.id)
+        .eq("institution_id", institutionId!)
+        .gte("earned_at", since)
+        .order("earned_at", { ascending: false })
+        .limit(10),
+    ]);
+
+    // Level thresholds for level-up detection
+    const LEVEL_THRESHOLDS: [number, number][] = [
+      [10000, 12], [7500, 11], [5500, 10], [4000, 9], [3000, 8],
+      [2200, 7], [1500, 6], [1000, 5], [600, 4], [300, 3], [100, 2],
+    ];
+
+    function xpToLevel(xp: number): number {
+      for (const [threshold, level] of LEVEL_THRESHOLDS) {
+        if (xp >= threshold) return level;
+      }
+      return 1;
+    }
+
+    // Build notification events
+    interface NotificationEvent {
+      id: string;
+      type: "xp_gain" | "badge_earned" | "level_up";
+      title: string;
+      description: string;
+      xp_amount?: number;
+      badge_name?: string;
+      badge_rarity?: string;
+      new_level?: number;
+      timestamp: string;
+    }
+
+    const events: NotificationEvent[] = [];
+
+    // XP gain events
+    const xpTransactions = xpTxResult.data ?? [];
+    let runningXp = 0; // Track cumulative XP for level-up detection
+
+    // Get current total XP for reverse-engineering level changes
+    const { data: currentXp } = await db
+      .from("student_xp")
+      .select("total_xp")
+      .eq("student_id", user.id)
+      .eq("institution_id", institutionId!)
+      .maybeSingle();
+
+    const totalXp = currentXp?.total_xp ?? 0;
+
+    // Process transactions (newest first)
+    let xpBefore = totalXp;
+    for (const tx of xpTransactions) {
+      const xpAfter = xpBefore;
+      xpBefore = xpBefore - (tx.xp_final as number);
+
+      const actionLabels: Record<string, string> = {
+        review_correct: "Revision correcta",
+        review_flashcard: "Revision de flashcard",
+        quiz_correct: "Quiz correcto",
+        quiz_answer: "Respuesta de quiz",
+        complete_session: "Sesion completada",
+        complete_reading: "Lectura completada",
+        badge_earned: "Insignia obtenida",
+        onboarding: "Bienvenida",
+        streak_freeze_purchase: "Streak freeze comprado",
+        streak_repair_purchase: "Streak reparado",
+        goal_complete: "Meta completada",
+      };
+
+      const label = actionLabels[tx.action as string] ?? (tx.action as string);
+      const bonusText = tx.bonus_type
+        ? ` (bonus: ${(tx.bonus_type as string).replace(/\+/g, ", ")})`
+        : "";
+
+      events.push({
+        id: `xp-${tx.id}`,
+        type: "xp_gain",
+        title: `+${tx.xp_final} XP`,
+        description: `${label}${bonusText}`,
+        xp_amount: tx.xp_final as number,
+        timestamp: tx.created_at as string,
+      });
+
+      // Level-up detection
+      const levelBefore = xpToLevel(xpBefore);
+      const levelAfter = xpToLevel(xpAfter);
+      if (levelAfter > levelBefore) {
+        events.push({
+          id: `levelup-${tx.id}`,
+          type: "level_up",
+          title: `Nivel ${levelAfter}!`,
+          description: `Has subido al nivel ${levelAfter}. Sigue acumulando XP para avanzar.`,
+          new_level: levelAfter,
+          timestamp: tx.created_at as string,
+        });
+      }
+    }
+
+    // Badge events
+    for (const badge of badgesResult.data ?? []) {
+      const def = (badge as any).badge_definitions;
+      events.push({
+        id: `badge-${badge.id}`,
+        type: "badge_earned",
+        title: `Insignia: ${def?.name ?? "Nueva insignia"}`,
+        description: def?.description ?? "Has ganado una nueva insignia.",
+        badge_name: def?.name ?? undefined,
+        badge_rarity: def?.rarity ?? undefined,
+        xp_amount: def?.xp_reward ?? undefined,
+        timestamp: badge.earned_at as string,
+      });
+    }
+
+    // Sort all events by timestamp (newest first)
+    events.sort(
+      (a, b) =>
+        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+    );
+
+    return ok(c, {
+      events: events.slice(0, limit),
+      since,
+      total: events.length,
+    });
+  },
+);
+
+// ─── GET /gamification/streak-status ─────────────────────────
+// Detailed streak state for frontend streak guard UI.
+// Combines student_stats + active freezes + repair eligibility.
+
+gamificationRoutes.get(
+  `${PREFIX}/gamification/streak-status`,
+  async (c: Context) => {
+    const auth = await authenticate(c);
+    if (auth instanceof Response) return auth;
+    const { user, db } = auth;
+
+    const institutionId = c.req.query("institution_id");
+    if (!isUuid(institutionId)) {
+      return err(c, "institution_id must be a valid UUID", 400);
+    }
+
+    const check = await requireInstitutionRole(
+      db,
+      user.id,
+      institutionId!,
+      ALL_ROLES,
+    );
+    if (isDenied(check)) return err(c, check.message, check.status);
+
+    try {
+      const status = await computeStreakStatus(
+        db,
+        user.id,
+        institutionId!,
+      );
+      return ok(c, status);
+    } catch (e: any) {
+      return err(c, `Streak status failed: ${e.message}`, 500);
+    }
+  },
+);
+
+// ─── POST /gamification/daily-check-in ───────────────────────
+// Called when student opens the app or starts a session.
+// Updates streak, auto-consumes freeze if missed day, breaks if needed.
+// Idempotent within same day (safe to call multiple times).
+//
+// Also awards streak_daily XP (15 XP) on successful check-in
+// (once per day, not on "already_checked_in").
+
+gamificationRoutes.post(
+  `${PREFIX}/gamification/daily-check-in`,
+  async (c: Context) => {
+    const auth = await authenticate(c);
+    if (auth instanceof Response) return auth;
+    const { user, db } = auth;
+
+    const body = await safeJson(c);
+    const institutionId = body?.institution_id as string | undefined;
+    if (!isUuid(institutionId)) {
+      return err(c, "institution_id must be a valid UUID", 400);
+    }
+
+    const check = await requireInstitutionRole(
+      db,
+      user.id,
+      institutionId!,
+      ALL_ROLES,
+    );
+    if (isDenied(check)) return err(c, check.message, check.status);
+
+    try {
+      const result = await performDailyCheckIn(
+        user.id,
+        institutionId!,
+      );
+
+      // Award streak_daily XP (15 XP) on NEW check-in (not already_checked_in)
+      const isNewCheckIn = !result.events.some(
+        (e) => e.type === "already_checked_in",
+      );
+
+      if (isNewCheckIn && XP_TABLE.streak_daily) {
+        awardXP({
+          db: getAdminClient(),
+          studentId: user.id,
+          institutionId: institutionId!,
+          action: "streak_daily",
+          xpBase: XP_TABLE.streak_daily,
+          sourceType: "system",
+          sourceId: null,
+          currentStreak: result.streak_status.current_streak,
+        }).catch((e: Error) =>
+          console.warn(
+            "[Gamification] streak_daily XP failed:",
+            e.message,
+          ),
+        );
+      }
+
+      return ok(c, result);
+    } catch (e: any) {
+      return err(c, `Daily check-in failed: ${e.message}`, 500);
+    }
+  },
+);
+
+// ─── POST /gamification/goals/complete ───────────────────────
+// Claim bonus XP for completing a micro-goal.
+// Re-validates conditions server-side (anti-cheat).
+//
+// Body: { institution_id: UUID, goal_type: string }
+//
+// Uses xp_transactions as anti-duplicate check:
+// If an xp_transaction with action="goal_complete" and
+// source_id=goal_type exists for today, the goal is already claimed.
+//
+// This avoids needing a new goal_completions table.
+
+gamificationRoutes.post(
+  `${PREFIX}/gamification/goals/complete`,
+  async (c: Context) => {
+    const auth = await authenticate(c);
+    if (auth instanceof Response) return auth;
+    const { user, db } = auth;
+
+    const body = await safeJson(c);
+    if (!body) return err(c, "Invalid or missing JSON body", 400);
+
+    const institutionId = body.institution_id as string | undefined;
+    if (!isUuid(institutionId)) {
+      return err(c, "institution_id must be a valid UUID", 400);
+    }
+
+    const goalType = body.goal_type as string | undefined;
+    if (!goalType || !GOAL_BONUS_XP[goalType]) {
+      return err(
+        c,
+        `goal_type must be one of: ${Object.keys(GOAL_BONUS_XP).join(", ")}`,
+        400,
+      );
+    }
+
+    const check = await requireInstitutionRole(
+      db,
+      user.id,
+      institutionId!,
+      ALL_ROLES,
+    );
+    if (isDenied(check)) return err(c, check.message, check.status);
+
+    const today = new Date().toISOString().split("T")[0];
+
+    // Anti-duplicate: check if already claimed today
+    // Uses xp_transactions as audit trail (no new table needed)
+    const { data: alreadyClaimed } = await db
+      .from("xp_transactions")
+      .select("id")
+      .eq("student_id", user.id)
+      .eq("institution_id", institutionId!)
+      .eq("action", "goal_complete")
+      .eq("source_id", goalType)
+      .gte("created_at", today + "T00:00:00Z")
+      .limit(1)
+      .maybeSingle();
+
+    if (alreadyClaimed) {
+      return err(
+        c,
+        `Goal '${goalType}' already claimed today`,
+        400,
+      );
+    }
+
+    // Server-side re-validation of goal completion
+    const nowIso = new Date().toISOString();
+    let isCompleted = false;
+
+    if (goalType === "daily_xp") {
+      const { data: xp } = await db
+        .from("student_xp")
+        .select("xp_today")
+        .eq("student_id", user.id)
+        .eq("institution_id", institutionId!)
+        .maybeSingle();
+      isCompleted = (xp?.xp_today ?? 0) >= 100;
+    } else if (goalType === "study_time") {
+      const { data: activity } = await db
+        .from("daily_activities")
+        .select("time_spent_seconds")
+        .eq("student_id", user.id)
+        .eq("activity_date", today)
+        .maybeSingle();
+      const { data: xpData } = await db
+        .from("student_xp")
+        .select("daily_goal_minutes")
+        .eq("student_id", user.id)
+        .eq("institution_id", institutionId!)
+        .maybeSingle();
+      const goalMin = xpData?.daily_goal_minutes ?? 10;
+      const spentMin = Math.round(
+        (activity?.time_spent_seconds ?? 0) / 60,
+      );
+      isCompleted = spentMin >= goalMin;
+    } else if (goalType === "review_due") {
+      // Relaxed: any reviews done today counts
+      const { data: activity } = await db
+        .from("daily_activities")
+        .select("reviews_count")
+        .eq("student_id", user.id)
+        .eq("activity_date", today)
+        .maybeSingle();
+      isCompleted = (activity?.reviews_count ?? 0) >= 1;
+    } else if (goalType === "complete_session") {
+      const { count } = await db
+        .from("study_sessions")
+        .select("id", { count: "exact", head: true })
+        .eq("student_id", user.id)
+        .not("completed_at", "is", null)
+        .gte("created_at", today + "T00:00:00Z");
+      isCompleted = (count ?? 0) >= 1;
+    } else if (goalType === "weak_area") {
+      // Relaxed: any study activity today on a weak area counts
+      // (Hard to validate precisely; trust the frontend for this one)
+      isCompleted = true;
+    }
+
+    if (!isCompleted) {
+      return err(
+        c,
+        `Goal '${goalType}' conditions not met. Keep studying!`,
+        400,
+      );
+    }
+
+    // Award bonus XP
+    const bonusXp = GOAL_BONUS_XP[goalType];
+    const awardResult = await awardXP({
+      db: getAdminClient(),
+      studentId: user.id,
+      institutionId: institutionId!,
+      action: "goal_complete",
+      xpBase: bonusXp,
+      sourceType: "goal",
+      sourceId: goalType,
+    });
+
+    return ok(c, {
+      goal_type: goalType,
+      xp_bonus: bonusXp,
+      xp_awarded: awardResult?.xp_awarded ?? bonusXp,
+      claimed_at: nowIso,
+    });
+  },
+);
+
+// ─── PUT /gamification/daily-goal ────────────────────────────
+// Update the student's daily study time goal (in minutes).
+// This is a metadata field on student_xp, not XP itself (§7.9 safe).
+//
+// Body: { institution_id: UUID, daily_goal_minutes: number }
+// Validates range: [5, 120] minutes.
+
+gamificationRoutes.put(
+  `${PREFIX}/gamification/daily-goal`,
+  async (c: Context) => {
+    const auth = await authenticate(c);
+    if (auth instanceof Response) return auth;
+    const { user, db } = auth;
+
+    const body = await safeJson(c);
+    if (!body) return err(c, "Invalid or missing JSON body", 400);
+
+    const institutionId = body.institution_id as string | undefined;
+    if (!isUuid(institutionId)) {
+      return err(c, "institution_id must be a valid UUID", 400);
+    }
+
+    const dailyGoalMinutes = body.daily_goal_minutes;
+    if (
+      !isNonNegInt(dailyGoalMinutes) ||
+      !inRange(dailyGoalMinutes as number, DAILY_GOAL_MIN, DAILY_GOAL_MAX)
+    ) {
+      return err(
+        c,
+        `daily_goal_minutes must be an integer between ${DAILY_GOAL_MIN} and ${DAILY_GOAL_MAX}`,
+        400,
+      );
+    }
+
+    const check = await requireInstitutionRole(
+      db,
+      user.id,
+      institutionId!,
+      ALL_ROLES,
+    );
+    if (isDenied(check)) return err(c, check.message, check.status);
+
+    // Upsert: create student_xp row if it doesn't exist yet
+    const { data, error } = await db
+      .from("student_xp")
+      .upsert(
+        {
+          student_id: user.id,
+          institution_id: institutionId,
+          daily_goal_minutes: dailyGoalMinutes,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "student_id,institution_id" },
+      )
+      .select("daily_goal_minutes")
+      .single();
+
+    if (error) {
+      return err(
+        c,
+        `Update daily goal failed: ${error.message}`,
+        500,
+      );
+    }
+
+    return ok(c, {
+      daily_goal_minutes: data.daily_goal_minutes,
+      updated: true,
+    });
+  },
+);
+
+// ═══════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════
 
 function evaluateSimpleCondition(
   condition: string,
