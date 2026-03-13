@@ -8,6 +8,10 @@
  *
  * BUG-3 FIX: GET /notifications now uses `created_at` (correct column)
  *   instead of `earned_at` (which doesn't exist in student_badges).
+ *
+ * AUDIT FIXES (PR #113):
+ *   G-002 — badge INSERT now includes institution_id (multi-tenancy)
+ *   G-005 — icon_url → icon (matches DB column name)
  */
 
 import { Hono } from "npm:hono";
@@ -153,12 +157,13 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
     );
 
     if (allMet) {
-      // Award badge
+      // G-002 FIX: Include institution_id in badge award INSERT
       const { error: insertErr } = await adminDb
         .from("student_badges")
         .insert({
           student_id: user.id,
           badge_id: badge.id,
+          institution_id: institutionId,
         });
 
       if (!insertErr) {
@@ -198,6 +203,7 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
 // ─── GET /gamification/notifications ────────────────────────
 // BUG-3 FIX: Uses `created_at` (correct column in student_badges),
 // not `earned_at` which doesn't exist in the table schema.
+// G-005 FIX: Uses `icon` (correct column), not `icon_url`.
 
 badgeRoutes.get(`${PREFIX}/gamification/notifications`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -223,9 +229,10 @@ badgeRoutes.get(`${PREFIX}/gamification/notifications`, async (c: Context) => {
       .order("created_at", { ascending: false })
       .limit(limit),
     // BUG-3 FIX: select created_at (not earned_at)
+    // G-005 FIX: select icon (not icon_url)
     db
       .from("student_badges")
-      .select("badge_id, created_at, badge_definitions(name, slug, icon_url, rarity)")
+      .select("badge_id, created_at, badge_definitions(name, slug, icon, rarity)")
       .eq("student_id", user.id)
       .order("created_at", { ascending: false })
       .limit(limit),
@@ -256,7 +263,7 @@ badgeRoutes.get(`${PREFIX}/gamification/notifications`, async (c: Context) => {
         badge_id: badge.badge_id,
         badge_name: def?.name ?? "Unknown",
         badge_slug: def?.slug ?? null,
-        badge_icon: def?.icon_url ?? null,
+        badge_icon: def?.icon ?? null,
         badge_rarity: def?.rarity ?? null,
         // BUG-3 FIX: use created_at from student_badges
         timestamp: badge.created_at,

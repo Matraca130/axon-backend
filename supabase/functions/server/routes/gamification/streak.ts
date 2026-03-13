@@ -10,6 +10,10 @@
  * BUG-5 FIX: POST /daily-check-in skips streak XP when streak breaks.
  * BUG-8 DOC: POST /streak-repair restores to longest_streak (intentional,
  *   matches Duolingo model — the repair cost already scales with streak value).
+ *
+ * AUDIT FIXES (PR #113):
+ *   G-001 — freeze INSERT now includes freeze_type + xp_cost
+ *   G-003 — repair INSERT now includes institution_id + repair_date
  */
 
 import { Hono } from "npm:hono";
@@ -165,11 +169,14 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
     return err(c, `XP deduction failed: ${deductErr.message}`, 500);
   }
 
+  // G-001 FIX: Include freeze_type and xp_cost in INSERT
   const { data: freeze, error: freezeErr } = await adminDb
     .from("streak_freezes")
     .insert({
       student_id: user.id,
       institution_id: institutionId,
+      freeze_type: "purchased",
+      xp_cost: FREEZE_COST_XP,
     })
     .select()
     .single();
@@ -297,13 +304,15 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
     return err(c, `Streak restore failed: ${statsErr.message}`, 500);
   }
 
-  // Step 6: Record repair
+  // Step 6: Record repair — G-003 FIX: include institution_id + repair_date
   const { data: repair, error: repairErr } = await adminDb
     .from("streak_repairs")
     .insert({
       student_id: user.id,
+      institution_id: institutionId,
       repair_cost: repairCost,
       previous_streak: streakToRestore,
+      repair_date: today,
       repaired_at: new Date().toISOString(),
     })
     .select()

@@ -24,6 +24,11 @@
  *
  * PR #99: Added xpHookForBatchReviews, xpHookForVideoComplete,
  *         xpHookForRagQuestion, xpHookForPlanTaskComplete.
+ *
+ * AUDIT FIXES (PR #113):
+ *   G-008 — xpHookForQuizAttempt now resolves summary_id via
+ *           quiz_question_id lookup (was reading row.summary_id
+ *           which doesn't exist on quiz_attempts table).
  */
 
 import type { AfterWriteParams } from "./crud-factory.ts";
@@ -57,6 +62,40 @@ async function resolveInstitutionFromSession(
     return course?.institution_id ?? null;
   } catch {
     return null;
+  }
+}
+
+// ─── Helper: Resolve institution_id from quiz_question_id ────
+// G-008 FIX: quiz_attempts does NOT have summary_id.
+// Resolve: quiz_question_id → quiz_questions.summary_id → summaries → courses.institution_id
+
+async function resolveInstitutionFromQuizQuestion(
+  quizQuestionId: string,
+): Promise<{ institutionId: string | null; summaryId: string | null }> {
+  const db = getAdminClient();
+
+  try {
+    // Step 1: Get summary_id from quiz_questions
+    const { data: qq } = await db
+      .from("quiz_questions")
+      .select("summary_id")
+      .eq("id", quizQuestionId)
+      .single();
+
+    if (!qq?.summary_id) return { institutionId: null, summaryId: null };
+
+    // Step 2: Resolve institution via RPC
+    const { data: instId } = await db.rpc("resolve_parent_institution", {
+      p_table: "summaries",
+      p_id: qq.summary_id,
+    });
+
+    return {
+      institutionId: instId as string | null,
+      summaryId: qq.summary_id as string,
+    };
+  } catch {
+    return { institutionId: null, summaryId: null };
   }
 }
 
@@ -184,6 +223,8 @@ export function xpHookForReview(params: AfterWriteParams): void {
 }
 
 // ─── Hook 2: Quiz Answer XP ─────────────────────────────────
+// G-008 FIX: Now resolves summary_id via quiz_question_id lookup.
+// quiz_attempts table does NOT have a summary_id column.
 export function xpHookForQuizAttempt(params: AfterWriteParams): void {
   const { row, userId } = params;
   if (params.action !== "create") return;
@@ -193,22 +234,28 @@ export function xpHookForQuizAttempt(params: AfterWriteParams): void {
       const isCorrect = row.is_correct === true;
       const xpBase = isCorrect ? XP_TABLE.quiz_correct : XP_TABLE.quiz_answer;
 
-      const summaryId = row.summary_id as string;
-      if (!summaryId) return;
+      // G-008 FIX: quiz_attempts has quiz_question_id, NOT summary_id.
+      // Resolve institution via: quiz_question_id → quiz_questions.summary_id → RPC
+      const quizQuestionId = row.quiz_question_id as string;
+      if (!quizQuestionId) return;
 
-      const db = getAdminClient();
-      const { data: instId } = await db.rpc("resolve_parent_institution", {
-        p_table: "summaries",
-        p_id: summaryId,
-      });
-      if (!instId) return;
+      const { institutionId, summaryId } =
+        await resolveInstitutionFromQuizQuestion(quizQuestionId);
+
+      if (!institutionId) {
+        console.warn(
+          "[XP Hook] Could not resolve institution for quiz_question:",
+          quizQuestionId,
+        );
+        return;
+      }
 
       const bonus = await getBonusContext(userId);
 
       await awardXP({
-        db,
+        db: getAdminClient(),
         studentId: userId,
-        institutionId: instId as string,
+        institutionId,
         action: isCorrect ? "quiz_correct" : "quiz_answer",
         xpBase,
         sourceType: "quiz",

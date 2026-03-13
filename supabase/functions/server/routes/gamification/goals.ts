@@ -9,6 +9,9 @@
  * BUG-2 FIX: PUT /daily-goal now uses getAdminClient() instead of
  *   user-scoped `db`, which was failing due to RLS policies on
  *   student_xp (students can read but not write their own XP).
+ *
+ * AUDIT FIXES (PR #113):
+ *   G-010 — POST /goals/complete now checks for duplicate completion per day
  */
 
 import { Hono } from "npm:hono";
@@ -73,6 +76,8 @@ goalRoutes.put(`${PREFIX}/gamification/daily-goal`, async (c: Context) => {
 });
 
 // ─── POST /gamification/goals/complete ──────────────────────
+// G-010 FIX: Check for duplicate goal completion on the same day
+// to prevent XP farming via repeated calls.
 
 goalRoutes.post(`${PREFIX}/gamification/goals/complete`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -97,17 +102,39 @@ goalRoutes.post(`${PREFIX}/gamification/goals/complete`, async (c: Context) => {
     );
   }
 
+  // G-010 FIX: Check for duplicate goal completion today
+  // source_id format is "goalType_YYYY-MM-DD", so we can check
+  // if this exact combination already exists in xp_transactions.
+  const today = new Date().toISOString().split("T")[0];
+  const sourceId = `${goalType}_${today}`;
+
+  const adminDb = getAdminClient();
+  const { count: existingCount } = await adminDb
+    .from("xp_transactions")
+    .select("id", { count: "exact", head: true })
+    .eq("student_id", user.id)
+    .eq("institution_id", institutionId)
+    .eq("source_id", sourceId);
+
+  if ((existingCount ?? 0) > 0) {
+    return err(
+      c,
+      `Ya completaste el objetivo '${goalType}' hoy. Vuelve manana!`,
+      409,
+    );
+  }
+
   const bonusXp = GOAL_BONUS_XP[goalType];
 
   try {
     const result = await awardXP({
-      db: getAdminClient(),
+      db: adminDb,
       studentId: user.id,
       institutionId,
       action: `goal_${goalType}`,
       xpBase: bonusXp,
       sourceType: "goal",
-      sourceId: `${goalType}_${new Date().toISOString().split("T")[0]}`,
+      sourceId,
     });
 
     return ok(c, {

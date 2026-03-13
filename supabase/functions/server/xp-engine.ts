@@ -20,6 +20,9 @@
  * EXPORTS (PR #102):
  *   LEVEL_THRESHOLDS — Single source of truth for level XP boundaries
  *   calculateLevel   — XP to level conversion (also used by gamification helpers)
+ *
+ * AUDIT FIXES (PR #113):
+ *   G-006 — JS fallback now enforces daily cap (500) with 10% post-cap rate
  */
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
@@ -123,39 +126,42 @@ export async function awardXP(
   let multiplier = 1.0;
   let bonusType: string | null = null;
 
-  // 1. On-Time Review Bonus (+50%) — Cepeda 2006
-  //    Awarded when review happens within 24h of FSRS due_at
-  if (fsrsDueAt) {
-    const dueDate = new Date(fsrsDueAt);
-    const now = new Date();
-    const hoursDiff =
-      Math.abs(now.getTime() - dueDate.getTime()) / (1000 * 60 * 60);
-    if (hoursDiff <= 24) {
+  // Skip bonuses for negative XP (purchases)
+  if (xpBase > 0) {
+    // 1. On-Time Review Bonus (+50%) — Cepeda 2006
+    //    Awarded when review happens within 24h of FSRS due_at
+    if (fsrsDueAt) {
+      const dueDate = new Date(fsrsDueAt);
+      const now = new Date();
+      const hoursDiff =
+        Math.abs(now.getTime() - dueDate.getTime()) / (1000 * 60 * 60);
+      if (hoursDiff <= 24) {
+        multiplier += 0.5;
+        bonusType = "on_time";
+      }
+    }
+
+    // 2. Flow Zone Bonus (+25%) — Csikszentmihalyi 1990
+    //    BKT p_know between 0.3-0.7 = optimal challenge zone
+    if (bktPKnow !== null && bktPKnow !== undefined) {
+      if (bktPKnow >= 0.3 && bktPKnow <= 0.7) {
+        multiplier += 0.25;
+        bonusType = bonusType ? `${bonusType}+flow_zone` : "flow_zone";
+      }
+    }
+
+    // 3. Variable Reward (10% chance 2x) — Skinner VR schedule
+    //    ⚠ Multipliers SUM, not multiply (§10 Combo rule)
+    if (Math.random() < 0.1) {
+      multiplier += 1.0;
+      bonusType = bonusType ? `${bonusType}+variable` : "variable";
+    }
+
+    // 4. Streak Multiplier (+50% at 7+ days) — Duolingo model
+    if (currentStreak && currentStreak >= 7) {
       multiplier += 0.5;
-      bonusType = "on_time";
+      bonusType = bonusType ? `${bonusType}+streak` : "streak";
     }
-  }
-
-  // 2. Flow Zone Bonus (+25%) — Csikszentmihalyi 1990
-  //    BKT p_know between 0.3-0.7 = optimal challenge zone
-  if (bktPKnow !== null && bktPKnow !== undefined) {
-    if (bktPKnow >= 0.3 && bktPKnow <= 0.7) {
-      multiplier += 0.25;
-      bonusType = bonusType ? `${bonusType}+flow_zone` : "flow_zone";
-    }
-  }
-
-  // 3. Variable Reward (10% chance 2x) — Skinner VR schedule
-  //    ⚠ Multipliers SUM, not multiply (§10 Combo rule)
-  if (Math.random() < 0.1) {
-    multiplier += 1.0;
-    bonusType = bonusType ? `${bonusType}+variable` : "variable";
-  }
-
-  // 4. Streak Multiplier (+50% at 7+ days) — Duolingo model
-  if (currentStreak && currentStreak >= 7) {
-    multiplier += 0.5;
-    bonusType = bonusType ? `${bonusType}+streak` : "streak";
   }
 
   // ─── RPC path (primary) ─────────────────────────────────────
@@ -203,6 +209,8 @@ export async function awardXP(
 // ─── JS Fallback (arch-5) ─────────────────────────────────────
 // Used when award_xp() RPC is unavailable. NOT atomic — race
 // conditions possible but acceptable for fallback path.
+//
+// G-006 FIX: Now enforces daily cap (500 XP) with 10% post-cap rate.
 
 async function awardXPFallback(
   db: SupabaseClient,
@@ -216,7 +224,34 @@ async function awardXPFallback(
   sourceId?: string,
 ): Promise<AwardResult | null> {
   try {
-    const xpFinal = Math.round(xpBase * multiplier);
+    const xpRaw = Math.round(xpBase * multiplier);
+    const dailyCap = 500;
+
+    // Upsert student_xp aggregate (read first for cap check)
+    const { data: existing } = await db
+      .from("student_xp")
+      .select("total_xp, xp_today, xp_this_week")
+      .eq("student_id", studentId)
+      .eq("institution_id", institutionId)
+      .single();
+
+    const currentDaily = existing?.xp_today ?? 0;
+
+    // G-006 FIX: Apply daily cap logic (matches award_xp() RPC)
+    let xpFinal: number;
+    if (xpBase < 0) {
+      // Purchases (freeze buy, repair) — skip cap, no bonuses
+      xpFinal = xpBase;
+    } else if (currentDaily >= dailyCap) {
+      // Post-cap: 10% rate, minimum 1 XP (contract §6.4)
+      xpFinal = Math.max(1, Math.round(xpRaw * 0.1));
+    } else if (currentDaily + xpRaw > dailyCap) {
+      // Partial: award up to cap
+      xpFinal = dailyCap - currentDaily;
+    } else {
+      // Normal: full amount
+      xpFinal = xpRaw;
+    }
 
     // Insert transaction log
     const { error: txError } = await db.from("xp_transactions").insert({
@@ -239,17 +274,9 @@ async function awardXPFallback(
       return null;
     }
 
-    // Upsert student_xp aggregate
-    const { data: existing } = await db
-      .from("student_xp")
-      .select("total_xp, xp_today, xp_this_week")
-      .eq("student_id", studentId)
-      .eq("institution_id", institutionId)
-      .single();
-
     const newTotal = (existing?.total_xp ?? 0) + xpFinal;
-    const newToday = (existing?.xp_today ?? 0) + xpFinal;
-    const newWeek = (existing?.xp_this_week ?? 0) + xpFinal;
+    const newToday = (existing?.xp_today ?? 0) + (xpBase > 0 ? xpFinal : 0);
+    const newWeek = (existing?.xp_this_week ?? 0) + (xpBase > 0 ? xpFinal : 0);
     const newLevel = calculateLevel(newTotal);
 
     const { error: upsertError } = await db.from("student_xp").upsert(
@@ -274,7 +301,7 @@ async function awardXPFallback(
     }
 
     console.log(
-      `[XP Engine] Fallback: awarded ${xpFinal} XP to ${studentId}`,
+      `[XP Engine] Fallback: awarded ${xpFinal} XP to ${studentId} (cap: ${currentDaily}/${dailyCap})`,
     );
     return {
       xp_awarded: xpFinal,
@@ -282,7 +309,7 @@ async function awardXPFallback(
       multiplier,
       bonus_type: bonusType,
       daily_used: newToday,
-      daily_cap: 500,
+      daily_cap: dailyCap,
       total_xp: newTotal,
       level: newLevel,
     };
