@@ -1,103 +1,132 @@
-# Gamification Backend Map
+# Gamification Quick Reference Map
 
-> Quick reference for the gamification module in axon-backend.
-> For the full audit with findings and fixes, see [GAMIFICATION_AUDIT.md](./GAMIFICATION_AUDIT.md).
-> For the implementation plan and contract, see the Figma Make dashboard.
-
----
-
-## Module Structure
-
-```
-supabase/functions/server/
-|-- xp-engine.ts              <- XP calculation + award_xp() RPC caller + JS fallback
-|-- streak-engine.ts          <- Streak lifecycle (check-in, freeze consume, repair eligibility)
-|-- xp-hooks.ts               <- 8 afterWrite hooks (fire-and-forget XP awards)
-|
-+-- routes/gamification/      <- 13 HTTP endpoints
-    |-- index.ts              <- Module combiner (mounts 4 sub-routers)
-    |-- helpers.ts            <- Constants + badge criteria evaluator
-    |-- profile.ts            <- XP profile, history, leaderboard
-    |-- badges.ts             <- Badge catalog, check-badges, notifications
-    |-- streak.ts             <- Streak status, daily check-in, freeze buy, repair
-    +-- goals.ts              <- Daily goal, goal completion, onboarding
-```
+> **Quick nav for any agent working on gamification in axon-backend.**
+> For the full audit, see [GAMIFICATION_AUDIT.md](./GAMIFICATION_AUDIT.md).
+> For general backend nav, see [AGENT_INDEX.md](./AGENT_INDEX.md).
 
 ---
 
-## Endpoints (13 total)
+## 13 Endpoints (6 files)
 
 | Method | Path | File | Description |
 |---|---|---|---|
-| GET | `/gamification/profile?institution_id=` | profile.ts | Composite: XP + streak + badge count |
-| GET | `/gamification/xp-history?institution_id=&limit=&offset=` | profile.ts | Paginated XP transaction log |
-| GET | `/gamification/leaderboard?institution_id=&period=&limit=` | profile.ts | Weekly/daily leaderboard (MV + fallback) |
-| GET | `/gamification/badges?category=` | badges.ts | All badge definitions + earned status |
-| POST | `/gamification/check-badges?institution_id=` | badges.ts | Evaluate and award eligible badges |
-| GET | `/gamification/notifications?institution_id=&limit=` | badges.ts | Unified XP + badge event timeline |
-| GET | `/gamification/streak-status?institution_id=` | streak.ts | Detailed streak info + repair eligibility |
-| POST | `/gamification/daily-check-in?institution_id=` | streak.ts | Daily streak check-in (idempotent) |
-| POST | `/gamification/streak-freeze/buy?institution_id=` | streak.ts | Purchase streak freeze with XP |
-| POST | `/gamification/streak-repair?institution_id=` | streak.ts | Repair broken streak with XP |
-| PUT | `/gamification/daily-goal` | goals.ts | Update daily XP goal (body: institution_id, daily_goal) |
-| POST | `/gamification/goals/complete` | goals.ts | Complete a goal, award bonus XP |
-| POST | `/gamification/onboarding` | goals.ts | Initialize student gamification profile |
+| GET | `/gamification/profile` | `profile.ts` | Student XP profile (level, total_xp, daily progress) |
+| GET | `/gamification/xp-history` | `profile.ts` | Paginated XP transaction log |
+| GET | `/gamification/leaderboard` | `profile.ts` | Weekly leaderboard (materialized view) |
+| GET | `/gamification/badges` | `badges.ts` | All badge definitions + student's earned badges |
+| POST | `/gamification/check-badges` | `badges.ts` | Evaluate and award eligible badges |
+| GET | `/gamification/notifications` | `badges.ts` | Recent XP + badge events timeline |
+| GET | `/gamification/streak-status` | `streak.ts` | Detailed streak info + repair eligibility |
+| POST | `/gamification/daily-check-in` | `streak.ts` | Daily login streak check-in + XP |
+| POST | `/gamification/streak-freeze/buy` | `streak.ts` | Purchase streak freeze with XP |
+| POST | `/gamification/streak-repair` | `streak.ts` | Repair broken streak with XP |
+| PUT | `/gamification/daily-goal` | `goals.ts` | Update daily XP goal (10-1000) |
+| POST | `/gamification/goals/complete` | `goals.ts` | Mark goal as completed + bonus XP |
+| POST | `/gamification/onboarding` | `goals.ts` | Initialize student gamification profile |
 
 ---
 
-## XP Hooks (8 hooks, 11 XP actions)
+## 8 XP Hooks (fire-and-forget)
 
-All hooks are fire-and-forget (contract S4.3). They call `awardXP()` from `xp-engine.ts`.
+All hooks are in `xp-hooks.ts`. They are called after successful CRUD writes.
 
-| Hook | Triggered By | XP Action | Base XP |
-|---|---|---|---|
-| `xpHookForReview` | POST /reviews (afterWrite) | review_flashcard / review_correct | 5 / 10 |
-| `xpHookForQuizAttempt` | POST /quiz-attempts (manual) | quiz_answer / quiz_correct | 5 / 15 |
-| `xpHookForSessionComplete` | PUT /study-sessions (afterWrite) | complete_session | 25 |
-| `xpHookForReadingComplete` | POST /reading-states (manual) | complete_reading | 30 |
-| `xpHookForBatchReviews` | POST /review-batch (manual) | review_flashcard / review_correct | 5 / 10 per review |
-| `xpHookForVideoComplete` | POST /mux/track-view (manual) | complete_video | 20 |
-| `xpHookForRagQuestion` | POST /ai/rag-chat (manual) | rag_question | 5 |
-| `xpHookForPlanTaskComplete` | PUT /study-plan-tasks (afterWrite) | complete_plan_task / complete_plan | 15 / 100 |
-| (inline in streak.ts) | POST /daily-check-in | streak_daily | 15 |
+| # | Hook | Trigger | XP Action | Amount |
+|---|---|---|---|---|
+| 1 | `xpHookForReview` | POST /reviews | review_flashcard / review_correct | 5 / 10 |
+| 2 | `xpHookForQuizAttempt` | POST /quiz-attempts | quiz_answer / quiz_correct | 5 / 15 |
+| 3 | `xpHookForSessionComplete` | PUT /study-sessions (completed_at) | complete_session | 25 |
+| 4 | `xpHookForReadingComplete` | POST /reading-states (completed=true) | complete_reading | 30 |
+| 5 | `xpHookForBatchReviews` | POST /review-batch | review_flashcard / review_correct | 5 / 10 ea |
+| 6 | `xpHookForVideoComplete` | POST /mux/track-view | complete_video | 20 |
+| 7 | `xpHookForRagQuestion` | POST /ai/rag-chat | rag_question | 5 |
+| 8 | `xpHookForPlanTaskComplete` | PUT /study-plan-tasks (status→completed) | complete_plan_task + complete_plan | 15 + 100 |
+
+**Note:** `streak_daily` (15 XP) is handled inline in POST /daily-check-in, not via hooks.
 
 ---
 
-## XP Bonuses (additive, contract S10)
+## XP Table (11 actions)
+
+| Action | Base XP | Notes |
+|---|---|---|
+| `review_flashcard` | 5 | Any flashcard review |
+| `review_correct` | 10 | Correct review (grade ≥ 3) |
+| `quiz_answer` | 5 | Any quiz attempt |
+| `quiz_correct` | 15 | Correct quiz answer |
+| `complete_session` | 25 | Study session completed |
+| `complete_reading` | 30 | Summary marked as read |
+| `complete_video` | 20 | Video watched to completion |
+| `streak_daily` | 15 | Daily login streak |
+| `complete_plan_task` | 15 | Study plan task completed |
+| `complete_plan` | 100 | Full study plan completed |
+| `rag_question` | 5 | RAG AI question asked |
+
+**NO XP for:** notes, annotations (§7.14 overjustification effect)
+
+---
+
+## Bonus System (additive, §10)
 
 | Bonus | Multiplier | Condition | Source |
 |---|---|---|---|
-| On-Time Review | +50% | FSRS review within 24h of due_at | Cepeda 2006 |
+| On-Time Review | +50% | FSRS due_at within 24h | Cepeda 2006 |
 | Flow Zone | +25% | BKT p_know 0.3-0.7 | Csikszentmihalyi 1990 |
-| Variable Reward | +100% | 10% random chance | Skinner VR schedule |
+| Variable Reward | +100% (10% chance) | Random | Skinner VR schedule |
 | Streak | +50% | 7+ day streak | Duolingo model |
 
-Example: base=10, on_time+flow = multiplier 1.75 = 18 XP
+Multipliers are **summed**, not multiplied (§10 Combo rule):
+```
+base=10, on_time+flow → multiplier = 1.0 + 0.5 + 0.25 = 1.75
+final = 10 * 1.75 = 17.5 → 18 XP
+```
 
 ---
 
-## DB Tables
+## Level Thresholds
 
-| Table | Key Columns | Notes |
-|---|---|---|
-| `student_xp` | student_id + institution_id UNIQUE | XP aggregates, level, daily/weekly counters |
-| `xp_transactions` | INSERT ONLY | Immutable log of all XP changes |
-| `student_stats` | student_id UNIQUE | Streak + activity counters |
-| `badge_definitions` | category CHECK, trigger_config JSONB NOT NULL | Admin-managed catalog |
-| `student_badges` | student_id + badge_id + institution_id UNIQUE | Earned badges |
-| `streak_freezes` | freeze_type CHECK, xp_cost, expires_at | Purchasable streak protection |
-| `streak_repairs` | institution_id, xp_cost, repair_cost, repair_date | Streak repair log |
-| `leaderboard_weekly` | Materialized view | Refreshed hourly by pg_cron |
+| Level | XP Required |
+|---|---|
+| 1 | 0 |
+| 2 | 100 |
+| 3 | 300 |
+| 4 | 600 |
+| 5 | 1,000 |
+| 6 | 1,500 |
+| 7 | 2,200 |
+| 8 | 3,000 |
+| 9 | 4,000 |
+| 10 | 5,500 |
+| 11 | 7,500 |
+| 12 | 10,000 |
 
 ---
 
-## RPCs
+## DB Tables (7 gamification-specific)
 
-| Function | Purpose | Called By |
+| Table | Type | Key Columns |
 |---|---|---|
-| `award_xp()` | Atomic XP grant + cap + level + log | xp-engine.ts (primary path) |
-| `reset_daily_stat_counters()` | Reset xp_today | Cron: reset-daily-xp |
-| `reset_weekly_stat_counters()` | Reset xp_this_week | Cron: reset-weekly-xp |
+| `student_xp` | Aggregate | student_id, institution_id, total_xp, current_level, xp_today, daily_goal |
+| `xp_transactions` | Log (immutable) | student_id, institution_id, action, xp_base, xp_final, multiplier, bonus_type |
+| `student_stats` | Aggregate | student_id, current_streak, longest_streak, total_reviews, total_sessions |
+| `badge_definitions` | Catalog | slug, name, category, criteria, xp_reward, icon, rarity |
+| `student_badges` | Junction | student_id, badge_id, institution_id |
+| `streak_freezes` | Items | student_id, institution_id, freeze_type, xp_cost, used_on |
+| `streak_repairs` | Log | student_id, institution_id, repair_cost, repair_date |
+
+**Supporting:**
+- `leaderboard_weekly` — Materialized view (refreshed hourly by pg_cron)
+- `daily_activities` — Per-day activity log (existing, not gamification-specific)
+
+---
+
+## RPCs (4 gamification-specific)
+
+| RPC | Purpose | Called by |
+|---|---|---|
+| `award_xp()` | Atomic XP grant + daily cap + level calc | xp-engine.ts |
+| `reset_daily_xp()` | Reset xp_today at midnight | pg_cron |
+| `reset_weekly_xp()` | Reset xp_this_week Monday | pg_cron |
+| `refresh_leaderboard()` | Refresh MV | pg_cron |
 
 ---
 
@@ -106,21 +135,18 @@ Example: base=10, on_time+flow = multiplier 1.75 = 18 XP
 | Constant | Value | Contract Value | Notes |
 |---|---|---|---|
 | `FREEZE_COST_XP` | 100 | 200 | Lower for MVP |
-| `MAX_FREEZES` | 3 | 2 | More generous for MVP |
+| `MAX_FREEZES` | 3 | 2 | Extra for MVP |
 | `REPAIR_BASE_COST_XP` | 200 | 400 | Lower for MVP |
-| Daily XP Cap | 500 | 500 | Matches contract |
-| Post-Cap Rate | 10% (min 1) | 10% (min 1) | Matches contract (S6.4) |
+| `DAILY_XP_CAP` | 500 | 500 | Matches |
+| `POST_CAP_RATE` | 10% | 10% | Matches |
 
 ---
 
-## Pending Code Fixes (see GAMIFICATION_AUDIT.md)
+## Engine Files
 
-| ID | Severity | Summary |
+| File | Purpose | Key Exports |
 |---|---|---|
-| G-001 | CRITICAL | streak.ts: freeze INSERT missing freeze_type + xp_cost |
-| G-002 | CRITICAL | badges.ts: badge INSERT missing institution_id |
-| G-003 | HIGH | streak.ts: repair INSERT missing institution_id |
-| G-004 | HIGH | streak.ts: bypasses award_xp() RPC (contract S7.9) |
-| G-005 | MEDIUM | badges.ts: icon_url vs icon column name |
-| G-006 | MEDIUM | xp-engine.ts: JS fallback ignores daily cap |
-| G-007 | LOW | helpers.ts: cost values differ from contract |
+| `xp-engine.ts` | XP calculation + award | `awardXP()`, `XP_TABLE`, `calculateLevel()`, `LEVEL_THRESHOLDS` |
+| `streak-engine.ts` | Streak computation | `computeStreakStatus()`, `performDailyCheckIn()` |
+| `xp-hooks.ts` | afterWrite hooks | 8 exported hook functions |
+| `helpers.ts` | Constants + badge eval | `evaluateSimpleCondition()`, cost constants |
