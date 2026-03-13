@@ -1,6 +1,12 @@
 -- Achievement tiers for badge_definitions
 -- Supports bronze/silver/gold/platinum progression within achievement groups.
 
+-- PREREQUISITE: badge_definitions.slug needs UNIQUE constraint
+-- for ON CONFLICT (slug) DO NOTHING to work.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_badge_defs_slug_unique
+  ON badge_definitions (slug)
+  WHERE slug IS NOT NULL;
+
 ALTER TABLE badge_definitions
   ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'none',
   ADD COLUMN IF NOT EXISTS achievement_group TEXT;
