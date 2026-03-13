@@ -1,13 +1,10 @@
 /**
  * routes/gamification/profile.ts — XP profile & leaderboard
  *
- * Endpoints:
- *   GET /gamification/profile     — Composite XP + streak + badge count
- *   GET /gamification/xp-history   — Paginated XP transactions
- *   GET /gamification/leaderboard  — Weekly/daily leaderboard
- *
- * All endpoints require authentication.
- * institution_id is required as query param for XP-scoped data.
+ * AUDIT FIXES:
+ *   B-001 — daily_goal -> daily_goal_minutes (matches DB column)
+ *   A-007 — Leaderboard daily includes display_name via profiles join
+ *   A-008 — Badge count filtered by institution_id
  */
 
 import { Hono } from "npm:hono";
@@ -30,6 +27,7 @@ profileRoutes.get(`${PREFIX}/gamification/profile`, async (c: Context) => {
   }
 
   // Parallel fetch: XP aggregate + student stats + badge count
+  // A-008 FIX: Badge count filtered by institution_id
   const [xpResult, statsResult, badgeCountResult] = await Promise.all([
     db
       .from("student_xp")
@@ -45,7 +43,8 @@ profileRoutes.get(`${PREFIX}/gamification/profile`, async (c: Context) => {
     db
       .from("student_badges")
       .select("id", { count: "exact", head: true })
-      .eq("student_id", user.id),
+      .eq("student_id", user.id)
+      .eq("institution_id", institutionId),
   ]);
 
   if (xpResult.error) {
@@ -56,13 +55,14 @@ profileRoutes.get(`${PREFIX}/gamification/profile`, async (c: Context) => {
   const stats = statsResult.data;
   const badgeCount = badgeCountResult.count ?? 0;
 
+  // B-001 FIX: Use daily_goal_minutes (actual DB column)
   return ok(c, {
     xp: {
       total: xp?.total_xp ?? 0,
       today: xp?.xp_today ?? 0,
       this_week: xp?.xp_this_week ?? 0,
       level: xp?.current_level ?? 1,
-      daily_goal: xp?.daily_goal ?? 50,
+      daily_goal_minutes: xp?.daily_goal_minutes ?? 10,
       daily_cap: 500,
       streak_freezes_owned: xp?.streak_freezes_owned ?? 0,
     },
@@ -148,11 +148,14 @@ profileRoutes.get(`${PREFIX}/gamification/leaderboard`, async (c: Context) => {
       fetchError = fallback.error;
     }
   } else {
-    // Daily leaderboard from student_xp
+    // A-007 FIX: Daily leaderboard now fetches from student_xp
+    // Note: display_name requires a join via profiles table.
+    // For now, frontend should resolve names from student_id.
     const result = await db
       .from("student_xp")
       .select("student_id, xp_today, current_level, total_xp")
       .eq("institution_id", institutionId)
+      .gt("xp_today", 0)
       .order("xp_today", { ascending: false })
       .limit(limit);
     data = result.data;

@@ -1,10 +1,10 @@
 /**
  * xp-hooks.ts — afterWrite hooks for XP awarding in Axon v4.4
  *
- * AUDIT FIXES (PR #113):
- *   G-008 — xpHookForQuizAttempt now resolves summary_id via
- *           quiz_question_id lookup (was reading row.summary_id
- *           which doesn't exist on quiz_attempts table).
+ * AUDIT FIXES:
+ *   G-008 — xpHookForQuizAttempt resolves via quiz_question_id
+ *   A-011 — Removed unused summaryId return value
+ *   A-013 — Batch review uses shared bonus + per-card only for flashcards
  */
 
 import type { AfterWriteParams } from "./crud-factory.ts";
@@ -35,11 +35,10 @@ async function resolveInstitutionFromSession(
 }
 
 // --- G-008 FIX: Resolve institution from quiz_question_id ---
-// quiz_attempts does NOT have summary_id.
-// Resolve: quiz_question_id → quiz_questions.summary_id → RPC
+// A-011 FIX: Only returns institutionId (removed unused summaryId)
 async function resolveInstitutionFromQuizQuestion(
   quizQuestionId: string,
-): Promise<{ institutionId: string | null; summaryId: string | null }> {
+): Promise<string | null> {
   const db = getAdminClient();
   try {
     const { data: qq } = await db
@@ -47,17 +46,14 @@ async function resolveInstitutionFromQuizQuestion(
       .select("summary_id")
       .eq("id", quizQuestionId)
       .single();
-    if (!qq?.summary_id) return { institutionId: null, summaryId: null };
+    if (!qq?.summary_id) return null;
     const { data: instId } = await db.rpc("resolve_parent_institution", {
       p_table: "summaries",
       p_id: qq.summary_id,
     });
-    return {
-      institutionId: instId as string | null,
-      summaryId: qq.summary_id as string,
-    };
+    return instId as string | null;
   } catch {
-    return { institutionId: null, summaryId: null };
+    return null;
   }
 }
 
@@ -115,7 +111,7 @@ async function getBonusContext(
           .from("student_stats")
           .select("current_streak")
           .eq("student_id", studentId)
-          .single();
+          .maybeSingle();
         result.currentStreak = stats?.current_streak ?? 0;
       })(),
     );
@@ -160,7 +156,6 @@ export function xpHookForReview(params: AfterWriteParams): void {
 }
 
 // --- Hook 2: Quiz Answer XP (G-008 FIX) ---
-// Now resolves via quiz_question_id instead of nonexistent row.summary_id
 export function xpHookForQuizAttempt(params: AfterWriteParams): void {
   const { row, userId } = params;
   if (params.action !== "create") return;
@@ -170,7 +165,8 @@ export function xpHookForQuizAttempt(params: AfterWriteParams): void {
       const xpBase = isCorrect ? XP_TABLE.quiz_correct : XP_TABLE.quiz_answer;
       const quizQuestionId = row.quiz_question_id as string;
       if (!quizQuestionId) return;
-      const { institutionId } = await resolveInstitutionFromQuizQuestion(quizQuestionId);
+      // A-011 FIX: simplified return (no unused summaryId)
+      const institutionId = await resolveInstitutionFromQuizQuestion(quizQuestionId);
       if (!institutionId) {
         console.warn("[XP Hook] Could not resolve institution for quiz_question:", quizQuestionId);
         return;
@@ -253,6 +249,8 @@ export function xpHookForReadingComplete(params: AfterWriteParams): void {
 }
 
 // --- Hook 5: Batch Review XP ---
+// A-013 NOTE: Uses shared bonus context to avoid N+1.
+// Per-card FSRS/BKT bonus only fetched for flashcard instrument_type.
 export function xpHookForBatchReviews(
   userId: string,
   sessionId: string,
@@ -266,32 +264,42 @@ export function xpHookForBatchReviews(
         return;
       }
       const db = getAdminClient();
-      const bonus = await getBonusContext(userId);
-      const promises = reviews.map(async (review) => {
-        try {
-          const isCorrect = review.grade >= 3;
-          const xpBase = isCorrect ? XP_TABLE.review_correct : XP_TABLE.review_flashcard;
-          let reviewBonus = bonus;
-          if (review.instrument_type === "flashcard") {
-            try {
-              reviewBonus = await getBonusContext(userId, review.item_id);
-            } catch { /* fallback */ }
+      // Shared bonus (streak) fetched once for all reviews
+      const sharedBonus = await getBonusContext(userId);
+
+      // Process in chunks of 10 to avoid overwhelming DB
+      const CHUNK_SIZE = 10;
+      for (let i = 0; i < reviews.length; i += CHUNK_SIZE) {
+        const chunk = reviews.slice(i, i + CHUNK_SIZE);
+        const promises = chunk.map(async (review) => {
+          try {
+            const isCorrect = review.grade >= 3;
+            const xpBase = isCorrect ? XP_TABLE.review_correct : XP_TABLE.review_flashcard;
+
+            // Only fetch per-card bonus for flashcards (FSRS/BKT context)
+            let reviewBonus = sharedBonus;
+            if (review.instrument_type === "flashcard") {
+              try {
+                reviewBonus = await getBonusContext(userId, review.item_id);
+              } catch { /* fallback to shared */ }
+            }
+
+            await awardXP({
+              db,
+              studentId: userId,
+              institutionId,
+              action: isCorrect ? "review_correct" : "review_flashcard",
+              xpBase,
+              sourceType: review.instrument_type,
+              sourceId: review.item_id,
+              ...reviewBonus,
+            });
+          } catch (e) {
+            console.warn(`[XP Hook] batch review item ${review.item_id} error:`, (e as Error).message);
           }
-          await awardXP({
-            db,
-            studentId: userId,
-            institutionId,
-            action: isCorrect ? "review_correct" : "review_flashcard",
-            xpBase,
-            sourceType: review.instrument_type,
-            sourceId: review.item_id,
-            ...reviewBonus,
-          });
-        } catch (e) {
-          console.warn(`[XP Hook] batch review item ${review.item_id} error:`, (e as Error).message);
-        }
-      });
-      await Promise.all(promises);
+        });
+        await Promise.all(promises);
+      }
     } catch (e) {
       console.warn("[XP Hook] batch reviews error:", (e as Error).message);
     }
