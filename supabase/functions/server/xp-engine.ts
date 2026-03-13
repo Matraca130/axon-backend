@@ -1,9 +1,11 @@
 /**
  * xp-engine.ts — XP calculation engine for Axon v4.4 Gamification
  *
- * AUDIT FIXES (PR #113):
+ * AUDIT FIXES:
  *   G-005 — awardXP validates xpBase > 0 early return
- *   G-006 — Fallback path now enforces daily cap 500
+ *   G-006 — Fallback path enforces daily cap 500
+ *   A-009 — Fallback uses .maybeSingle() (was .single(), crashed for new students)
+ *   A-010 — Fallback gives 10% post-cap (was 0%, now matches RPC behavior)
  */
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
@@ -53,10 +55,10 @@ export const XP_TABLE: Record<string, number> = {
 
 // Daily XP cap (§3.8)
 const DAILY_CAP = 500;
+// Post-cap rate (§6.4) — students still earn 10% after hitting cap
+const POST_CAP_RATE = 0.1;
 
 // --- Level Thresholds ---
-// Single source of truth — used by fallback AND helpers (re-exported)
-
 export const LEVEL_THRESHOLDS: [number, number][] = [
   [10000, 12],
   [7500, 11],
@@ -173,7 +175,8 @@ export async function awardXP(
 }
 
 // --- JS Fallback (arch-5) ---
-// G-006 FIX: Now enforces daily cap 500 (was only in RPC before)
+// A-009 FIX: Uses .maybeSingle() (was .single() which crashes for new students)
+// A-010 FIX: 10% post-cap rate (was 0%, now matches RPC)
 
 async function awardXPFallback(
   db: SupabaseClient,
@@ -189,35 +192,30 @@ async function awardXPFallback(
   try {
     const xpFinal = Math.round(xpBase * multiplier);
 
-    // G-006 FIX: Check daily cap before awarding
+    // A-009 FIX: .maybeSingle() instead of .single()
+    // .single() throws when no row exists (new students not yet onboarded)
     const { data: existing } = await db
       .from("student_xp")
       .select("total_xp, xp_today, xp_this_week")
       .eq("student_id", studentId)
       .eq("institution_id", institutionId)
-      .single();
+      .maybeSingle();
 
     const currentDailyUsed = existing?.xp_today ?? 0;
     const remainingCap = DAILY_CAP - currentDailyUsed;
 
+    let cappedXp: number;
     if (remainingCap <= 0) {
+      // A-010 FIX: 10% post-cap rate (matches RPC §6.4)
+      // Students still earn something to maintain engagement
+      cappedXp = Math.max(1, Math.round(xpFinal * POST_CAP_RATE));
       console.log(
-        `[XP Engine] Fallback: daily cap reached for ${studentId} (${currentDailyUsed}/${DAILY_CAP})`,
+        `[XP Engine] Fallback: daily cap reached for ${studentId}, awarding 10% (${cappedXp} XP)`,
       );
-      return {
-        xp_awarded: 0,
-        xp_base: xpBase,
-        multiplier,
-        bonus_type: bonusType,
-        daily_used: currentDailyUsed,
-        daily_cap: DAILY_CAP,
-        total_xp: existing?.total_xp ?? 0,
-        level: calculateLevel(existing?.total_xp ?? 0),
-      };
+    } else {
+      // Cap the award to remaining daily allowance
+      cappedXp = Math.min(xpFinal, remainingCap);
     }
-
-    // Cap the award to remaining daily allowance
-    const cappedXp = Math.min(xpFinal, remainingCap);
 
     // Insert transaction log
     const { error: txError } = await db.from("xp_transactions").insert({
