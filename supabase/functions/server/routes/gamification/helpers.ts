@@ -17,9 +17,9 @@
  * PR #102: calculateLevel + LEVEL_THRESHOLDS now imported from xp-engine.ts
  *   (single source of truth, was duplicated before).
  *
- * Sprint 3 (S3-001): evaluateCountBadge + applyTriggerFilter + TriggerConfig
- *   Evaluates COUNT-based badges via Supabase client queries.
- *   Security: ALLOWED_TABLES whitelist, no raw SQL.
+ * Sprint 3:
+ *   S3-001: evaluateCountBadge + applyTriggerFilter + TriggerConfig
+ *   S3-002: Added fsrs_states to ALLOWED_TABLES (Recolector badges)
  */
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
@@ -96,7 +96,7 @@ export function evaluateSimpleCondition(
   }
 }
 
-// ─── COUNT-Based Badge Evaluator (Sprint 3, S3-001) ──────────
+// ─── COUNT-Based Badge Evaluator (Sprint 3) ──────────────────
 //
 // Evaluates badges whose trigger_config uses COUNT(*), COUNT(DISTINCT col),
 // or field comparisons (e.g. rank <= 10) against actual DB tables.
@@ -110,6 +110,7 @@ export function evaluateSimpleCondition(
 //   {"table":"study_sessions","condition":"COUNT(*) >= 5","filter":"completed_at IS NOT NULL"}
 //   {"table":"bkt_states","condition":"COUNT(*) >= 1","filter":"p_know > 0.80"}
 //   {"table":"study_sessions","condition":"COUNT(DISTINCT summary_id) >= 25","filter":"..."}
+//   {"table":"fsrs_states","condition":"COUNT(*) >= 10"}
 //   {"table":"leaderboard_weekly","condition":"rank <= 10"}
 
 export interface TriggerConfig {
@@ -122,9 +123,8 @@ export interface TriggerConfig {
  * Whitelist of tables the badge evaluator can query.
  * Maps table name → student identifier column.
  *
- * ⚠ flashcards excluded: no student_id column (content table).
- *   Recolector badges need a different evaluation path (e.g. via
- *   a future student_stats.total_cards_created counter).
+ * S3-002: Added fsrs_states for Recolector badges.
+ * Each fsrs_states row = 1 flashcard in the student's SRS system.
  */
 const ALLOWED_TABLES: Record<string, string> = {
   study_sessions: "student_id",
@@ -132,6 +132,7 @@ const ALLOWED_TABLES: Record<string, string> = {
   reading_states: "student_id",
   bkt_states: "student_id",
   leaderboard_weekly: "student_id",
+  fsrs_states: "student_id",
 };
 
 /**
