@@ -1,124 +1,103 @@
-# AI Pipeline Reference -- Axon v4.4
+# AI Pipeline Reference -- Axon v4.5
 
-> **For agents:** This document explains the complete AI/RAG system as it exists today.
+> **For agents:** This document explains the complete AI/RAG system.
 > Read this BEFORE touching any file in `routes/ai/` or `gemini.ts`.
-> For pending features and implementation plan, see [RAG_ROADMAP.md](./RAG_ROADMAP.md).
+> **Updated:** 2026-03-14 (audit pass 6 — embedding migration reflected)
 
 ---
 
 ## Architecture Overview
 
 ```
-                    +----------------------------------+
-                    |         gemini.ts                |
-                    |  (Single source of truth)        |
-                    |                                  |
-                    |  GENERATE_MODEL = "gemini-2.5-flash"
-                    |  generateText()     -> Gemini API |
-                    |  generateEmbedding()-> Gemini API |
-                    |  parseGeminiJson()  -> JSON parse |
-                    |  getApiKey()        -> Deno.env   |
-                    |  fetchWithRetry()   -> timeout +  |
-                    |                       backoff    |
-                    +----------+-----------------------+
-                               | imported by
-            +------------------+----------------------+
-            |                  |                      |
-    +-------v-------+  +------v------+  +------------v--------+
-    |  generate.ts  |  |  ingest.ts  |  |     chat.ts         |
-    |               |  |             |  |                     |
-    | POST /generate|  | POST /ingest|  | POST /rag-chat      |
-    |               |  | -embeddings |  |                     |
-    | Uses:         |  |             |  | Uses:               |
-    | generateText  |  | Uses:       |  | generateEmbedding   |
-    | parseGemini.. |  | generate..  |  | + generateText      |
-    | GENERATE_MODEL|  | Embedding   |  | (embed query, then  |
-    |               |  |             |  |  search, then gen)  |
-    +---------------+  +-------------+  +---------------------+
++----------------------------------+     +------------------------------+
+|         gemini.ts                |     |   openai-embeddings.ts       |
+|  (Text generation ONLY)          |     |   (Embeddings ONLY)          |
+|                                  |     |                              |
+|  GENERATE_MODEL = gemini-2.5-flash|     |  EMBEDDING_MODEL =           |
+|  generateText()     -> Gemini API |     |    text-embedding-3-large    |
+|  extractTextFromPdf()-> Gemini    |     |  EMBEDDING_DIMENSIONS = 1536 |
+|  parseGeminiJson()  -> JSON parse |     |  generateEmbedding() -> OpenAI|
+|  fetchWithRetry()   -> retry      |     +------------------------------+
+|                                  |               | imported by
+|  generateEmbedding() = HARD ERROR|     +---------+---------+
+|  (throws immediately, W7-RAG01)  |     | ingest.ts         |
++----------+-----------------------+     | chat.ts           |
+           | imported by                  | auto-ingest.ts    |
+    +------+------+------+               | ingest-pdf.ts     |
+    |      |      |      |               +-------------------+
+ generate chat  report pre-gen
 ```
 
 ## Model Configuration
 
-### Changing the generation model
-
+### Text Generation Model
 Edit ONE line in `gemini.ts`:
-
 ```ts
-export const GENERATE_MODEL = "gemini-2.5-flash"; // <- change here only
+export const GENERATE_MODEL = "gemini-2.5-flash";
 ```
 
-All endpoints import this constant. The `_meta.model` in responses will automatically reflect the change.
+### Embedding Model (D57 Migration)
 
-### Changing the embedding model
+> **CRITICAL:** Embeddings use **OpenAI text-embedding-3-large** (1536d).
+> The file is `openai-embeddings.ts` (NOT gemini.ts).
+> `gemini.ts` `generateEmbedding()` **throws immediately** (W7-RAG01 safety).
 
-Edit inside `generateEmbedding()` in `gemini.ts`:
-
+Edit in `openai-embeddings.ts`:
 ```ts
-const model = "gemini-embedding-001"; // <- change model name
+export const EMBEDDING_MODEL = "text-embedding-3-large";
+export const EMBEDDING_DIMENSIONS = 1536;
 ```
 
-And if the new model has different dimensions, also change:
-
-```ts
-const EMBEDDING_DIMENSIONS = 768; // <- must match DB column: vector(768)
-```
-
-> **WARNING — Full dimension migration checklist:**
->
-> If you change embedding dimensions, you must update ALL of these:
-> 1. `EMBEDDING_DIMENSIONS` in `gemini.ts`
+> **Dimension migration checklist** (if changing dimensions):
+> 1. `EMBEDDING_DIMENSIONS` in `openai-embeddings.ts`
 > 2. `ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(NEW_DIM)`
-> 3. `ALTER TABLE summaries ALTER COLUMN embedding TYPE vector(NEW_DIM)` (if Fase 3 from RAG_ROADMAP implemented)
-> 4. Function signature: `p_query_embedding vector(768)` in `rag_hybrid_search()`
-> 5. Function signature: `p_query_embedding vector(768)` in `rag_coarse_to_fine_search()` (if exists)
-> 6. Re-run ingest for ALL chunks and summaries (old embeddings are incompatible)
-> 7. Recreate HNSW indexes (they are dimension-specific)
+> 3. `ALTER TABLE summaries ALTER COLUMN embedding TYPE vector(NEW_DIM)`
+> 4. RPC signatures: `p_query_embedding vector(1536)`
+> 5. Re-run ingest for ALL chunks and summaries
+> 6. Recreate HNSW indexes (dimension-specific)
 
-## Retry & Rate Limiting
+## Active Routes (11 mounted in index.ts)
 
-`fetchWithRetry()` in `gemini.ts` handles:
+| Route | File | Description |
+|---|---|---|
+| POST `/ai/generate` | generate.ts | Flashcard/quiz generation |
+| POST `/ai/generate-smart` | generate-smart.ts | Adaptive NeedScore [8A] |
+| POST `/ai/pre-generate` | pre-generate.ts | Bulk [8D] |
+| POST `/ai/report` | report.ts | Quality report [8B] |
+| GET `/ai/report-stats` | report-dashboard.ts | Metrics [8C] |
+| GET `/ai/reports` | report-dashboard.ts | Listing [8C] |
+| POST `/ai/ingest-embeddings` | ingest.ts | Batch embeddings |
+| POST `/ai/ingest-pdf` | ingest-pdf.ts | PDF ingestion [Fase 7] |
+| POST `/ai/re-chunk` | re-chunk.ts | Manual re-chunking |
+| POST `/ai/rag-chat` | chat.ts | RAG chat |
+| PATCH `/ai/rag-feedback` | feedback.ts | Thumbs |
+| GET `/ai/rag-analytics` | analytics.ts | Metrics |
+| GET `/ai/embedding-coverage` | analytics.ts | Coverage % |
 
-| Behavior | Config |
-|----------|--------|
-| Timeout (generate) | 15 seconds |
-| Timeout (embed) | 10 seconds |
-| Retry on 429/503 | Up to 3 retries |
-| Backoff | Exponential: 1s, 2s, 4s (max 8s) |
-| Ingest throttle | 1s pause every 10 embeddings |
+**REMOVED (PHASE-A2):** `list-models.ts`, `re-embed-all.ts` — files on disk but NOT mounted.
 
-## Security Model
+## Rate Limiting
 
-All AI routes follow this pattern (PF-05):
+| Type | Limit | Scope |
+|---|---|---|
+| General | 120 req/min | Per user (in-memory) |
+| AI POST | 20 req/hr | Per user (distributed RPC) |
+| Pre-generate | 10 req/hr | Per user (own bucket) |
+| Report POST | No AI limit | No Gemini cost |
+
+## Security Model (PF-05)
 
 ```
 1. authenticate(c)       -> Decode JWT locally
-2. DB query (RPC/select) -> PostgREST validates JWT cryptographically
-3. Gemini API call       -> Only AFTER step 2 succeeds
+2. DB query              -> PostgREST validates JWT cryptographically
+3. AI API call           -> Only AFTER step 2 succeeds
 ```
-
-**Why this order matters:** `authenticate()` only base64-decodes the JWT. The cryptographic signature is validated by PostgREST when the first DB query executes. If we called Gemini before any DB query, a forged JWT could consume API credits.
 
 ## PostgreSQL RPCs
 
-| RPC | Signature | Purpose |
-|-----|-----------|---------|
-| `resolve_parent_institution` | `(p_table text, p_id uuid) -> uuid` | Walks hierarchy up to institution |
-| `rag_hybrid_search` | `(p_query_embedding text, p_query_text text, p_institution_id uuid, p_summary_id uuid, p_match_count int, p_similarity_threshold float) -> setof record` | Hybrid search: pgvector cosine 70% + ts_rank FTS 30% |
-| `get_student_knowledge_context` | `(p_student_id uuid, p_institution_id uuid) -> jsonb` | Student adaptive profile |
-| `get_course_summary_ids` | `(p_institution_id uuid) -> setof record` | Fallback: all summary_ids for institution |
-
-## Fix History
-
-The complete fix log for all AI/RAG changes is maintained in [BACKEND_MAP.md > AI-series fixes](./BACKEND_MAP.md#ai-series-airag-fixes).
-
-Key fixes to be aware of:
-
-| Fix | Impact | What to remember |
-|-----|--------|------------------|
-| **D-18** | `_meta.model` | Always use `GENERATE_MODEL` constant, never hardcode model names |
-| **PF-05** | Security | DB query BEFORE Gemini call (validates JWT) |
-| **PF-09** | Ingest | Uses `getAdminClient()` to bypass RLS for embedding UPDATEs |
-| **LA-03** | Validation | `message` max 2000 chars, `history` max 6 entries |
-| **D-16** | Embeddings | `outputDimensionality: 768` truncates from 3072 |
-| **LA-04** | Index | HNSW (not IVFFlat) for vector index -- works with 0 rows |
-| **LA-05** | RPC | CTE computes cosine distance once per row (was 3x) |
+| RPC | Purpose |
+|---|---|
+| `rag_hybrid_search` | Hybrid: pgvector cosine 70% + ts_rank FTS 30% |
+| `resolve_parent_institution` | Walk hierarchy to institution |
+| `get_student_knowledge_context` | Student adaptive profile |
+| `check_rate_limit` | Distributed AI rate limit |
