@@ -1,21 +1,29 @@
 # Axon v4.4 — Comprehensive Test Gate
-# Runs ALL tests on push/PR. Blocks deploy if any test fails.
-
+# Runs ALL tests (3 locations) on push/PR. Blocks deploy if any test fails.
 name: Test Gate
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
     paths:
       - 'supabase/functions/server/**'
       - 'tests/**'
+      - '.github/workflows/test-gate.yml'
   pull_request:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  checks: write
+
 jobs:
+  # ──────────────────────────────────────────────
+  # JOB 1: Unit tests (no network, fast)
+  # Covers: tests/unit/ (4 files)
+  # ──────────────────────────────────────────────
   unit-tests:
-    name: Unit Tests (no network)
+    name: "Unit Tests (tests/unit/)"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -23,14 +31,58 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
-      - name: Run all unit tests
-        run: deno test tests/unit/ --no-check
+      - name: Cache Deno dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/deno
+            ~/.deno
+          key: deno-${{ runner.os }}-${{ hashFiles('**/deno.lock', '**/deno.json') }}
+          restore-keys: deno-${{ runner.os }}-
+      - name: Run unit tests
+        run: |
+          echo "=== tests/unit/ ==="
+          deno test tests/unit/ --no-check
 
+  # ──────────────────────────────────────────────
+  # JOB 2: Server-side tests (no network, fast)
+  # Covers: supabase/functions/server/tests/ (16 files)
+  # These were previously NEVER run by CI!
+  # ──────────────────────────────────────────────
+  server-tests:
+    name: "Server Tests (server/tests/)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Cache Deno dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/deno
+            ~/.deno
+          key: deno-${{ runner.os }}-${{ hashFiles('**/deno.lock', '**/deno.json') }}
+          restore-keys: deno-${{ runner.os }}-
+      - name: Run server tests
+        run: |
+          echo "=== supabase/functions/server/tests/ ==="
+          echo "Files found:"
+          ls -la supabase/functions/server/tests/
+          deno test supabase/functions/server/tests/ --no-check
+
+  # ──────────────────────────────────────────────
+  # JOB 3: Integration tests (live backend, needs secrets)
+  # Covers: tests/integration/ (4 files)
+  # Skips gracefully if secrets not configured
+  # ──────────────────────────────────────────────
   integration-tests:
-    name: Integration Tests (live backend)
+    name: "Integration Tests (live)"
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: unit-tests
+    needs: [unit-tests, server-tests]
     env:
       TEST_SUPABASE_URL: ${{ secrets.TEST_SUPABASE_URL }}
       TEST_SUPABASE_ANON_KEY: ${{ secrets.TEST_SUPABASE_ANON_KEY }}
@@ -44,25 +96,47 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+      - name: Cache Deno dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/deno
+            ~/.deno
+          key: deno-${{ runner.os }}-${{ hashFiles('**/deno.lock', '**/deno.json') }}
+          restore-keys: deno-${{ runner.os }}-
       - name: Check secrets
         run: |
           if [ -z "$TEST_SUPABASE_URL" ]; then
-            echo "::warning::Secrets not set — skipping"
+            echo "::warning::TEST_SUPABASE_URL not set — skipping integration tests"
             echo "SKIP=true" >> $GITHUB_ENV
+          else
+            echo "Secrets configured, running integration tests"
           fi
       - name: Run integration tests
         if: env.SKIP != 'true'
-        run: deno test tests/integration/ --allow-net --allow-env --no-check
+        run: |
+          echo "=== tests/integration/ ==="
+          deno test tests/integration/ --allow-net --allow-env --no-check
 
+  # ──────────────────────────────────────────────
+  # GATE: Final check — blocks merge if anything failed
+  # ──────────────────────────────────────────────
   gate:
     name: All Tests Passed
     runs-on: ubuntu-latest
-    needs: [unit-tests, integration-tests]
+    needs: [unit-tests, server-tests, integration-tests]
     if: always()
     steps:
-      - run: |
+      - name: Evaluate results
+        run: |
+          echo "Unit tests:        ${{ needs.unit-tests.result }}"
+          echo "Server tests:      ${{ needs.server-tests.result }}"
+          echo "Integration tests: ${{ needs.integration-tests.result }}"
           if [ "${{ needs.unit-tests.result }}" != "success" ]; then
             echo "::error::Unit tests failed!" && exit 1
+          fi
+          if [ "${{ needs.server-tests.result }}" != "success" ]; then
+            echo "::error::Server tests failed!" && exit 1
           fi
           if [ "${{ needs.integration-tests.result }}" == "failure" ]; then
             echo "::error::Integration tests failed!" && exit 1
