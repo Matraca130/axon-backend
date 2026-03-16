@@ -81,6 +81,10 @@ CREATE TRIGGER trg_telegram_sessions_updated_at
   BEFORE UPDATE ON telegram_sessions
   FOR EACH ROW EXECUTE FUNCTION update_telegram_sessions_updated_at();
 
+CREATE INDEX IF NOT EXISTS idx_telegram_sessions_user_id
+  ON telegram_sessions (user_id)
+  WHERE user_id IS NOT NULL;
+
 COMMENT ON TABLE telegram_sessions IS
   'Active Telegram conversation state. Keyed by chat_id. No RLS — accessed via getAdminClient(). TTL 30min, extended during flashcard_review.';
 
@@ -92,7 +96,7 @@ COMMENT ON TABLE telegram_sessions IS
 CREATE TABLE IF NOT EXISTS telegram_message_log (
   id              uuid          PRIMARY KEY DEFAULT gen_random_uuid(),
   chat_id         bigint        NOT NULL,
-  user_id         uuid,
+  user_id         uuid          REFERENCES auth.users(id) ON DELETE SET NULL,
   tg_message_id   bigint,
   direction       text          NOT NULL
     CHECK (direction IN ('in', 'out')),
@@ -136,6 +140,74 @@ CREATE TABLE IF NOT EXISTS messaging_admin_settings (
 );
 
 ALTER TABLE messaging_admin_settings ENABLE ROW LEVEL SECURITY;
+
+-- Admins/owners can read their institution's messaging settings
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE tablename = 'messaging_admin_settings'
+      AND policyname = 'messaging_admin_settings_select'
+  ) THEN
+    CREATE POLICY messaging_admin_settings_select
+      ON messaging_admin_settings FOR SELECT
+      USING (
+        EXISTS (
+          SELECT 1 FROM memberships m
+          WHERE m.user_id = auth.uid()
+            AND m.institution_id = messaging_admin_settings.institution_id
+            AND m.role IN ('owner', 'admin')
+            AND m.is_active = TRUE
+        )
+      );
+  END IF;
+END $$;
+
+-- Admins/owners can insert/update/delete their institution's messaging settings
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE tablename = 'messaging_admin_settings'
+      AND policyname = 'messaging_admin_settings_write'
+  ) THEN
+    CREATE POLICY messaging_admin_settings_write
+      ON messaging_admin_settings
+      FOR ALL
+      USING (
+        EXISTS (
+          SELECT 1 FROM memberships m
+          WHERE m.user_id = auth.uid()
+            AND m.institution_id = messaging_admin_settings.institution_id
+            AND m.role IN ('owner', 'admin')
+            AND m.is_active = TRUE
+        )
+      )
+      WITH CHECK (
+        EXISTS (
+          SELECT 1 FROM memberships m
+          WHERE m.user_id = auth.uid()
+            AND m.institution_id = messaging_admin_settings.institution_id
+            AND m.role IN ('owner', 'admin')
+            AND m.is_active = TRUE
+        )
+      );
+  END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION update_messaging_admin_settings_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_messaging_admin_settings_updated_at ON messaging_admin_settings;
+CREATE TRIGGER trg_messaging_admin_settings_updated_at
+  BEFORE UPDATE ON messaging_admin_settings
+  FOR EACH ROW EXECUTE FUNCTION update_messaging_admin_settings_updated_at();
+
+CREATE INDEX IF NOT EXISTS idx_messaging_admin_settings_institution
+  ON messaging_admin_settings (institution_id);
 
 COMMENT ON TABLE messaging_admin_settings IS
   'Per-institution messaging channel settings. Stores API tokens/config as JSON. Admin-managed via web UI.';
