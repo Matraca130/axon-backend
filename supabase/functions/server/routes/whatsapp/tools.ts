@@ -18,11 +18,11 @@
  */
 
 import { getAdminClient } from "../../db.ts";
-import { generateText } from "../../gemini.ts";
+import { generateText } from "../../claude-ai.ts";
 import {
   selectStrategy,
   executeRetrievalEmbedding,
-  rerankWithGemini,
+  rerankWithClaude,
   mergeSearchResults,
   type MatchedChunk,
 } from "../../retrieval-strategies.ts";
@@ -270,7 +270,7 @@ async function ragSearch(
       return { context: "", sources: [], strategy: `${strategy}_empty` };
     }
 
-    merged = await rerankWithGemini(question, merged, RAG_TOP_K);
+    merged = await rerankWithClaude(question, merged, RAG_TOP_K);
 
     let contextChars = 0;
     const contextParts: string[] = [];

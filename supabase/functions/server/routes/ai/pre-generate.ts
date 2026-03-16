@@ -25,7 +25,7 @@
  *        It shouldn't consume the student's interactive AI budget.
  *   D14: CONTENT_WRITE_ROLES — only professors/admins can pre-generate.
  *        Students access AI content via /ai/generate or /ai/generate-smart.
- *   D15: Sequential Gemini calls, NOT parallel.
+ *   D15: Sequential Claude calls, NOT parallel.
  *        Gemini has 15 RPM for generation. 5 parallel calls could spike.
  *        Sequential also gives cleaner partial-success error handling.
  *   D16: Partial-success response — if 3 of 5 succeed, return the 3
@@ -39,7 +39,7 @@
  *        keyword A is generated first.
  *
  * Security:
- *   PF-05: DB query (resolve institution + role check) BEFORE Gemini call.
+ *   PF-05: DB query (resolve institution + role check) BEFORE Claude call.
  *   BUG-1: created_by = user.id on all inserts.
  *   BUG-3: Institution scoping via resolve_parent_institution().
  *
@@ -49,7 +49,7 @@
  * Rate limit architecture:
  *   index.ts middleware → skips /ai/pre-generate (like /ai/report)
  *   This endpoint → calls check_rate_limit() internally with its own key.
- *   Budget: 10 requests/hour × 5 items/request = max 50 Gemini calls/hour.
+ *   Budget: 10 requests/hour × 5 items/request = max 50 Claude calls/hour.
  *
  * SECURITY FIX (Gemini Code Assist review):
  *   Rate limiter changed from fail-open to FAIL-CLOSED.
@@ -67,7 +67,7 @@ import {
   isDenied,
   CONTENT_WRITE_ROLES,
 } from "../../auth-helpers.ts";
-import { generateText, parseGeminiJson, GENERATE_MODEL } from "../../gemini.ts";
+import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.ts";
 import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
 
 export const aiPreGenerateRoutes = new Hono();
@@ -138,7 +138,7 @@ aiPreGenerateRoutes.post(
     }
 
     // ── Step 3: Institution scoping (PF-05, BUG-3) ───────────
-    // This DB call MUST happen before any Gemini call.
+    // This DB call MUST happen before any Claude call.
     // authenticate() only decodes JWT locally; PostgREST validates
     // the cryptographic signature when this RPC executes.
     const { data: institutionId } = await db.rpc(
@@ -163,7 +163,7 @@ aiPreGenerateRoutes.post(
     // adminClient required because rate_limit_entries may have RLS.
     //
     // SECURITY: Fail-closed — if rate limit check fails, DENY request.
-    // This prevents uncontrolled Gemini API usage when DB is unreachable.
+    // This prevents uncontrolled Claude API usage when DB is unreachable.
     try {
       const adminDb = getAdminClient();
       const { data: rlData, error: rlError } = await adminDb.rpc(
@@ -329,7 +329,7 @@ Responde en JSON con este schema exacto:
           maxTokens: 1024,
         });
 
-        const parsed = parseGeminiJson(result.text);
+        const parsed = parseClaudeJson(result.text);
         const g = parsed as Record<string, unknown>;
 
         totalTokensInput += result.tokensUsed.input;

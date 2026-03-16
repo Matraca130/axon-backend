@@ -1,8 +1,16 @@
 /**
  * claude-ai.ts — Anthropic Claude API helpers for Axon v4.4
  *
- * Provides Claude API integration for the Telegram bot and future messaging channels.
+ * PRIMARY text generation provider for Axon:
+ *   - Quiz & flashcard generation (/ai/generate, /ai/generate-smart, /ai/pre-generate)
+ *   - RAG chat responses (/ai/rag-chat)
+ *   - Retrieval strategies: multi-query, HyDE, re-ranking (retrieval-strategies.ts)
+ *   - Telegram bot (agentic with tool_use)
+ *
+ * Gemini is used ONLY for multimodal/image tasks (PDF extraction).
+ *
  * Supports model selection: opus, sonnet, haiku.
+ * Default model for generation: sonnet (claude-sonnet-4-20250514).
  *
  * Environment: Reads ANTHROPIC_API_KEY from Deno.env (set via supabase secrets).
  */
@@ -287,4 +295,28 @@ export function selectModelForTask(task: string): ClaudeModel {
 
   // Sonnet for everything else (good balance)
   return "sonnet";
+}
+
+// ─── Model constant for _meta logging ─────────────────────
+// Matches the pattern used by gemini.ts GENERATE_MODEL.
+// Used by generate.ts, generate-smart.ts, pre-generate.ts, chat.ts
+// to log which model produced the output.
+
+export const GENERATE_MODEL = "claude-sonnet-4-20250514";
+
+// ─── Parse JSON safely from Claude output ─────────────────
+// Claude sometimes wraps JSON in markdown code blocks.
+// Same logic as gemini.ts parseGeminiJson (drop-in replacement).
+
+export function parseClaudeJson<T = unknown>(text: string): T {
+  let cleaned = text.trim();
+  if (cleaned.startsWith("```json")) {
+    cleaned = cleaned.slice(7);
+  } else if (cleaned.startsWith("```")) {
+    cleaned = cleaned.slice(3);
+  }
+  if (cleaned.endsWith("```")) {
+    cleaned = cleaned.slice(0, -3);
+  }
+  return JSON.parse(cleaned.trim()) as T;
 }

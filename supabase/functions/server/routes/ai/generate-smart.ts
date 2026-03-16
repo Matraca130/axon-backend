@@ -24,7 +24,7 @@
  *   1. RPC get_smart_generate_target(p_limit=count+5) → targets with buffer
  *   2. Dedup check: filter out recently generated subtopics
  *   3. Pre-fetch shared context (summary, institution, profile)
- *   4. Sequential Gemini calls per target (D15 pattern from pre-generate)
+ *   4. Sequential Claude calls per target (D15 pattern from pre-generate)
  *   5. Partial-success response (D16 pattern from pre-generate)
  *
  * Fase 8G: auto_create_quiz
@@ -51,7 +51,7 @@ import {
   isDenied,
   ALL_ROLES,
 } from "../../auth-helpers.ts";
-import { generateText, parseGeminiJson, GENERATE_MODEL } from "../../gemini.ts";
+import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.ts";
 import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
 import { truncateAtWord } from "../../auto-ingest.ts";
 
@@ -428,7 +428,7 @@ Responde en JSON con este schema exacto:
 }`;
     }
 
-    // ── Step 7: Gemini call + insert ─────────────────────────
+    // ── Step 7: Claude call + insert ─────────────────────────
     try {
       const result = await generateText({
         prompt: userPrompt,
@@ -438,7 +438,7 @@ Responde en JSON con este schema exacto:
         maxTokens: 1024,
       });
 
-      const generated = parseGeminiJson(result.text);
+      const generated = parseClaudeJson(result.text);
 
       if (action === "quiz_question") {
         const g = generated as Record<string, unknown>;
@@ -529,14 +529,14 @@ Responde en JSON con este schema exacto:
         );
       }
     } catch (e) {
-      console.error("[GenerateSmart] Gemini error:", e);
+      console.error("[GenerateSmart] Claude error:", e);
       return err(c, `AI generation failed: ${(e as Error).message}`, 500);
     }
   }
 
   // ════════════════════════════════════════════════════════════
   // BULK PATH (count > 1) — Fase 8E
-  // Sequential Gemini calls with partial-success (D15, D16)
+  // Sequential Claude calls with partial-success (D15, D16)
   // ════════════════════════════════════════════════════════════
 
   // Select targets: prefer non-deduped, take up to `count`
@@ -564,7 +564,7 @@ Responde en JSON con este schema exacto:
   const uniqueSummaryIds = [...new Set(selectedTargets.map((t) => t.summary_id))];
 
   for (const sid of uniqueSummaryIds) {
-    // PF-05: Institution check BEFORE any Gemini call
+    // PF-05: Institution check BEFORE any Claude call
     const { data: instId } = await db.rpc("resolve_parent_institution", {
       p_table: "summaries",
       p_id: sid,
@@ -714,7 +714,7 @@ Responde en JSON con este schema exacto:
 }`;
       }
 
-      // Gemini call with adaptive temperature per target (D10)
+      // Claude call with adaptive temperature per target (D10)
       const result = await generateText({
         prompt: userPrompt,
         systemPrompt,
@@ -723,7 +723,7 @@ Responde en JSON con este schema exacto:
         maxTokens: 1024,
       });
 
-      const generated = parseGeminiJson(result.text);
+      const generated = parseClaudeJson(result.text);
       const g = generated as Record<string, unknown>;
 
       totalTokensInput += result.tokensUsed.input;
