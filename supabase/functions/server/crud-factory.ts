@@ -27,6 +27,7 @@
  */
 
 import { Hono } from "npm:hono";
+import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { authenticate, ok, err, safeJson, PREFIX } from "./db.ts";
 import {
   requireInstitutionRole,
@@ -85,12 +86,10 @@ export interface CrudConfig {
   createFields: string[];
   updateFields: string[];
   /**
-   * Optional lifecycle hook called after successful POST or PUT.
-   *
-   * Fire-and-forget — the factory does NOT await the hook. If the hook
-   * starts async work (e.g. embedding generation), it manages its own
-   * error handling via .catch(). The HTTP response is NEVER delayed
-   * by this hook. NOT called on DELETE or RESTORE operations.
+   * Optional fire-and-forget callback invoked after successful CREATE or UPDATE.
+   * Runs asynchronously — never delays the HTTP response.
+   * NOT called on DELETE or RESTORE operations.
+   * Errors are caught and logged, never propagated to the client.
    */
   afterWrite?: (params: AfterWriteParams) => void;
 }
@@ -125,8 +124,13 @@ export function isContentHierarchyParent(parentKey: string): boolean {
   return parentKey === "institution_id" || parentKey in PARENT_KEY_TO_TABLE;
 }
 
+/**
+ * Resolves the institution_id by traversing the content hierarchy upward.
+ * Uses the resolve_parent_institution RPC which handles courses→semesters→sections→topics→keywords etc.
+ * Returns null if the resource doesn't exist or the chain is broken.
+ */
 async function resolveInstitutionFromParent(
-  db: any,
+  db: SupabaseClient,
   parentKey: string,
   parentValue: string,
 ): Promise<string | null> {
@@ -147,8 +151,13 @@ async function resolveInstitutionFromParent(
   }
 }
 
+/**
+ * Resolves institution_id directly from a table row's institution_id column.
+ * Used for tables that have a direct FK to institutions (e.g., courses, plans).
+ * Returns null if the row doesn't exist.
+ */
 async function resolveInstitutionFromRow(
-  db: any,
+  db: SupabaseClient,
   table: string,
   rowId: string,
 ): Promise<string | null> {
