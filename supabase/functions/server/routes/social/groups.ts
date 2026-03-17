@@ -16,12 +16,16 @@
  *   - 6-char invite code generated via RPC
  *   - Owner transfer on leave (to longest-standing member)
  *   - Group dissolves when last member leaves
+ *   - Join uses atomic RPC to prevent race condition on max_members
+ *   - Leave uses atomic RPC for safe ownership transfer
+ *   - Institution membership is validated on create and join
  */
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX, getAdminClient } from "../../db.ts";
 import { isUuid } from "../../validate.ts";
+import { requireInstitutionRole, isDenied, ALL_ROLES } from "../../auth-helpers.ts";
 
 export const groupRoutes = new Hono();
 
@@ -33,7 +37,7 @@ const MAX_DESCRIPTION_LENGTH = 200;
 groupRoutes.post(`${PREFIX}/social/groups`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { user } = auth;
+  const { user, db } = auth;
 
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
@@ -46,6 +50,12 @@ groupRoutes.post(`${PREFIX}/social/groups`, async (c: Context) => {
   const institutionId = body.institution_id as string;
   if (!institutionId || !isUuid(institutionId)) {
     return err(c, "institution_id must be a valid UUID", 400);
+  }
+
+  // Validate user belongs to this institution
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
+  if (isDenied(roleCheck)) {
+    return err(c, roleCheck.message, roleCheck.status as 400 | 403 | 404);
   }
 
   const description = ((body.description as string) ?? "").trim().slice(0, MAX_DESCRIPTION_LENGTH);
@@ -198,7 +208,7 @@ groupRoutes.get(`${PREFIX}/social/groups/:id`, async (c: Context) => {
 groupRoutes.post(`${PREFIX}/social/groups/join`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { user } = auth;
+  const { user, db } = auth;
 
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
@@ -222,6 +232,14 @@ groupRoutes.post(`${PREFIX}/social/groups/join`, async (c: Context) => {
     return err(c, "Invalid or expired invite code", 404);
   }
 
+  // Validate user belongs to the group's institution
+  const roleCheck = await requireInstitutionRole(
+    db, user.id, group.institution_id as string, ALL_ROLES,
+  );
+  if (isDenied(roleCheck)) {
+    return err(c, "You must be a member of this institution to join the group", 403);
+  }
+
   // Check if already a member
   const { data: existing } = await adminDb
     .from("study_group_members")
@@ -234,27 +252,18 @@ groupRoutes.post(`${PREFIX}/social/groups/join`, async (c: Context) => {
     return ok(c, { message: "Already a member of this group", already_member: true });
   }
 
-  // Check member count
-  const { count } = await adminDb
-    .from("study_group_members")
-    .select("id", { count: "exact", head: true })
-    .eq("group_id", group.id);
-
-  if ((count ?? 0) >= (group.max_members as number)) {
-    return err(c, `Group is full (${group.max_members} members max)`, 400);
-  }
-
-  // Join
-  const { error: joinErr } = await adminDb
-    .from("study_group_members")
-    .insert({
-      group_id: group.id,
-      student_id: user.id,
-      role: "member",
-    });
+  // Atomic join via RPC (prevents race condition on max_members)
+  const { data: joined, error: joinErr } = await adminDb.rpc("join_study_group", {
+    p_group_id: group.id,
+    p_student_id: user.id,
+  });
 
   if (joinErr) {
     return err(c, `Join failed: ${joinErr.message}`, 500);
+  }
+
+  if (!joined) {
+    return err(c, `Group is full (${group.max_members} members max)`, 400);
   }
 
   return ok(c, {
@@ -278,59 +287,19 @@ groupRoutes.delete(`${PREFIX}/social/groups/:id/leave`, async (c: Context) => {
 
   const adminDb = getAdminClient();
 
-  // Get membership
-  const { data: membership } = await adminDb
-    .from("study_group_members")
-    .select("id, role")
-    .eq("group_id", groupId)
-    .eq("student_id", user.id)
-    .maybeSingle();
+  // Atomic leave via RPC (handles ownership transfer safely)
+  const { data: result, error: leaveErr } = await adminDb.rpc("leave_study_group", {
+    p_group_id: groupId,
+    p_student_id: user.id,
+  });
 
-  if (!membership) {
-    return err(c, "You are not a member of this group", 404);
+  if (leaveErr) {
+    return err(c, `Leave failed: ${leaveErr.message}`, 500);
   }
 
-  // Remove member
-  await adminDb
-    .from("study_group_members")
-    .delete()
-    .eq("id", membership.id);
-
-  // If owner is leaving, transfer ownership
-  if (membership.role === "owner") {
-    // Find next oldest member
-    const { data: nextMember } = await adminDb
-      .from("study_group_members")
-      .select("id, student_id")
-      .eq("group_id", groupId)
-      .order("joined_at", { ascending: true })
-      .limit(1)
-      .maybeSingle();
-
-    if (nextMember) {
-      // Transfer ownership
-      await adminDb
-        .from("study_group_members")
-        .update({ role: "owner" })
-        .eq("id", nextMember.id);
-
-      await adminDb
-        .from("study_groups")
-        .update({
-          created_by: nextMember.student_id,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", groupId);
-    } else {
-      // No members left -- dissolve group
-      await adminDb
-        .from("study_groups")
-        .update({
-          is_active: false,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", groupId);
-    }
+  // RPC returns jsonb — check for application-level errors
+  if (result?.error === "not_a_member") {
+    return err(c, "You are not a member of this group", 404);
   }
 
   return ok(c, { left: true, group_id: groupId });
@@ -457,9 +426,7 @@ groupRoutes.put(`${PREFIX}/social/groups/:id`, async (c: Context) => {
     return err(c, "Only the group owner can update settings", 403);
   }
 
-  const updates: Record<string, unknown> = {
-    updated_at: new Date().toISOString(),
-  };
+  const updates: Record<string, unknown> = {};
 
   if (body.name !== undefined) {
     const name = (body.name as string)?.trim();
