@@ -18,6 +18,7 @@ import {
   calculateNeedScore,
   calculateRetention,
   getMasteryColor,
+  getMotivation,
   NEED_CONFIG,
   type NeedScoreInput,
 } from "../routes/study-queue/scoring.ts";
@@ -207,4 +208,36 @@ Deno.test("NEED_CONFIG: weights sum to 1.0", () => {
 
 Deno.test("NEED_CONFIG: graceDays is positive", () => {
   assertEquals(NEED_CONFIG.graceDays > 0, true);
+});
+
+// ═════════════════════════════════════════════════════════
+// 5. getMotivation
+// ═════════════════════════════════════════════════════════
+
+Deno.test("getMotivation: zero mastery = low", () => {
+  assertEquals(getMotivation(0), "low");
+});
+
+Deno.test("getMotivation: below 30% = low", () => {
+  assertEquals(getMotivation(0.29), "low");
+});
+
+Deno.test("getMotivation: exactly 30% = medium (boundary)", () => {
+  assertEquals(getMotivation(0.30), "medium");
+});
+
+Deno.test("getMotivation: 50% = medium", () => {
+  assertEquals(getMotivation(0.50), "medium");
+});
+
+Deno.test("getMotivation: exactly 70% = medium (boundary)", () => {
+  assertEquals(getMotivation(0.70), "medium");
+});
+
+Deno.test("getMotivation: just above 70% = high", () => {
+  assertEquals(getMotivation(0.71), "high");
+});
+
+Deno.test("getMotivation: full mastery = high", () => {
+  assertEquals(getMotivation(1.0), "high");
 });
