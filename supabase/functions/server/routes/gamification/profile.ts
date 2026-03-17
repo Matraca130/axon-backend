@@ -126,6 +126,7 @@ profileRoutes.get(`${PREFIX}/gamification/leaderboard`, async (c: Context) => {
   let fetchError: { message: string } | null = null;
 
   if (period === "weekly") {
+    // Try MV first
     const result = await db
       .from("leaderboard_weekly")
       .select("*")
@@ -135,6 +136,7 @@ profileRoutes.get(`${PREFIX}/gamification/leaderboard`, async (c: Context) => {
     data = result.data;
     fetchError = result.error;
 
+    // Fallback to student_xp if MV is unavailable or stale
     if (fetchError) {
       const fallback = await db
         .from("student_xp")
@@ -203,6 +205,7 @@ profileRoutes.get(`${PREFIX}/gamification/insights`, async (c: Context) => {
       .from("student_stats")
       .select("current_streak, longest_streak, total_reviews, total_sessions")
       .eq("student_id", user.id)
+      .eq("institution_id", institutionId)
       .maybeSingle(),
     // XP earned per day this week
     db
@@ -217,6 +220,7 @@ profileRoutes.get(`${PREFIX}/gamification/insights`, async (c: Context) => {
       .from("student_badges")
       .select("badge_id", { count: "exact", head: true })
       .eq("student_id", user.id)
+      .eq("institution_id", institutionId)
       .gte("created_at", weekAgoISO),
     // Challenges completed this week
     db
@@ -231,9 +235,16 @@ profileRoutes.get(`${PREFIX}/gamification/insights`, async (c: Context) => {
       .from("study_sessions")
       .select("id, duration_seconds", { count: "exact" })
       .eq("student_id", user.id)
+      .eq("institution_id", institutionId)
       .gte("created_at", weekAgoISO)
       .not("completed_at", "is", null),
   ]);
+
+  // Check critical query errors before proceeding
+  if (xpResult.error || statsResult.error) {
+    const msg = xpResult.error?.message ?? statsResult.error?.message ?? "unknown";
+    return err(c, `Failed to load insights: ${msg}`, 500);
+  }
 
   // Build daily XP breakdown
   const dailyXp: Record<string, number> = {};

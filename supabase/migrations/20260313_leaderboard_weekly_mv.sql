@@ -21,6 +21,10 @@ ORDER BY sx.xp_this_week DESC;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_leaderboard_weekly_pk
   ON leaderboard_weekly (student_id, institution_id);
 
+-- Performance index for institution-scoped queries ordered by weekly XP
+CREATE INDEX IF NOT EXISTS idx_leaderboard_weekly_inst_xp
+  ON leaderboard_weekly (institution_id, xp_this_week DESC);
+
 -- RPC function to refresh the MV (called by cron)
 CREATE OR REPLACE FUNCTION refresh_leaderboard_weekly()
 RETURNS void AS $$
@@ -28,3 +32,7 @@ BEGIN
   REFRESH MATERIALIZED VIEW CONCURRENTLY leaderboard_weekly;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Lock down refresh function to service_role only
+REVOKE ALL ON FUNCTION refresh_leaderboard_weekly() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION refresh_leaderboard_weekly() TO service_role;
