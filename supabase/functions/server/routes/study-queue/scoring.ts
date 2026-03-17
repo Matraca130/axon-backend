@@ -15,6 +15,7 @@
  *   calculateNeedScore    — Weighted priority score calculation
  *   calculateRetention    — FSRS v4 power-law retention
  *   getMasteryColor       — 5-color scale with domination threshold
+ *   getMotivation         — Mastery-based motivation tier (low/medium/high)
  */
 
 // ─── NeedScore Configuration (v4.2) ────────────────────────────
@@ -106,4 +107,19 @@ export function getMasteryColor(
   if (delta >= 0.85) return "yellow";
   if (delta >= 0.50) return "orange";
   return "red";
+}
+
+// ─── Motivation Tier (§6.3) ──────────────────────────────────
+
+export type MotivationTier = "low" | "medium" | "high";
+
+/**
+ * Maps a mastery fraction (0-1) to a motivation tier.
+ * Boundaries: <0.30 → low, 0.30–0.70 → medium, >0.70 → high.
+ * Used by adaptive generation prompts to calibrate difficulty.
+ */
+export function getMotivation(pKnow: number): MotivationTier {
+  if (pKnow < 0.30) return "low";
+  if (pKnow <= 0.70) return "medium";
+  return "high";
 }
