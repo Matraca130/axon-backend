@@ -28,6 +28,7 @@ const TIERED_GROUPS = [
   { group: "streak_master", tiers: [3, 7, 14, 30], field: "current_streak" },
   { group: "reviewer", tiers: [50, 200, 500, 2000], field: "total_reviews" },
   { group: "scholar", tiers: [10, 50, 100, 500], field: "total_sessions" },
+  { group: "challenge_hunter", tiers: [5, 20, 50, 100], field: "challenges_completed" },
 ];
 
 const TIER_NAMES = ["bronze", "silver", "gold", "platinum"];
@@ -145,6 +146,7 @@ Deno.test("evaluateBadgeCriteria: bronze threshold met but not silver", () => {
     reviews_today: 0,
     sessions_today: 0,
     correct_streak: 0,
+    challenges_completed: 0,
   };
 
   // Bronze: total_xp >= 100 -> should pass
@@ -166,10 +168,55 @@ Deno.test("evaluateBadgeCriteria: all tiers met at high XP", () => {
     reviews_today: 0,
     sessions_today: 0,
     correct_streak: 0,
+    challenges_completed: 0,
   };
 
   assertEquals(evaluateBadgeCriteria("total_xp >= 100", context), true);
   assertEquals(evaluateBadgeCriteria("total_xp >= 500", context), true);
   assertEquals(evaluateBadgeCriteria("total_xp >= 2000", context), true);
   assertEquals(evaluateBadgeCriteria("total_xp >= 10000", context), true);
+});
+
+Deno.test("evaluateBadgeCriteria: compound AND — both conditions met", () => {
+  const context: BadgeEvalContext = {
+    total_xp: 600,
+    current_level: 4,
+    xp_today: 0,
+    xp_this_week: 0,
+    current_streak: 10,
+    longest_streak: 10,
+    total_reviews: 0,
+    total_sessions: 0,
+    reviews_today: 0,
+    sessions_today: 0,
+    correct_streak: 0,
+    challenges_completed: 0,
+  };
+
+  assertEquals(
+    evaluateBadgeCriteria("total_xp >= 500 AND current_streak >= 7", context),
+    true,
+  );
+});
+
+Deno.test("evaluateBadgeCriteria: compound AND — one condition fails", () => {
+  const context: BadgeEvalContext = {
+    total_xp: 600,
+    current_level: 4,
+    xp_today: 0,
+    xp_this_week: 0,
+    current_streak: 2,
+    longest_streak: 2,
+    total_reviews: 0,
+    total_sessions: 0,
+    reviews_today: 0,
+    sessions_today: 0,
+    correct_streak: 0,
+    challenges_completed: 0,
+  };
+
+  assertEquals(
+    evaluateBadgeCriteria("total_xp >= 500 AND current_streak >= 7", context),
+    false,
+  );
 });

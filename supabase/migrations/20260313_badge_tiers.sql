@@ -15,6 +15,10 @@ CREATE INDEX IF NOT EXISTS idx_badge_defs_group
   ON badge_definitions (achievement_group)
   WHERE achievement_group IS NOT NULL;
 
+-- NOTE: The challenge_hunter group criteria use `challenges_completed` column on
+-- student_stats, which is added by the PR #108 migration. That migration must
+-- run before seeding challenge_hunter badges.
+
 -- Seed: 20 tiered badge definitions across 5 achievement groups
 -- Each group has 4 tiers: bronze, silver, gold, platinum
 
