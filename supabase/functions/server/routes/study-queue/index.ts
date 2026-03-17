@@ -1,181 +1,39 @@
 /**
- * routes-study-queue.ts — Study Queue (Algorithmic Priority Queue) for Axon v4.4
+ * routes/study-queue/index.ts — Study Queue module
  *
  * GET /study-queue — Returns a prioritized list of flashcards to study.
+ * Replaces the old monolithic routes-study-queue.ts (16.4KB).
  *
- * v4.2 SPEC COMPLIANCE:
- *   - clinical_priority from keywords (exponential NeedScore scaling)
- *   - 5-color scale: red/orange/yellow/green/blue with relative Δ mode
- *   - Domination threshold: 0.70 + (priority × 0.20)
- *   - Leech detection (consecutive_lapses >= threshold)
- *   - Enriched return: reps, lapses, last_review_at, max_p_know
+ * Sub-modules:
+ *   scoring.ts   — NeedScore, retention, mastery color algorithms
+ *   resolvers.ts — Summary ID resolution (course/student scope)
  *
  * S-3 FIX: Primary path uses get_study_queue() PostgreSQL RPC.
  * Falls back to JS-side logic if RPC is unavailable.
+ *
+ * PR #103: Modularized from routes-study-queue.ts.
  */
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
-import { authenticate, ok, err, PREFIX } from "./db.ts";
-import { isUuid } from "./validate.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
+import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { isUuid } from "../../validate.ts";
+import {
+  NEED_CONFIG,
+  MAX_FALLBACK_FLASHCARDS,
+  calculateNeedScore,
+  calculateRetention,
+  getMasteryColor,
+} from "./scoring.ts";
+import {
+  resolveSummaryIdsForCourse,
+  resolveSummaryIdsForStudent,
+} from "./resolvers.ts";
 
 export const studyQueueRoutes = new Hono();
 
-// ─── NeedScore Configuration (v4.2) ──────────────────────────────
-
-const NEED_CONFIG = {
-  overdueWeight: 0.40,
-  masteryWeight: 0.30,
-  fragilityWeight: 0.20,
-  noveltyWeight: 0.10,
-  graceDays: 1,
-};
-
-// ─── Constants ──────────────────────────────────────────────────────
-
-const MAX_FALLBACK_FLASHCARDS = 10_000;
-const DEFAULT_DOMINATION_BASE = 0.70;
-const DEFAULT_DOMINATION_PRIORITY_SCALE = 0.20;
-
-// ─── NeedScore Calculation (fallback) ─────────────────────────────
-
-interface NeedScoreInput {
-  dueAt: string | null;
-  fsrsLapses: number;
-  fsrsReps: number;
-  fsrsState: string;
-  fsrsStability: number;
-  pKnow: number;
-  clinicalPriority: number;
-}
-
-function calculateNeedScore(input: NeedScoreInput, now: Date): number {
-  const { dueAt, fsrsLapses, fsrsReps, fsrsState, pKnow, clinicalPriority } = input;
-
-  let overdue = 0;
-  if (!dueAt) {
-    overdue = 1.0;
-  } else {
-    const dueDate = new Date(dueAt);
-    const daysOverdue = (now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24);
-    if (daysOverdue > 0) {
-      overdue = 1 - Math.exp(-daysOverdue / NEED_CONFIG.graceDays);
-    }
-  }
-
-  const needMastery = 1 - pKnow;
-  const needFragility = Math.min(1, fsrsLapses / Math.max(1, fsrsReps + fsrsLapses + 1));
-  const needNovelty = fsrsState === "new" ? 1.0 : 0.0;
-
-  const baseScore =
-    NEED_CONFIG.overdueWeight * overdue +
-    NEED_CONFIG.masteryWeight * needMastery +
-    NEED_CONFIG.fragilityWeight * needFragility +
-    NEED_CONFIG.noveltyWeight * needNovelty;
-
-  const priorityMultiplier = 1.0 + Math.pow(2.0, clinicalPriority * 2.0);
-
-  return Math.max(0, baseScore * priorityMultiplier);
-}
-
-// ─── Retention: FSRS v4 power-law (matches fsrs-v4.ts) ───────────────
-
-function calculateRetention(
-  lastReviewAt: string | null,
-  stabilityDays: number,
-  now: Date,
-): number {
-  if (!lastReviewAt || stabilityDays <= 0) return 0;
-  const daysSince = (now.getTime() - new Date(lastReviewAt).getTime()) / (1000 * 60 * 60 * 24);
-  return Math.max(0, Math.min(1, Math.pow(1 + daysSince / (9 * stabilityDays), -1)));
-}
-
-// ─── 5-Color Scale (§6.2) ─────────────────────────────────────────
-
-function getMasteryColor(
-  pKnow: number,
-  retention: number,
-  clinicalPriority: number,
-): "blue" | "green" | "yellow" | "orange" | "red" | "gray" {
-  if (pKnow <= 0) return "gray";
-
-  const displayMastery = pKnow * (retention > 0 ? retention : (pKnow > 0 ? 1.0 : 0.0));
-  const threshold = DEFAULT_DOMINATION_BASE + clinicalPriority * DEFAULT_DOMINATION_PRIORITY_SCALE;
-  const delta = threshold > 0 ? displayMastery / threshold : 0;
-
-  if (delta >= 1.10) return "blue";
-  if (delta >= 1.00) return "green";
-  if (delta >= 0.85) return "yellow";
-  if (delta >= 0.50) return "orange";
-  return "red";
-}
-
-// ─── Course → Summary IDs resolution (fallback) ─────────────────
-
-async function resolveSummaryIdsForCourse(
-  db: SupabaseClient,
-  courseId: string,
-): Promise<Set<string> | null> {
-  const { data: rpcData, error: rpcError } = await db.rpc(
-    "get_course_summary_ids",
-    { p_course_id: courseId },
-  );
-
-  if (!rpcError && rpcData) {
-    if (rpcData.length === 0) return null;
-    return new Set(rpcData.map((r: { id: string }) => r.id));
-  }
-
-  console.warn(`[study-queue] RPC failed, using fallback: ${rpcError?.message}`);
-
-  const { data: semesters } = await db.from("semesters").select("id").eq("course_id", courseId).is("deleted_at", null);
-  if (!semesters || semesters.length === 0) return null;
-  const semesterIds = semesters.map((s: { id: string }) => s.id);
-
-  const { data: sections } = await db.from("sections").select("id").in("semester_id", semesterIds).is("deleted_at", null);
-  if (!sections || sections.length === 0) return null;
-  const sectionIds = sections.map((s: { id: string }) => s.id);
-
-  const { data: topics } = await db.from("topics").select("id").in("section_id", sectionIds).is("deleted_at", null);
-  if (!topics || topics.length === 0) return null;
-  const topicIds = topics.map((t: { id: string }) => t.id);
-
-  const { data: summaries } = await db.from("summaries").select("id").in("topic_id", topicIds).is("deleted_at", null);
-  if (!summaries || summaries.length === 0) return null;
-  return new Set(summaries.map((s: { id: string }) => s.id));
-}
-
-async function resolveSummaryIdsForStudent(
-  db: SupabaseClient,
-  userId: string,
-): Promise<Set<string> | null> {
-  const { data: memberships } = await db.from("memberships").select("institution_id").eq("user_id", userId).eq("is_active", true);
-  if (!memberships || memberships.length === 0) return null;
-  const institutionIds = memberships.map((m: { institution_id: string }) => m.institution_id);
-
-  const { data: courses } = await db.from("courses").select("id").in("institution_id", institutionIds).eq("is_active", true);
-  if (!courses || courses.length === 0) return null;
-  const courseIds = courses.map((c: { id: string }) => c.id);
-
-  const { data: semesters } = await db.from("semesters").select("id").in("course_id", courseIds).is("deleted_at", null);
-  if (!semesters || semesters.length === 0) return null;
-  const semesterIds = semesters.map((s: { id: string }) => s.id);
-
-  const { data: sections } = await db.from("sections").select("id").in("semester_id", semesterIds).is("deleted_at", null);
-  if (!sections || sections.length === 0) return null;
-  const sectionIds = sections.map((s: { id: string }) => s.id);
-
-  const { data: topics } = await db.from("topics").select("id").in("section_id", sectionIds).is("deleted_at", null);
-  if (!topics || topics.length === 0) return null;
-  const topicIds = topics.map((t: { id: string }) => t.id);
-
-  const { data: summaries } = await db.from("summaries").select("id").in("topic_id", topicIds).is("deleted_at", null);
-  if (!summaries || summaries.length === 0) return null;
-  return new Set(summaries.map((s: { id: string }) => s.id));
-}
-
-// ─── Primary: SQL-based study queue via RPC ────────────────────────
+// ─── Primary: SQL-based study queue via RPC ──────────────────────
 
 async function getStudyQueueFromRpc(
   db: SupabaseClient,
@@ -312,30 +170,15 @@ async function getStudyQueueFromJs(
   }
 
   interface QueueItem {
-    flashcard_id: string;
-    summary_id: string;
-    keyword_id: string;
-    subtopic_id: string | null;
-    front: string;
-    back: string;
-    front_image_url: string | null;
-    back_image_url: string | null;
-    need_score: number;
-    retention: number;
-    mastery_color: string;
-    p_know: number;
-    fsrs_state: string;
-    due_at: string | null;
-    stability: number;
-    difficulty: number;
-    is_new: boolean;
-    reps: number;
-    lapses: number;
-    last_review_at: string | null;
-    max_p_know: number;
-    clinical_priority: number;
-    consecutive_lapses: number;
-    is_leech: boolean;
+    flashcard_id: string; summary_id: string; keyword_id: string;
+    subtopic_id: string | null; front: string; back: string;
+    front_image_url: string | null; back_image_url: string | null;
+    need_score: number; retention: number; mastery_color: string;
+    p_know: number; fsrs_state: string; due_at: string | null;
+    stability: number; difficulty: number; is_new: boolean;
+    reps: number; lapses: number; last_review_at: string | null;
+    max_p_know: number; clinical_priority: number;
+    consecutive_lapses: number; is_leech: boolean;
   }
 
   const queue: QueueItem[] = [];
@@ -418,7 +261,7 @@ async function getStudyQueueFromJs(
   };
 }
 
-// ─── Route: GET /study-queue ──────────────────────────────────────
+// ─── Route: GET /study-queue ─────────────────────────────────────
 
 studyQueueRoutes.get(`${PREFIX}/study-queue`, async (c: Context) => {
   const auth = await authenticate(c);
