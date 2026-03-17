@@ -1,21 +1,11 @@
 /**
- * challenge-engine.ts — Pure challenge evaluation for Axon v4.4 Sprint 2
+ * challenge-engine.ts -- Pure challenge evaluation for Axon v4.4 Sprint 2
  *
- * Contains ONLY pure functions — zero DB access, fully testable.
- *
- * Challenge types:
- *   daily_reviews    — Complete N reviews in a day
- *   daily_xp         — Earn N XP in a day
- *   streak_maintain   — Maintain streak for N days
- *   mastery_improve   — Improve mastery on N topics
- *   session_complete  — Complete N study sessions
- *   quiz_perfect      — Score 100% on a quiz
- *   time_study        — Study for N minutes in a day
- *   variety           — Review items from N different topics
+ * Contains ONLY pure functions -- zero DB access, fully testable.
  *
  * CONTRACT COMPLIANCE:
- *   §7.14 — No challenges for notes/annotations
- *   §10   — Bonus multipliers SUM (via xp-engine)
+ *   S7.14 -- No challenges for notes/annotations
+ *   S10   -- Bonus multipliers SUM (via xp-engine)
  */
 
 // --- Types ---
@@ -216,27 +206,52 @@ export function evaluateChallenge(progress: ChallengeProgress): ChallengeEvalRes
     : 100;
   const progress_pct = Math.min(100, Math.max(0, Math.round(raw_pct)));
 
-  return {
-    completed,
-    progress_pct,
-    current: current_value,
-    target: criteria_value,
-  };
+  return { completed, progress_pct, current: current_value, target: criteria_value };
 }
 
+/**
+ * Select N random daily challenges from templates.
+ * Filters by duration <= 24h and ensures category variety.
+ */
 export function selectDailyChallenges(
   templates: ChallengeTemplate[],
   count: number = 3,
   excludeSlugs: string[] = [],
 ): ChallengeTemplate[] {
-  const dailyTemplates = templates.filter(
-    (t) => t.duration_hours <= 24 && !excludeSlugs.includes(t.slug),
-  );
+  return _selectByDuration(templates, count, excludeSlugs, 24);
+}
 
-  if (dailyTemplates.length <= count) return dailyTemplates;
+/**
+ * Select N random weekly challenges from templates.
+ * Filters by duration > 24h (typically 168h = 7 days).
+ */
+export function selectWeeklyChallenges(
+  templates: ChallengeTemplate[],
+  count: number = 2,
+  excludeSlugs: string[] = [],
+): ChallengeTemplate[] {
+  return _selectByDuration(templates, count, excludeSlugs, 168, true);
+}
 
+/** Internal: shared selection logic for daily/weekly */
+function _selectByDuration(
+  templates: ChallengeTemplate[],
+  count: number,
+  excludeSlugs: string[],
+  maxHours: number,
+  minAbove24: boolean = false,
+): ChallengeTemplate[] {
+  const filtered = templates.filter((t) => {
+    if (excludeSlugs.includes(t.slug)) return false;
+    if (minAbove24) return t.duration_hours > 24 && t.duration_hours <= maxHours;
+    return t.duration_hours <= maxHours;
+  });
+
+  if (filtered.length <= count) return filtered;
+
+  // Ensure variety: at most 1 per category
   const byCategory = new Map<string, ChallengeTemplate[]>();
-  for (const t of dailyTemplates) {
+  for (const t of filtered) {
     const arr = byCategory.get(t.category) ?? [];
     arr.push(t);
     byCategory.set(t.category, arr);
@@ -254,9 +269,7 @@ export function selectDailyChallenges(
 
   if (selected.length < count) {
     const selectedSlugs = new Set(selected.map((s) => s.slug));
-    const remaining = dailyTemplates.filter(
-      (t) => !selectedSlugs.has(t.slug),
-    );
+    const remaining = filtered.filter((t) => !selectedSlugs.has(t.slug));
     for (const t of remaining) {
       if (selected.length >= count) break;
       selected.push(t);

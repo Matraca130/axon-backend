@@ -4,8 +4,9 @@
  * Tests cover:
  *   1. evaluateChallenge: completion detection + progress calculation
  *   2. selectDailyChallenges: variety, exclusion, count
- *   3. difficultyMultiplier: 3 difficulty levels
- *   4. CHALLENGE_TEMPLATES: structure validation
+ *   3. selectWeeklyChallenges: weekly template filtering
+ *   4. difficultyMultiplier: 3 difficulty levels
+ *   5. CHALLENGE_TEMPLATES: structure validation
  *
  * Run: deno test supabase/functions/server/tests/challenge_engine_test.ts
  */
@@ -17,6 +18,7 @@ import {
 import {
   evaluateChallenge,
   selectDailyChallenges,
+  selectWeeklyChallenges,
   difficultyMultiplier,
   CHALLENGE_TEMPLATES,
 } from "../challenge-engine.ts";
@@ -142,6 +144,28 @@ Deno.test("selectDailyChallenges: excludes specified slugs", () => {
 Deno.test("selectDailyChallenges: count=1 returns 1", () => {
   const selected = selectDailyChallenges(CHALLENGE_TEMPLATES, 1);
   assertEquals(selected.length, 1);
+});
+
+// === selectWeeklyChallenges ===
+
+Deno.test("selectWeeklyChallenges: only weekly templates (>24h)", () => {
+  const selected = selectWeeklyChallenges(CHALLENGE_TEMPLATES, 10);
+  for (const t of selected) {
+    assertEquals(t.duration_hours > 24, true, `${t.slug} has ${t.duration_hours}h`);
+  }
+});
+
+Deno.test("selectWeeklyChallenges: returns at least 1 weekly template", () => {
+  const selected = selectWeeklyChallenges(CHALLENGE_TEMPLATES, 10);
+  assertEquals(selected.length > 0, true, "Should have at least 1 weekly template");
+});
+
+Deno.test("selectWeeklyChallenges: excludes specified slugs", () => {
+  const excluded = ["weekly_xp_1000"];
+  const selected = selectWeeklyChallenges(CHALLENGE_TEMPLATES, 10, excluded);
+  for (const t of selected) {
+    assertEquals(excluded.includes(t.slug), false);
+  }
 });
 
 // === difficultyMultiplier ===
