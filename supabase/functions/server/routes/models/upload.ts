@@ -24,6 +24,11 @@ const GLB_MAGIC = new Uint8Array([0x67, 0x6c, 0x54, 0x46]);
 
 let modelBucketReady = false;
 
+// Known tech debt: TOCTOU race — two concurrent requests can both see the
+// bucket as missing (listBuckets → check → createBucket) and race to create
+// it. In practice this is harmless because Supabase's createBucket returns an
+// error for duplicates and the modelBucketReady flag prevents further calls,
+// but a proper fix would use a mutex or an idempotent upsert.
 async function ensureModelBucket(): Promise<void> {
   if (modelBucketReady) return;
   const admin = getAdminClient();

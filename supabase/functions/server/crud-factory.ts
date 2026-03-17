@@ -55,10 +55,18 @@ export const PARENT_KEY_TO_TABLE: Record<string, string> = {
 
 // ─── Types ──────────────────────────────────────────────────────
 
+/**
+ * Parameters passed to the afterWrite lifecycle hook.
+ * Exported for use by hook implementations (e.g. summary-hook.ts).
+ */
 export interface AfterWriteParams {
+  /** Whether the write was a create (POST) or update (PUT) */
   action: "create" | "update";
+  /** The full row returned by Supabase after .select() */
   row: Record<string, unknown>;
+  /** For "update" only: the field names the client actually sent (excludes updated_at) */
   updatedFields?: string[];
+  /** The authenticated user's ID */
   userId: string;
 }
 
@@ -76,6 +84,14 @@ export interface CrudConfig {
   requiredFields?: string[];
   createFields: string[];
   updateFields: string[];
+  /**
+   * Optional lifecycle hook called after successful POST or PUT.
+   *
+   * Fire-and-forget — the factory does NOT await the hook. If the hook
+   * starts async work (e.g. embedding generation), it manages its own
+   * error handling via .catch(). The HTTP response is NEVER delayed
+   * by this hook. NOT called on DELETE or RESTORE operations.
+   */
   afterWrite?: (params: AfterWriteParams) => void;
 }
 

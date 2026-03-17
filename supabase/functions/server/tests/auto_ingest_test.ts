@@ -66,7 +66,7 @@ Deno.test("truncateAtWord: no spaces falls back to hard cut", () => {
   const text = "superlongwordwithoutspaces";
   const result = truncateAtWord(text, 10);
   // lastIndexOf(" ", 10) = -1, cutPoint <= 0 → hard slice(0, 10)
-  assertEquals(result, "superlong");
+  assertEquals(result, "superlongw");
   assertEquals(result.length, 10);
 });
 
