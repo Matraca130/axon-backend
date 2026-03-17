@@ -311,12 +311,24 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
     return err(c, `OpenAI session error: ${sessionResponse.status}`, 502);
   }
 
-  const session = await sessionResponse.json();
+  let session: Record<string, unknown>;
+  try {
+    session = await sessionResponse.json();
+  } catch {
+    return err(c, "Invalid response from OpenAI", 502);
+  }
+
+  const clientSecret = (session.client_secret as Record<string, unknown>)?.value
+    ?? session.client_secret;
+  if (!clientSecret || typeof clientSecret !== "string") {
+    console.error("[Realtime] Missing client_secret in OpenAI response:", JSON.stringify(session).slice(0, 200));
+    return err(c, "OpenAI did not return a valid session token", 502);
+  }
 
   // 6. Return ephemeral token to frontend
   return ok(c, {
-    client_secret: session.client_secret?.value ?? session.client_secret,
-    expires_at: session.client_secret?.expires_at ?? session.expires_at ?? null,
+    client_secret: clientSecret,
+    expires_at: (session.client_secret as Record<string, unknown>)?.expires_at ?? session.expires_at ?? null,
     model: "gpt-4o-realtime-preview",
     voice: "coral",
   });
