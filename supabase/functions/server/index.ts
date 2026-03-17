@@ -4,8 +4,6 @@
  * O-8 FIX: Rate limiting middleware added (120 req/min/user).
  * RAG FIX: AI routes mounted (generate, ingest, chat).
  * BUG-004 FIX: CORS restricted to specific origins (was wildcard "*").
- *   → MVP: Temporarily reverted to "*" for development flexibility.
- *   → TODO: Re-restrict before production launch.
  * D57: Health check now reports openai status alongside gemini.
  * GAMIFICATION: Sprint 1 — gamificationRoutes mounted.
  * PR #101: Modularized gamificationRoutes from monolithic 53KB file.
@@ -49,7 +47,7 @@ const ALLOWED_ORIGINS = [
 
 function getAllowedOrigin(request: Request): string {
   const origin = request.headers.get("Origin") ?? "";
-  return ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  return ALLOWED_ORIGINS.includes(origin) ? origin : "";
 }
 
 // Explicit preflight handler — Supabase gateway may not forward OPTIONS to Hono middleware
@@ -72,7 +70,7 @@ app.use("*", logger(console.log));
 app.use(
   "/*",
   cors({
-    origin: (origin) => (ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0]),
+    origin: (origin) => (ALLOWED_ORIGINS.includes(origin) ? origin : ""),
     allowHeaders: ["Content-Type", "Authorization", "X-Access-Token"],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     exposeHeaders: ["Content-Length"],
