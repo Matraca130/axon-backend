@@ -1,3 +1,5 @@
+// TODO: Wire xp-hooks.ts to use dispatchGamificationEvent instead of direct awardXP calls
+
 /**
  * gamification-dispatcher.ts -- Central gamification event dispatcher
  *
@@ -23,7 +25,6 @@
 import { awardXP, type AwardXPParams, type AwardResult } from "./xp-engine.ts";
 import { evaluateAndAwardBadges } from "./badge-engine.ts";
 import { evaluateChallenge, type ChallengeProgress } from "./challenge-engine.ts";
-import { getAdminClient } from "./db.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 
 // --- Types ---
@@ -31,8 +32,8 @@ import type { SupabaseClient } from "npm:@supabase/supabase-js";
 export interface DispatchParams extends AwardXPParams {
   /** Skip post-award evaluation (prevents infinite loops) */
   skipPostEval?: boolean;
-  /** User-scoped DB client for reads (optional, falls back to admin) */
-  userDb?: SupabaseClient;
+  /** User-scoped DB client for reads (enforces RLS) */
+  userDb: SupabaseClient;
 }
 
 export interface DispatchResult {
@@ -62,7 +63,7 @@ export async function dispatchGamificationEvent(
   // Step 2: Fire-and-forget post-award evaluation
   if (!skipPostEval && xpResult) {
     const adminDb = xpParams.db;
-    const readDb = userDb ?? adminDb;
+    const readDb = userDb;
 
     // Don't await -- fire and forget
     _postAwardEvaluation(
@@ -180,14 +181,15 @@ async function _evaluateChallengesForStudent(
         .eq("id", challenge.id)
         .is("completed_at", null); // Idempotent guard
     } else {
-      // Update progress without completing
+      // Update progress without completing -- only if new value is higher (idempotency guard)
       await adminDb
         .from("student_challenges")
         .update({
           current_value: progress.current_value,
           progress_pct: evalResult.progress_pct,
         })
-        .eq("id", challenge.id);
+        .eq("id", challenge.id)
+        .lt("current_value", progress.current_value);
     }
   }
 

@@ -231,7 +231,10 @@ export async function evaluateAndAwardBadges(
     // Award badge
     const { error: insertErr } = await adminDb
       .from("student_badges")
-      .insert({ student_id: studentId, badge_id: badge.id });
+      .upsert(
+        { student_id: studentId, badge_id: badge.id },
+        { onConflict: "student_id,badge_id", ignoreDuplicates: true },
+      );
 
     if (!insertErr) {
       newBadges.push(badge);

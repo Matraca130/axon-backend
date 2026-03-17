@@ -32,6 +32,7 @@ const BASE_CONTEXT: BadgeEvalContext = {
   reviews_today: 10,
   sessions_today: 2,
   correct_streak: 5,
+  challenges_completed: 0,
 };
 
 // === TIER_ORDER ===
