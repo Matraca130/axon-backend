@@ -1,6 +1,12 @@
 -- Daily stat counters for efficient challenge evaluation
 -- Eliminates O(n) COUNT queries for reviews_today/sessions_today
 -- Also adds challenges_completed for Challenge Hunter badges
+--
+-- IMPORTANT: The student_stats row MUST already exist for increment_daily_stat()
+-- and reset_correct_streak() to work. These RPCs use UPDATE (not UPSERT), so if
+-- the row is missing, the UPDATE matches zero rows and the counter change is
+-- silently lost. The row is created at enrollment time (see student enrollment
+-- flow). If you see missing counters, check that the enrollment INSERT ran.
 
 ALTER TABLE student_stats
   ADD COLUMN IF NOT EXISTS reviews_today INTEGER NOT NULL DEFAULT 0,
@@ -37,7 +43,7 @@ BEGIN
     RAISE EXCEPTION 'Invalid field: %', p_field;
   END IF;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
 -- Reset correct_streak (called on incorrect answer)
 CREATE OR REPLACE FUNCTION reset_correct_streak(
@@ -46,4 +52,4 @@ CREATE OR REPLACE FUNCTION reset_correct_streak(
 BEGIN
   UPDATE student_stats SET correct_streak = 0 WHERE student_id = p_student_id;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;

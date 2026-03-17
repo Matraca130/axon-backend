@@ -100,13 +100,15 @@ export function incrementReviewCounter(
   isCorrect: boolean,
 ): void {
   (async () => {
-    await incrementStat(studentId, "reviews_today", 1);
+    // reviews_today and correct_streak are independent counters — run in parallel
+    const streakPromise = isCorrect
+      ? incrementStat(studentId, "correct_streak", 1)
+      : resetCorrectStreak(studentId);
 
-    if (isCorrect) {
-      await incrementStat(studentId, "correct_streak", 1);
-    } else {
-      await resetCorrectStreak(studentId);
-    }
+    await Promise.all([
+      incrementStat(studentId, "reviews_today", 1),
+      streakPromise,
+    ]);
   })().catch((e) =>
     console.warn("[Stat Counters] incrementReviewCounter:", (e as Error).message),
   );
@@ -134,6 +136,15 @@ export function incrementChallengesCompleted(studentId: string): void {
 }
 
 // --- Fallback: read-then-write (non-atomic) ---
+//
+// IMPORTANT: Must mirror the RPC logic in increment_daily_stat().
+// When incrementing reviews_today, also increment total_reviews.
+// When incrementing sessions_today, also increment total_sessions.
+//
+// NOTE: The student_stats row must already exist (created at enrollment time).
+// If the row is missing, the UPDATE will match zero rows and the counters
+// will be silently lost. There is no upsert here by design — enrollment
+// is the canonical place to INSERT the row.
 
 async function _incrementFallback(
   db: ReturnType<typeof getAdminClient>,
@@ -142,17 +153,35 @@ async function _incrementFallback(
   amount: number,
 ): Promise<void> {
   try {
+    // Determine which fields to select and update.
+    // Mirror RPC: reviews_today also bumps total_reviews,
+    //             sessions_today also bumps total_sessions.
+    const extraField: string | null =
+      field === "reviews_today" ? "total_reviews" :
+      field === "sessions_today" ? "total_sessions" :
+      null;
+
+    const selectFields = extraField ? `${field}, ${extraField}` : field;
+
     const { data } = await db
       .from("student_stats")
-      .select(field)
+      .select(selectFields)
       .eq("student_id", studentId)
       .single();
 
     const current = (data?.[field] as number) ?? 0;
+    const updatePayload: Record<string, number> = {
+      [field]: current + amount,
+    };
+
+    if (extraField) {
+      const currentExtra = (data?.[extraField] as number) ?? 0;
+      updatePayload[extraField] = currentExtra + amount;
+    }
 
     await db
       .from("student_stats")
-      .update({ [field]: current + amount })
+      .update(updatePayload)
       .eq("student_id", studentId);
   } catch (e) {
     console.warn(
