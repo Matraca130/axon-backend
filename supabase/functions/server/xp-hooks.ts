@@ -1,38 +1,39 @@
 /**
- * xp-hooks.ts — afterWrite hooks for XP awarding in Axon v4.4
+ * xp-hooks.ts -- afterWrite hooks for XP awarding in Axon v4.4
  *
  * Uses the same afterWrite pattern as summary-hook.ts.
  * Fire-and-forget: HTTP response is NEVER delayed.
  *
  * Hook registry (11/11 XP actions covered):
- *   1. xpHookForReview          — POST /reviews (afterWrite)
- *   2. xpHookForQuizAttempt     — POST /quiz-attempts (manual call)
- *   3. xpHookForSessionComplete — PUT /study-sessions (afterWrite)
- *   4. xpHookForReadingComplete — POST /reading-states (manual call)
- *   5. xpHookForBatchReviews    — POST /review-batch (manual call)
- *   6. xpHookForVideoComplete   — POST /mux/track-view (manual call)
- *   7. xpHookForRagQuestion     — POST /ai/rag-chat (manual call)
- *   8. xpHookForPlanTaskComplete — PUT /study-plan-tasks (afterWrite)
+ *   1. xpHookForReview          -- POST /reviews (afterWrite)
+ *   2. xpHookForQuizAttempt     -- POST /quiz-attempts (manual call)
+ *   3. xpHookForSessionComplete -- PUT /study-sessions (afterWrite)
+ *   4. xpHookForReadingComplete -- POST /reading-states (manual call)
+ *   5. xpHookForBatchReviews    -- POST /review-batch (manual call)
+ *   6. xpHookForVideoComplete   -- POST /mux/track-view (manual call)
+ *   7. xpHookForRagQuestion     -- POST /ai/rag-chat (manual call)
+ *   8. xpHookForPlanTaskComplete -- PUT /study-plan-tasks (afterWrite)
  *
  * streak_daily (15 XP) is handled inline in POST /daily-check-in.
  *
- * CONTRACT COMPLIANCE:
- *   §2.5 — Uses getAdminClient() singleton
- *   §4.3 — Fire-and-forget, never awaited
- *   §5.4 — institution_id resolved via course lookup chain
- *   §7.14 — No XP for notes/annotations
+ * PR #108: Added stat counter increments:
+ *   - Hook 1 (review): incrementReviewCounter()
+ *   - Hook 3 (session complete): incrementSessionCounter()
+ *   - Hook 5 (batch reviews): incrementReviewCounter() per review
  *
- * PR #99: Added xpHookForBatchReviews, xpHookForVideoComplete,
- *         xpHookForRagQuestion, xpHookForPlanTaskComplete.
+ * CONTRACT COMPLIANCE:
+ *   S2.5 -- Uses getAdminClient() singleton
+ *   S4.3 -- Fire-and-forget, never awaited
+ *   S5.4 -- institution_id resolved via course lookup chain
+ *   S7.14 -- No XP for notes/annotations
  */
 
 import type { AfterWriteParams } from "./crud-factory.ts";
 import { awardXP, XP_TABLE } from "./xp-engine.ts";
 import { getAdminClient } from "./db.ts";
+import { incrementReviewCounter, incrementSessionCounter } from "./stat-counters.ts";
 
-// ─── Helper: Resolve institution_id from study session ───────
-// study_sessions does NOT have institution_id (contract §5.4)
-// Resolve: session.course_id → courses.institution_id
+// --- Helper: Resolve institution_id from study session ---
 
 async function resolveInstitutionFromSession(
   sessionId: string,
@@ -60,7 +61,7 @@ async function resolveInstitutionFromSession(
   }
 }
 
-// ─── Helper: Get bonus context (parallel fetch) ──────────────
+// --- Helper: Get bonus context (parallel fetch) ---
 
 async function getBonusContext(
   studentId: string,
@@ -81,7 +82,6 @@ async function getBonusContext(
     const promises: Promise<void>[] = [];
 
     if (flashcardId) {
-      // FSRS due_at for on-time bonus
       promises.push(
         (async () => {
           const { data: fsrs } = await db
@@ -94,7 +94,6 @@ async function getBonusContext(
         })(),
       );
 
-      // BKT p_know for flow zone bonus
       promises.push(
         (async () => {
           const { data: card } = await db
@@ -116,7 +115,6 @@ async function getBonusContext(
       );
     }
 
-    // Streak for multiplier
     promises.push(
       (async () => {
         const { data: stats } = await db
@@ -136,11 +134,7 @@ async function getBonusContext(
   return result;
 }
 
-// ─── Hook 1: Flashcard Review XP ─────────────────────────────
-/**
- * Triggered after POST /reviews (individual flashcard review).
- * Grade mapping: 1=Again, 2=Hard, 3=Good (correct), 4=Easy (correct)
- */
+// --- Hook 1: Flashcard Review XP ---
 export function xpHookForReview(params: AfterWriteParams): void {
   const { row, userId } = params;
   if (params.action !== "create") return;
@@ -177,13 +171,16 @@ export function xpHookForReview(params: AfterWriteParams): void {
         sourceId: flashcardId,
         ...bonus,
       });
+
+      // PR #108: Increment daily review counter + correct streak
+      incrementReviewCounter(userId, isCorrect);
     } catch (e) {
       console.warn("[XP Hook] review error:", (e as Error).message);
     }
   })();
 }
 
-// ─── Hook 2: Quiz Answer XP ─────────────────────────────────
+// --- Hook 2: Quiz Answer XP ---
 export function xpHookForQuizAttempt(params: AfterWriteParams): void {
   const { row, userId } = params;
   if (params.action !== "create") return;
@@ -221,7 +218,7 @@ export function xpHookForQuizAttempt(params: AfterWriteParams): void {
   })();
 }
 
-// ─── Hook 3: Study Session Complete XP ───────────────────────
+// --- Hook 3: Study Session Complete XP ---
 export function xpHookForSessionComplete(params: AfterWriteParams): void {
   const { row, userId, updatedFields } = params;
   if (params.action !== "update") return;
@@ -247,13 +244,16 @@ export function xpHookForSessionComplete(params: AfterWriteParams): void {
         sourceId: row.id as string,
         currentStreak: bonus.currentStreak,
       });
+
+      // PR #108: Increment daily session counter
+      incrementSessionCounter(userId);
     } catch (e) {
       console.warn("[XP Hook] session complete error:", (e as Error).message);
     }
   })();
 }
 
-// ─── Hook 4: Reading Complete XP ─────────────────────────────
+// --- Hook 4: Reading Complete XP ---
 export function xpHookForReadingComplete(params: AfterWriteParams): void {
   const { row, userId, updatedFields } = params;
   if (params.action !== "update") return;
@@ -290,19 +290,7 @@ export function xpHookForReadingComplete(params: AfterWriteParams): void {
   })();
 }
 
-// ─── Hook 5: Batch Review XP ─────────────────────────────────
-/**
- * Called from POST /review-batch after successful batch processing.
- * Awards XP per review (review_correct or review_flashcard).
- *
- * Unlike xpHookForReview (which handles individual reviews via afterWrite),
- * this hook receives an array of successful reviews and awards XP for each.
- * Uses the session_id to resolve institution once, then awards in parallel.
- *
- * @param userId — Student ID
- * @param sessionId — Study session ID (for institution resolution)
- * @param reviews — Array of { item_id, grade, instrument_type }
- */
+// --- Hook 5: Batch Review XP ---
 export function xpHookForBatchReviews(
   userId: string,
   sessionId: string,
@@ -322,7 +310,6 @@ export function xpHookForBatchReviews(
       const db = getAdminClient();
       const bonus = await getBonusContext(userId);
 
-      // Award XP for each review in parallel (fire-and-forget per review)
       const promises = reviews.map(async (review) => {
         try {
           const isCorrect = review.grade >= 3;
@@ -330,7 +317,6 @@ export function xpHookForBatchReviews(
             ? XP_TABLE.review_correct
             : XP_TABLE.review_flashcard;
 
-          // For flashcards, try to get per-card bonus context
           let reviewBonus = bonus;
           if (review.instrument_type === "flashcard") {
             try {
@@ -350,6 +336,9 @@ export function xpHookForBatchReviews(
             sourceId: review.item_id,
             ...reviewBonus,
           });
+
+          // PR #108: Increment per-review counters
+          incrementReviewCounter(userId, isCorrect);
         } catch (e) {
           console.warn(
             `[XP Hook] batch review item ${review.item_id} error:`,
@@ -369,15 +358,7 @@ export function xpHookForBatchReviews(
   })();
 }
 
-// ─── Hook 6: Video Complete XP ───────────────────────────────
-/**
- * Called from POST /mux/track-view on first video completion.
- * Awards complete_video (20 XP). Institution already resolved by caller.
- *
- * @param userId — Student ID
- * @param videoId — Video UUID (source_id for XP transaction)
- * @param institutionId — Already resolved by tracking.ts
- */
+// --- Hook 6: Video Complete XP ---
 export function xpHookForVideoComplete(
   userId: string,
   videoId: string,
@@ -403,15 +384,7 @@ export function xpHookForVideoComplete(
   })();
 }
 
-// ─── Hook 7: RAG Question XP ────────────────────────────────
-/**
- * Called from POST /ai/rag-chat after successful response.
- * Awards rag_question (5 XP). Institution already resolved by caller.
- *
- * @param userId — Student ID
- * @param institutionId — Already resolved by chat.ts
- * @param logId — rag_query_log ID (source_id for XP transaction)
- */
+// --- Hook 7: RAG Question XP ---
 export function xpHookForRagQuestion(
   userId: string,
   institutionId: string,
@@ -437,21 +410,10 @@ export function xpHookForRagQuestion(
   })();
 }
 
-// ─── Hook 8: Plan Task Complete XP ───────────────────────────
-/**
- * Triggered after PUT /study-plan-tasks/:id (via afterWrite).
- * Awards complete_plan_task (15 XP) when task status → "completed".
- *
- * BONUS: After awarding task XP, checks if ALL tasks in the parent
- * study_plan are now completed. If so, awards complete_plan (100 XP).
- *
- * Institution resolved via: study_plan_task → study_plan → course → institution
- */
+// --- Hook 8: Plan Task Complete XP ---
 export function xpHookForPlanTaskComplete(params: AfterWriteParams): void {
   const { row, userId, updatedFields } = params;
   if (params.action !== "update") return;
-
-  // Only trigger when status is being updated
   if (!updatedFields?.includes("status")) return;
   if (row.status !== "completed") return;
 
@@ -462,14 +424,12 @@ export function xpHookForPlanTaskComplete(params: AfterWriteParams): void {
       const planId = row.study_plan_id as string;
 
       if (!planId) {
-        // If study_plan_id not in the row, look it up
         const { data: task } = await db
           .from("study_plan_tasks")
           .select("study_plan_id")
           .eq("id", taskId)
           .single();
         if (!task?.study_plan_id) return;
-        // Can't reassign const, use local
         await _awardPlanTaskXP(db, userId, taskId, task.study_plan_id as string);
         return;
       }
@@ -481,14 +441,12 @@ export function xpHookForPlanTaskComplete(params: AfterWriteParams): void {
   })();
 }
 
-/** Internal: Award task XP + check full plan completion */
 async function _awardPlanTaskXP(
   db: ReturnType<typeof getAdminClient>,
   userId: string,
   taskId: string,
   planId: string,
 ): Promise<void> {
-  // Resolve institution: plan → course → institution
   const { data: plan } = await db
     .from("study_plans")
     .select("course_id")
@@ -508,7 +466,6 @@ async function _awardPlanTaskXP(
 
   const bonus = await getBonusContext(userId);
 
-  // Award task completion XP (15 XP)
   await awardXP({
     db,
     studentId: userId,
@@ -520,8 +477,6 @@ async function _awardPlanTaskXP(
     currentStreak: bonus.currentStreak,
   });
 
-  // Check if ALL tasks in this plan are now completed
-  // If so, award the big complete_plan bonus (100 XP)
   try {
     const [totalResult, completedResult] = await Promise.all([
       db
@@ -554,7 +509,6 @@ async function _awardPlanTaskXP(
         currentStreak: bonus.currentStreak,
       });
 
-      // Also update plan status to "completed" if not already
       await db
         .from("study_plans")
         .update({

@@ -1,14 +1,19 @@
 /**
  * routes/gamification/challenges.ts -- Daily/weekly challenges (Sprint 2)
  *
+ * PR #108: POST /challenges/check now reads reviews_today,
+ * sessions_today, correct_streak from student_stats instead of
+ * COUNT queries (4 parallel queries -> 2 parallel queries).
+ *
+ * PR #108 FIX: POST /challenges/claim now increments
+ * challenges_completed on student_stats for Challenge Hunter badges.
+ *
  * Endpoints:
  *   GET  /gamification/challenges          -- Active challenges + progress
  *   GET  /gamification/challenges/history   -- Completed challenges
- *   POST /gamification/challenges/check     -- Evaluate progress + auto-complete
+ *   POST /gamification/challenges/check     -- Evaluate + auto-complete
  *   POST /gamification/challenges/claim     -- Claim XP reward
  *   POST /gamification/challenges/generate  -- Generate daily challenges
- *
- * PR #106: Sprint 2 gamification
  */
 
 import { Hono } from "npm:hono";
@@ -16,6 +21,7 @@ import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX, getAdminClient } from "../../db.ts";
 import { isUuid } from "../../validate.ts";
 import { awardXP } from "../../xp-engine.ts";
+import { incrementChallengesCompleted } from "../../stat-counters.ts";
 import {
   evaluateChallenge,
   selectDailyChallenges,
@@ -102,7 +108,6 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Contex
   const adminDb = getAdminClient();
   const now = new Date().toISOString();
 
-  // Step 1: Get active challenges
   const { data: activeChallenges, error: fetchErr } = await db
     .from("student_challenges")
     .select("*")
@@ -120,9 +125,8 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Contex
     return ok(c, { checked: 0, completed: 0, results: [] });
   }
 
-  // Step 2: Get student context data (parallel)
-  const today = new Date().toISOString().split("T")[0];
-  const [xpResult, statsResult, sessionCountResult] = await Promise.all([
+  // PR #108: ONLY 2 queries now (was 4)
+  const [xpResult, statsResult] = await Promise.all([
     db
       .from("student_xp")
       .select("xp_today, xp_this_week, total_xp")
@@ -131,14 +135,9 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Contex
       .maybeSingle(),
     db
       .from("student_stats")
-      .select("current_streak, total_reviews, total_sessions")
+      .select("current_streak, total_reviews, total_sessions, reviews_today, sessions_today, correct_streak")
       .eq("student_id", user.id)
       .maybeSingle(),
-    db
-      .from("study_sessions")
-      .select("id", { count: "exact", head: true })
-      .eq("student_id", user.id)
-      .gte("created_at", `${today}T00:00:00Z`),
   ]);
 
   const context: Record<string, number> = {
@@ -147,12 +146,11 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Contex
     total_xp: (xpResult.data?.total_xp as number) ?? 0,
     current_streak: (statsResult.data?.current_streak as number) ?? 0,
     total_reviews: (statsResult.data?.total_reviews as number) ?? 0,
-    reviews_today: 0,
-    sessions_today: (sessionCountResult.count as number) ?? 0,
-    correct_streak: 0,
+    reviews_today: (statsResult.data?.reviews_today as number) ?? 0,
+    sessions_today: (statsResult.data?.sessions_today as number) ?? 0,
+    correct_streak: (statsResult.data?.correct_streak as number) ?? 0,
   };
 
-  // Step 3: Evaluate each challenge
   const results: Array<{ id: string; slug: string; completed: boolean; progress_pct: number }> = [];
   let completedCount = 0;
 
@@ -190,6 +188,7 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Contex
 });
 
 // --- POST /gamification/challenges/claim ---
+// PR #108 FIX: Now increments challenges_completed counter
 
 challengeRoutes.post(`${PREFIX}/gamification/challenges/claim`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -247,6 +246,9 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/claim`, async (c: Contex
   if (claimErr) {
     return err(c, `Claim update failed: ${claimErr.message}`, 500);
   }
+
+  // PR #108: Increment challenges_completed for Challenge Hunter badges
+  incrementChallengesCompleted(user.id);
 
   return ok(c, { claimed: true, challenge_slug: challenge.challenge_slug, xp_awarded: xpReward });
 });

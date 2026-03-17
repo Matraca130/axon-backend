@@ -1,11 +1,14 @@
 /**
- * cron/reset-xp-counters.ts -- XP daily/weekly reset
- *
- * Deployed as a separate Supabase Edge Function with cron schedule.
- * Resets xp_today at midnight UTC daily, xp_this_week on Monday midnight UTC.
+ * cron/reset-xp-counters.ts -- XP + stat daily/weekly reset
  *
  * Schedule: 0 0 * * * (midnight UTC)
  * Deploy: supabase functions deploy reset-xp-counters --schedule "0 0 * * *"
+ *
+ * Resets:
+ *   - student_xp.xp_today (daily)
+ *   - student_xp.xp_this_week (Monday only)
+ *   - student_stats.reviews_today (daily, PR #108)
+ *   - student_stats.sessions_today (daily, PR #108)
  */
 
 import { createClient } from "npm:@supabase/supabase-js";
@@ -21,7 +24,7 @@ Deno.serve(async () => {
 
   console.log(`[XP Reset] Running at ${now.toISOString()} (day=${dayOfWeek})`);
 
-  // Always: Reset xp_today for all students
+  // --- Always: Reset xp_today ---
   const { error: dailyErr, count: dailyCount } = await adminDb
     .from("student_xp")
     .update({ xp_today: 0 })
@@ -29,12 +32,28 @@ Deno.serve(async () => {
     .select("id", { count: "exact", head: true });
 
   if (dailyErr) {
-    console.error("[XP Reset] Daily reset failed:", dailyErr.message);
+    console.error("[XP Reset] Daily xp reset failed:", dailyErr.message);
   } else {
     console.log(`[XP Reset] Daily: reset xp_today for ${dailyCount ?? 0} students`);
   }
 
-  // Monday only: Reset xp_this_week
+  // --- Always: Reset daily stat counters (PR #108) ---
+  const { error: statErr, count: statCount } = await adminDb
+    .from("student_stats")
+    .update({ reviews_today: 0, sessions_today: 0 })
+    .or("reviews_today.gt.0,sessions_today.gt.0")
+    .select("student_id", { count: "exact", head: true });
+
+  if (statErr) {
+    console.error("[XP Reset] Daily stat counters reset failed:", statErr.message);
+  } else {
+    console.log(`[XP Reset] Daily: reset stat counters for ${statCount ?? 0} students`);
+  }
+
+  // Note: correct_streak is NOT reset daily -- it persists across days
+  // and only resets on incorrect answers (handled by stat-counters.ts)
+
+  // --- Monday only: Reset xp_this_week ---
   let weeklyCount = 0;
   if (dayOfWeek === 1) {
     const { error: weeklyErr, count } = await adminDb
@@ -57,7 +76,8 @@ Deno.serve(async () => {
   return new Response(
     JSON.stringify({
       ok: true,
-      daily_reset: dailyCount ?? 0,
+      daily_xp_reset: dailyCount ?? 0,
+      daily_stat_reset: statCount ?? 0,
       weekly_reset: dayOfWeek === 1 ? weeklyCount : "skipped",
       elapsed_ms: elapsed,
     }),
