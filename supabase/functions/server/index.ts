@@ -40,31 +40,43 @@ const app = new Hono();
 
 // ─── Middleware ───────────────────────────────────────────────────
 
+// Allowed origins for CORS (add production domains here)
+const ALLOWED_ORIGINS = [
+  "https://numero1-sseki-2325-55.vercel.app",
+  "http://localhost:5173",
+  "http://localhost:3000",
+];
+
+function getAllowedOrigin(request: Request): string {
+  const origin = request.headers.get("Origin") ?? "";
+  return ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+}
+
 // Explicit preflight handler — Supabase gateway may not forward OPTIONS to Hono middleware
 app.options("*", (c) => {
+  const origin = getAllowedOrigin(c.req.raw);
   return new Response(null, {
     status: 204,
     headers: {
-      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Origin": origin,
       "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Access-Token",
       "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-      "Access-Control-Max-Age": "600",
+      "Access-Control-Max-Age": "86400",
     },
   });
 });
 
 app.use("*", logger(console.log));
 
-// MVP: CORS open to all origins for development flexibility.
-// TODO: Re-restrict to specific origins (BUG-004) before production.
+// BUG-004 FIX: CORS restricted to allowed origins.
 app.use(
   "/*",
   cors({
-    origin: "*",
+    origin: (origin) => (ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0]),
     allowHeaders: ["Content-Type", "Authorization", "X-Access-Token"],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     exposeHeaders: ["Content-Length"],
-    maxAge: 600,
+    maxAge: 86400,
   }),
 );
 
