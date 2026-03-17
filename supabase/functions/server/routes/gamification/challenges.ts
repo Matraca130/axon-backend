@@ -131,7 +131,7 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Contex
       .maybeSingle(),
     db
       .from("student_stats")
-      .select("current_streak, total_reviews, total_sessions")
+      .select("current_streak, total_reviews, total_sessions, reviews_today, correct_streak, sessions_today")
       .eq("student_id", user.id)
       .maybeSingle(),
     db
@@ -147,9 +147,9 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/check`, async (c: Contex
     total_xp: (xpResult.data?.total_xp as number) ?? 0,
     current_streak: (statsResult.data?.current_streak as number) ?? 0,
     total_reviews: (statsResult.data?.total_reviews as number) ?? 0,
-    reviews_today: 0,
-    sessions_today: (sessionCountResult.count as number) ?? 0,
-    correct_streak: 0,
+    reviews_today: (statsResult.data?.reviews_today as number) ?? 0,
+    sessions_today: (statsResult.data?.sessions_today as number) ?? (sessionCountResult.count as number) ?? 0,
+    correct_streak: (statsResult.data?.correct_streak as number) ?? 0,
   };
 
   // Step 3: Evaluate each challenge
@@ -204,11 +204,6 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/claim`, async (c: Contex
     return err(c, "challenge_id must be a valid UUID", 400);
   }
 
-  const institutionId = body.institution_id as string;
-  if (!institutionId || !isUuid(institutionId)) {
-    return err(c, "institution_id must be a valid UUID", 400);
-  }
-
   const adminDb = getAdminClient();
 
   const { data: challenge, error: fetchErr } = await adminDb
@@ -223,6 +218,9 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/claim`, async (c: Contex
   if (fetchErr || !challenge) {
     return err(c, "Challenge not found, not completed, or already claimed", 404);
   }
+
+  // Use the institution_id from the DB row, not from the request body
+  const institutionId = challenge.institution_id as string;
 
   const xpReward = challenge.xp_reward as number;
   try {
@@ -318,6 +316,12 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/generate`, async (c: Con
     expires_at: expiresAt.toISOString(),
   }));
 
+  // TODO: Add a unique partial index on (student_id, institution_id, challenge_type, created_at::date)
+  // to fully prevent race conditions at the DB level. E.g.:
+  //   CREATE UNIQUE INDEX uq_daily_challenges_per_day
+  //     ON student_challenges (student_id, institution_id, challenge_type, (created_at::date))
+  //     WHERE challenge_type = 'daily';
+
   const { data: created, error: insertErr } = await adminDb
     .from("student_challenges")
     .insert(rows)
@@ -325,6 +329,27 @@ challengeRoutes.post(`${PREFIX}/gamification/challenges/generate`, async (c: Con
 
   if (insertErr) {
     return err(c, `Challenge generation failed: ${insertErr.message}`, 500);
+  }
+
+  // Defensive guard: if a concurrent request also inserted, clean up extras
+  const { count: postInsertCount } = await adminDb
+    .from("student_challenges")
+    .select("id", { count: "exact", head: true })
+    .eq("student_id", user.id)
+    .eq("institution_id", institutionId)
+    .eq("challenge_type", "daily")
+    .gte("created_at", `${today}T00:00:00Z`);
+
+  if ((postInsertCount ?? 0) > rows.length) {
+    // Another request inserted concurrently — delete our batch (keep the first one)
+    const idsToDelete = (created ?? []).map((r: Record<string, unknown>) => r.id as string);
+    if (idsToDelete.length > 0) {
+      await adminDb
+        .from("student_challenges")
+        .delete()
+        .in("id", idsToDelete);
+    }
+    return ok(c, { generated: 0, message: "Daily challenges already generated for today (race resolved)" });
   }
 
   return ok(c, { generated: created?.length ?? 0, challenges: created }, 201);

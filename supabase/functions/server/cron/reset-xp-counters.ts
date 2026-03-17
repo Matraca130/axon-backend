@@ -13,7 +13,12 @@ import { createClient } from "npm:@supabase/supabase-js";
 const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
 const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
-Deno.serve(async () => {
+Deno.serve(async (req: Request) => {
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
   const start = Date.now();
   const adminDb = createClient(supabaseUrl, supabaseServiceKey);
   const now = new Date();

@@ -66,7 +66,7 @@ export const CHALLENGE_TEMPLATES: ChallengeTemplate[] = [
   },
   {
     slug: "daily_reviews_25",
-    title_es: "Maraton de Revision",
+    title_es: "Maratón de Revisión",
     description_es: "Completa 25 revisiones hoy",
     category: "review",
     criteria_field: "reviews_today",
@@ -78,7 +78,7 @@ export const CHALLENGE_TEMPLATES: ChallengeTemplate[] = [
   },
   {
     slug: "daily_reviews_50",
-    title_es: "Revision Extrema",
+    title_es: "Revisión Extrema",
     description_es: "Completa 50 revisiones hoy",
     category: "review",
     criteria_field: "reviews_today",
@@ -129,7 +129,7 @@ export const CHALLENGE_TEMPLATES: ChallengeTemplate[] = [
   {
     slug: "streak_3",
     title_es: "Constancia",
-    description_es: "Manten una racha de 3 dias",
+    description_es: "Mantén una racha de 3 días",
     category: "streak",
     criteria_field: "current_streak",
     criteria_op: ">=",
@@ -141,7 +141,7 @@ export const CHALLENGE_TEMPLATES: ChallengeTemplate[] = [
   {
     slug: "streak_7",
     title_es: "Semana Completa",
-    description_es: "Manten una racha de 7 dias",
+    description_es: "Mantén una racha de 7 días",
     category: "streak",
     criteria_field: "current_streak",
     criteria_op: ">=",
@@ -153,7 +153,7 @@ export const CHALLENGE_TEMPLATES: ChallengeTemplate[] = [
   {
     slug: "streak_14",
     title_es: "Dos Semanas Imparable",
-    description_es: "Manten una racha de 14 dias",
+    description_es: "Mantén una racha de 14 días",
     category: "streak",
     criteria_field: "current_streak",
     criteria_op: ">=",
