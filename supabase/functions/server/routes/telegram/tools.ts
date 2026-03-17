@@ -718,8 +718,8 @@ export async function executeToolCall(
             : `Pregunta académica (sin contexto disponible del curso): ${question}`,
           systemPrompt:
             "Eres un tutor universitario experto. Respondé de forma clara y concisa en español. " +
-            "Máximo 800 caracteres (es para Telegram). Si tenés contexto del curso, basate en él. " +
-            "Si no tenés suficiente información, decilo honestamente. " +
+            "Máximo 800 caracteres (es para Telegram). Si tienes contexto del curso, básate en él. " +
+            "Si no tienes suficiente información, dilo honestamente. " +
             (sources.length > 0
               ? `Fuentes encontradas: ${sources.join(", ")}.`
               : ""),

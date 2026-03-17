@@ -242,9 +242,9 @@ async function callGemini(
   if (!candidate?.content?.parts?.[0]) {
     const blockReason = candidate?.finishReason ?? data.promptFeedback?.blockReason;
     if (blockReason && blockReason !== "STOP") {
-      return { text: "No pude procesar tu mensaje. Intentá reformularlo." };
+      return { text: "No pude procesar tu mensaje. Intenta reformularlo." };
     }
-    return { text: "No obtuve respuesta. Intentá de nuevo." };
+    return { text: "No obtuve respuesta. Intenta de nuevo." };
   }
 
   const part = candidate.content.parts[0];
@@ -477,7 +477,7 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
     const errorMsg = (e as Error).message;
     console.error(`[WA-Handler] Fatal: ${errorMsg}`);
     try {
-      await sendText(phone, "Ups, algo salió mal. Intentá de nuevo en unos segundos. \uD83D\uDE14");
+      await sendText(phone, "Ups, algo salió mal. Intenta de nuevo en unos segundos. \uD83D\uDE14");
     } catch { /* */ }
 
     const db = getAdminClient();

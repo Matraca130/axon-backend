@@ -28,7 +28,7 @@ export function formatFlashcardSummary(
   count: number,
 ): string {
   if (!cards || count === 0) {
-    return "\ud83c\udf89 ¡No tenés flashcards pendientes! Estás al día.";
+    return "\ud83c\udf89 ¡No tienes flashcards pendientes! Estás al día.";
   }
 
   const lines: string[] = [
@@ -121,7 +121,7 @@ export function formatScheduleSummary(schedule: ScheduleData): string {
   const periodLabel = schedule.period === "week" ? "esta semana" : "hoy";
 
   if (!schedule.tasks?.length) {
-    return `\ud83d\udcc5 No tenés tareas para ${periodLabel}. ¡Tiempo libre! \ud83c\udf89`;
+    return `\ud83d\udcc5 No tienes tareas para ${periodLabel}. ¡Tiempo libre! \ud83c\udf89`;
   }
 
   const lines: string[] = [

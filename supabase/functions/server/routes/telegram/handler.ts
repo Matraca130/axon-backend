@@ -434,7 +434,7 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
     const errorMsg = (e as Error).message;
     console.error(`[TG-Handler] Fatal: ${errorMsg}`);
     try {
-      await sendTextPlain(chatId, "Ups, algo salió mal. Intentá de nuevo en unos segundos. \ud83d\ude14");
+      await sendTextPlain(chatId, "Ups, algo salió mal. Intenta de nuevo en unos segundos. \ud83d\ude14");
     } catch { /* */ }
 
     const db = getAdminClient();
