@@ -1,5 +1,5 @@
 /**
- * routes/ai/generate.ts — Adaptive content generation via Gemini
+ * routes/ai/generate.ts — Adaptive content generation via Claude
  *
  * POST /ai/generate
  *   action: "quiz_question" | "flashcard"
@@ -38,7 +38,7 @@ import {
   isDenied,
   ALL_ROLES,
 } from "../../auth-helpers.ts";
-import { generateText, parseGeminiJson, GENERATE_MODEL } from "../../gemini.ts";
+import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.ts";
 import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
 
 export const aiGenerateRoutes = new Hono();
@@ -241,7 +241,7 @@ Responde en JSON con este schema exacto:
 }`;
   }
 
-  // ── Call Gemini ────────────────────────────────────────
+  // ── Call Claude ─────────────────────────────────────────
   try {
     const result = await generateText({
       prompt: userPrompt,
@@ -251,7 +251,7 @@ Responde en JSON con este schema exacto:
       maxTokens: 1024,
     });
 
-    const generated = parseGeminiJson(result.text);
+    const generated = parseClaudeJson(result.text);
 
     // ── Insert into DB ───────────────────────────────────
     if (action === "quiz_question") {
@@ -314,7 +314,7 @@ Responde en JSON con este schema exacto:
       }, 201);
     }
   } catch (e) {
-    console.error("[AI Generate] Gemini error:", e);
+    console.error("[AI Generate] Claude error:", e);
     return err(c, `AI generation failed: ${(e as Error).message}`, 500);
   }
 });

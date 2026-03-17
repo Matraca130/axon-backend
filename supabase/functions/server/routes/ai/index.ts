@@ -17,6 +17,7 @@
  *   feedback.ts          — PATCH /ai/rag-feedback (T-03)
  *   analytics.ts         — GET   /ai/rag-analytics + /ai/embedding-coverage (T-03)
  *   ingest-pdf.ts        — POST  /ai/ingest-pdf              (Fase 7)
+ *   realtime-session.ts  — POST  /ai/realtime-session         (Voice Call)
  *
  * PHASE-A2 CLEANUP: Removed temporary routes:
  *   - list-models.ts     (diagnostic, no longer needed)
@@ -45,6 +46,7 @@ import { aiChatRoutes } from "./chat.ts";
 import { aiFeedbackRoutes } from "./feedback.ts";
 import { aiAnalyticsRoutes } from "./analytics.ts";
 import { aiIngestPdfRoutes } from "./ingest-pdf.ts";
+import { aiRealtimeRoutes } from "./realtime-session.ts";
 import { authenticate, err, getAdminClient, PREFIX } from "../../db.ts";
 
 const aiRoutes = new Hono();
@@ -109,5 +111,6 @@ aiRoutes.route("/", aiChatRoutes);
 aiRoutes.route("/", aiFeedbackRoutes);            // T-03
 aiRoutes.route("/", aiAnalyticsRoutes);            // T-03
 aiRoutes.route("/", aiIngestPdfRoutes);            // Fase 7
+aiRoutes.route("/", aiRealtimeRoutes);             // Voice Call (Realtime API)
 
 export { aiRoutes };

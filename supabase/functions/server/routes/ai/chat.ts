@@ -13,10 +13,10 @@
  *   3. Select retrieval strategy (Fase 6: auto/standard/multi_query/hyde)
  *   4. Execute strategy-specific embedding(s) (Fase 6)
  *   5. Search per embedding (hybrid or coarse-to-fine) + merge results
- *   6. Re-rank merged results via Gemini-as-Judge (Fase 6)
+ *   6. Re-rank merged results via Claude-as-Judge (Fase 6)
  *   7. Fetch adjacent chunks for context expansion (Phase 5)
  *   8. Fetch student knowledge profile via get_student_knowledge_context() RPC
- *   9. Generate response via Gemini 2.5 Flash with RAG context
+ *   9. Generate response via Claude Sonnet with RAG context
  *   10. Log query metrics to rag_query_log (fire-and-forget)
  *   11. Award rag_question XP (fire-and-forget, PR #99)
  *
@@ -33,9 +33,9 @@
  *
  * Fase 6 additions:
  *   - Strategy selection: selectStrategy() or client override via body.strategy
- *   - Multi-Query: Gemini reformulates query -> 3 embeddings -> merge results
- *   - HyDE: Gemini generates hypothetical answer -> embed hypothesis
- *   - Re-ranking: Gemini scores chunk relevance, blends with original score
+ *   - Multi-Query: Claude reformulates query -> 3 embeddings -> merge results
+ *   - HyDE: Claude generates hypothetical answer -> embed hypothesis
+ *   - Re-ranking: Claude scores chunk relevance, blends with original score
  *   - New log columns: retrieval_strategy, rerank_applied
  *   - Response _search metadata extended with strategy info
  *
@@ -69,7 +69,7 @@ import {
   isDenied,
   ALL_ROLES,
 } from "../../auth-helpers.ts";
-import { generateText } from "../../gemini.ts";
+import { generateText, GENERATE_MODEL } from "../../claude-ai.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { xpHookForRagQuestion } from "../../xp-hooks.ts";
 
@@ -77,7 +77,7 @@ import { xpHookForRagQuestion } from "../../xp-hooks.ts";
 import {
   selectStrategy,
   executeRetrievalEmbedding,
-  rerankWithGemini,
+  rerankWithClaude,
   mergeSearchResults,
   type MatchedChunk,
   type RetrievalStrategy,
@@ -444,7 +444,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
 
     if (mergedMatches.length > 1) {
       try {
-        mergedMatches = await rerankWithGemini(message, mergedMatches, 5);
+        mergedMatches = await rerankWithClaude(message, mergedMatches, 5);
         rerankApplied = true;
       } catch (e) {
         console.warn("[RAG Chat] Re-ranking failed, using original order:", (e as Error).message);
@@ -519,7 +519,7 @@ Responde en espanol.${profileContext}`;
           : null,
         latency_ms: latencyMs,
         search_type: logSearchType,
-        model_used: "gemini-2.5-flash",
+        model_used: GENERATE_MODEL,
         retrieval_strategy: strategy,
         rerank_applied: rerankApplied,
       })
@@ -551,7 +551,7 @@ Responde en espanol.${profileContext}`;
       },
     });
   } catch (e) {
-    console.error("[RAG Chat] Gemini error:", e);
+    console.error("[RAG Chat] Claude error:", e);
     return err(c, `Chat failed: ${(e as Error).message}`, 500);
   }
 });

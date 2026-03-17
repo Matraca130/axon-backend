@@ -23,7 +23,7 @@
  */
 
 import { getAdminClient } from "../../db.ts";
-import { generateText } from "../../gemini.ts";
+import { generateText } from "../../claude-ai.ts";
 import { sendText } from "./wa-client.ts";
 
 // ─── Types ───────────────────────────────────────────────

@@ -33,6 +33,7 @@ import { storageRoutes } from "./routes-storage.ts";
 import { settingsRoutes } from "./routes/settings/index.ts";
 import { aiRoutes } from "./routes/ai/index.ts";
 import { whatsappRoutes } from "./routes/whatsapp/index.ts";
+import { telegramRoutes } from "./routes/telegram/index.ts";
 import { gamificationRoutes } from "./routes/gamification/index.ts";
 
 const app = new Hono();
@@ -64,11 +65,14 @@ app.use("*", rateLimitMiddleware);
 app.get(`${PREFIX}/health`, (c) => {
   return c.json({
     status: "ok",
-    version: "4.4",
+    version: "4.5",
     timestamp: new Date().toISOString(),
     services: {
       gemini: !!Deno.env.get("GEMINI_API_KEY"),
       openai: !!Deno.env.get("OPENAI_API_KEY"),
+      claude: !!Deno.env.get("ANTHROPIC_API_KEY"),
+      whatsapp: Deno.env.get("WHATSAPP_ENABLED") === "true",
+      telegram: Deno.env.get("TELEGRAM_ENABLED") === "true",
     },
   });
 });
@@ -90,6 +94,7 @@ app.route("/", storageRoutes);
 app.route("/", settingsRoutes);
 app.route("/", aiRoutes);
 app.route("/", whatsappRoutes);
+app.route("/", telegramRoutes);
 app.route("/", gamificationRoutes);
 
 // ─── Catch-all 404 ───────────────────────────────────────────────

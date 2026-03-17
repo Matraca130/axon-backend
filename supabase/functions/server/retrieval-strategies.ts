@@ -6,18 +6,18 @@
  *
  * Strategies:
  *   standard    — single embedding of the query (pre-Fase 6 behavior)
- *   multi_query — Gemini generates 2 reformulations, embed all 3 in parallel
- *   hyde        — Gemini generates hypothetical answer, embed that instead
+ *   multi_query — Claude generates 2 reformulations, embed all 3 in parallel
+ *   hyde        — Claude generates hypothetical answer, embed that instead
  *
  * Post-processor:
- *   rerankWithGemini() — scores chunk relevance, blends with original score
+ *   rerankWithClaude() — scores chunk relevance, blends with original score
  *
  * Decisions:
  *   D19: Separate file (chat.ts already 21KB)
  *   D21: Parallel embeddings for multi_query (Promise.all)
  *   D23: Score blend: 0.6 × rerank + 0.4 × original
  *   D24: HyDE replaces query embedding (research shows better results)
- *   D27: 2 reformulations (not 3) to save Gemini RPM
+ *   D27: 2 reformulations (not 3) to save Claude RPM
  *   D28: Temperature 0.8 for reformulations (diversity)
  *   D29: Temperature 0.0 for re-ranking (deterministic scoring)
  *   D30: Temperature 0.3 for HyDE (factual content)
@@ -28,9 +28,9 @@
  * W7-RAG02 FIX: Removed unreachable default return in selectStrategy()
  */
 
-// D57: Embeddings from OpenAI, generation stays in Gemini
+// D57: Embeddings from OpenAI, text generation from Claude
 import { generateEmbedding } from "./openai-embeddings.ts";
-import { generateText, parseGeminiJson } from "./gemini.ts";
+import { generateText, parseClaudeJson } from "./claude-ai.ts";
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -97,7 +97,7 @@ export function selectStrategy(
   return "multi_query";
 }
 
-// ─── Multi-Query: Gemini generates reformulations ─────────────────
+// ─── Multi-Query: Claude generates reformulations ─────────────────
 
 /**
  * Generates 2 alternative reformulations of the user's query.
@@ -105,7 +105,7 @@ export function selectStrategy(
  *
  * Graceful degradation: returns [] on any error.
  *
- * D27: 2 reformulations (not 3) to save Gemini RPM.
+ * D27: 2 reformulations (not 3) to save Claude RPM.
  * D28: Temperature 0.8 for diversity.
  */
 export async function generateMultiQueries(
@@ -127,7 +127,7 @@ Responde SOLO con JSON: { "queries": ["reformulacion1", "reformulacion2"] }`,
       maxTokens: 256,
     });
 
-    const parsed = parseGeminiJson<{ queries: string[] }>(result.text);
+    const parsed = parseClaudeJson<{ queries: string[] }>(result.text);
     if (!Array.isArray(parsed.queries)) return [];
 
     // Sanitize: only keep non-empty strings, limit to 2
@@ -176,14 +176,14 @@ Responde SOLO con el párrafo, sin explicaciones adicionales ni prefijos.`,
   }
 }
 
-// ─── Re-ranking: Gemini-as-Judge ──────────────────────────────────
+// ─── Re-ranking: Claude-as-Judge ──────────────────────────────────
 
 /**
- * Re-ranks search results by asking Gemini to score each chunk's
+ * Re-ranks search results by asking Claude to score each chunk's
  * relevance to the query on a 0-10 scale.
  *
- * Score blending: final = 0.6 × (gemini_score / 10) + 0.4 × original_combined_score
- * This preserves the original search signal while letting Gemini refine ordering.
+ * Score blending: final = 0.6 × (claude_score / 10) + 0.4 × original_combined_score
+ * This preserves the original search signal while letting Claude refine ordering.
  *
  * Graceful degradation: returns original chunks on any error.
  *
@@ -191,7 +191,7 @@ Responde SOLO con el párrafo, sin explicaciones adicionales ni prefijos.`,
  * D25: Uses all input chunks (chat.ts already limits to 8).
  * D29: Temperature 0.0 for deterministic scoring.
  */
-export async function rerankWithGemini(
+export async function rerankWithClaude(
   query: string,
   chunks: MatchedChunk[],
   topK: number = 5,
@@ -230,7 +230,7 @@ Responde SOLO con JSON: { "scores": [score0, score1, ...] }`,
       maxTokens: 128,
     });
 
-    const parsed = parseGeminiJson<{ scores: number[] }>(result.text);
+    const parsed = parseClaudeJson<{ scores: number[] }>(result.text);
     const scores = parsed.scores;
 
     if (!Array.isArray(scores) || scores.length === 0) {
@@ -240,9 +240,9 @@ Responde SOLO con JSON: { "scores": [score0, score1, ...] }`,
 
     // D23: Blend rerank score with original combined_score
     const rescored = chunks.map((chunk, i) => {
-      const geminiScore = typeof scores[i] === "number" ? scores[i] : 5;
+      const claudeScore = typeof scores[i] === "number" ? scores[i] : 5;
       // Clamp to 0-10
-      const clampedScore = Math.max(0, Math.min(10, geminiScore));
+      const clampedScore = Math.max(0, Math.min(10, claudeScore));
       return {
         ...chunk,
         combined_score:
@@ -293,8 +293,8 @@ export function mergeSearchResults(
  * Executes the embedding step according to the selected strategy.
  *
  * - standard:    1 embedding of the search query
- * - multi_query: embed original + 2 Gemini reformulations (parallel, D21)
- * - hyde:        embed Gemini's hypothetical answer (replaces query, D24)
+ * - multi_query: embed original + 2 Claude reformulations (parallel, D21)
+ * - hyde:        embed Claude's hypothetical answer (replaces query, D24)
  *
  * Returns an array of {query, embedding} pairs for chat.ts to run
  * N searches and merge results.

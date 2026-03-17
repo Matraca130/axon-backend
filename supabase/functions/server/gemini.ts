@@ -1,16 +1,18 @@
 /**
  * gemini.ts — Gemini API helpers for Axon v4.4
  *
- * Two active functions:
- *   generateText()        — Gemini 2.5 Flash for text/JSON generation
- *   extractTextFromPdf()  — Gemini 2.5 Flash multimodal PDF text extraction (Fase 7)
+ * ⚠️  MULTIMODAL / IMAGE ONLY — Text generation has moved to claude-ai.ts.
  *
- * One REMOVED function:
+ * Active functions:
+ *   extractTextFromPdf()  — Gemini 2.5 Flash multimodal PDF text extraction (Fase 7)
+ *   fetchWithRetry()      — Shared fetch helper (also used by handler.ts)
+ *
+ * Legacy (still exported for backward compat):
+ *   generateText()        — Gemini text generation (DEPRECATED — use claude-ai.ts)
+ *   parseGeminiJson()     — JSON parser (DEPRECATED — use parseClaudeJson from claude-ai.ts)
+ *
+ * REMOVED function:
  *   generateEmbedding()   — HARD ERROR: Use openai-embeddings.ts instead (D57)
- *     W7-RAG01 FIX: Now throws immediately instead of silently generating
- *     768d Gemini vectors. The pipeline uses 1536d OpenAI vectors.
- *     Calling this function would insert wrong-dimension vectors into
- *     pgvector columns, causing silent search degradation.
  *
  * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
  *
