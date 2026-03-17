@@ -200,7 +200,7 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
     institutionId = membership?.institution_id || null;
   }
   if (!institutionId) {
-    return err(c, "Could not resolve institution. User has no active memberships.", 400);
+    return err(c, "No se pudo resolver la institución. El usuario no tiene membresías activas.", 400);
   }
 
   // 2. Verify role
@@ -275,7 +275,7 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
   // 5. Request ephemeral token from OpenAI
   const openaiKey = Deno.env.get("OPENAI_API_KEY");
   if (!openaiKey) {
-    return err(c, "OpenAI API key not configured", 500);
+    return err(c, "Clave de API de OpenAI no configurada", 500);
   }
 
   let sessionResponse: Response;
@@ -301,28 +301,28 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
       }),
     });
   } catch (fetchErr) {
-    console.error("[Realtime] OpenAI session request failed:", fetchErr);
-    return err(c, "Failed to create realtime session", 502);
+    console.error("[Realtime] OpenAI session request failed:", (fetchErr as Error).message);
+    return err(c, "Error al crear sesión de voz", 502);
   }
 
   if (!sessionResponse.ok) {
-    const errorBody = await sessionResponse.text();
-    console.error("[Realtime] OpenAI error:", sessionResponse.status, errorBody);
-    return err(c, `OpenAI session error: ${sessionResponse.status}`, 502);
+    const errorBody = await sessionResponse.text().catch(() => "");
+    console.error("[Realtime] OpenAI error:", sessionResponse.status, errorBody.slice(0, 200));
+    return err(c, `Error de sesión OpenAI: ${sessionResponse.status}`, 502);
   }
 
   let session: Record<string, unknown>;
   try {
     session = await sessionResponse.json();
   } catch {
-    return err(c, "Invalid response from OpenAI", 502);
+    return err(c, "Respuesta inválida de OpenAI", 502);
   }
 
   const clientSecret = (session.client_secret as Record<string, unknown>)?.value
     ?? session.client_secret;
   if (!clientSecret || typeof clientSecret !== "string") {
     console.error("[Realtime] Missing client_secret in OpenAI response:", JSON.stringify(session).slice(0, 200));
-    return err(c, "OpenAI did not return a valid session token", 502);
+    return err(c, "OpenAI no devolvió un token de sesión válido", 502);
   }
 
   // 6. Return ephemeral token to frontend

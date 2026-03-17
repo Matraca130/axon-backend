@@ -43,7 +43,7 @@ export async function generateLinkCode(c: Context): Promise<Response> {
     .single();
 
   if (existingLink) {
-    return err(c, "Ya tenés Telegram vinculado. Desvinculá primero para vincular otro.", 409);
+    return err(c, "Ya tienes Telegram vinculado. Desvincula primero para vincular otro.", 409);
   }
 
   const code = generateCode();
@@ -73,7 +73,7 @@ export async function generateLinkCode(c: Context): Promise<Response> {
 
   if (error) {
     console.error(`[TG-Link] Code generation failed: ${error.message}`);
-    return err(c, "Error al generar código. Intentá de nuevo.", 500);
+    return err(c, "Error al generar código. Intenta de nuevo.", 500);
   }
 
   console.log(`[TG-Link] Code ****${code.slice(-2)} generated for user ${user.id}`);
@@ -81,7 +81,7 @@ export async function generateLinkCode(c: Context): Promise<Response> {
   return ok(c, {
     code,
     expiresIn: CODE_EXPIRY_SECONDS,
-    instructions: "Enviá este código al bot de Axon en Telegram para vincular tu cuenta.",
+    instructions: "Envía este código al bot de Axon en Telegram para vincular tu cuenta.",
     botUrl: getBotUrl(),
   });
 }
@@ -181,7 +181,7 @@ export async function unlinkTelegram(c: Context): Promise<Response> {
     .eq("user_id", user.id);
 
   if (error) {
-    return err(c, "Error al desvincular. Intentá de nuevo.", 500);
+    return err(c, "Error al desvincular. Intenta de nuevo.", 500);
   }
 
   return ok(c, { message: "Telegram desvinculado exitosamente." });

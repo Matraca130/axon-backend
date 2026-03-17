@@ -96,7 +96,7 @@ export async function getMessagingSettings(c: Context): Promise<Response> {
 
   const institutionId = await getUserInstitution(user.id);
   if (!institutionId) {
-    return err(c, "No sos admin de ninguna institución.", 403);
+    return err(c, "No tienes permisos de administrador.", 403);
   }
 
   const db = getAdminClient();
@@ -142,7 +142,7 @@ export async function updateMessagingSettings(c: Context): Promise<Response> {
 
   const institutionId = await getUserInstitution(user.id);
   if (!institutionId) {
-    return err(c, "No sos admin de ninguna institución.", 403);
+    return err(c, "No tienes permisos de administrador.", 403);
   }
 
   let body: Record<string, unknown>;
@@ -233,7 +233,7 @@ export async function testMessagingConnection(c: Context): Promise<Response> {
 
   const institutionId = await getUserInstitution(user.id);
   if (!institutionId) {
-    return err(c, "No sos admin de ninguna institución.", 403);
+    return err(c, "No tienes permisos de administrador.", 403);
   }
 
   const db = getAdminClient();
