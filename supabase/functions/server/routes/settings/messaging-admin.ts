@@ -91,7 +91,7 @@ export async function getMessagingSettings(c: Context): Promise<Response> {
 
   const channel = c.req.param("channel");
   if (!["whatsapp", "telegram"].includes(channel)) {
-    return err(c, "Invalid channel. Use 'whatsapp' or 'telegram'.", 400);
+    return err(c, "Canal inválido. Usa 'whatsapp' o 'telegram'.", 400);
   }
 
   const institutionId = await getUserInstitution(user.id);
@@ -137,7 +137,7 @@ export async function updateMessagingSettings(c: Context): Promise<Response> {
 
   const channel = c.req.param("channel");
   if (!["whatsapp", "telegram"].includes(channel)) {
-    return err(c, "Invalid channel. Use 'whatsapp' or 'telegram'.", 400);
+    return err(c, "Canal inválido. Usa 'whatsapp' o 'telegram'.", 400);
   }
 
   const institutionId = await getUserInstitution(user.id);
@@ -149,7 +149,7 @@ export async function updateMessagingSettings(c: Context): Promise<Response> {
   try {
     body = await c.req.json();
   } catch {
-    return err(c, "Invalid JSON", 400);
+    return err(c, "JSON inválido.", 400);
   }
 
   const settings = body.settings as ChannelSettings;
@@ -159,14 +159,14 @@ export async function updateMessagingSettings(c: Context): Promise<Response> {
   if (channel === "whatsapp" && settings) {
     const s = settings as WhatsAppSettings;
     if (s.access_token && typeof s.access_token !== "string") {
-      return err(c, "access_token must be a string", 400);
+      return err(c, "access_token debe ser un string.", 400);
     }
   }
 
   if (channel === "telegram" && settings) {
     const s = settings as TelegramSettings;
     if (s.bot_token && typeof s.bot_token !== "string") {
-      return err(c, "bot_token must be a string", 400);
+      return err(c, "bot_token debe ser un string.", 400);
     }
   }
 
@@ -228,7 +228,7 @@ export async function testMessagingConnection(c: Context): Promise<Response> {
 
   const channel = c.req.param("channel");
   if (!["whatsapp", "telegram"].includes(channel)) {
-    return err(c, "Invalid channel.", 400);
+    return err(c, "Canal inválido.", 400);
   }
 
   const institutionId = await getUserInstitution(user.id);
@@ -299,5 +299,5 @@ export async function testMessagingConnection(c: Context): Promise<Response> {
     }
   }
 
-  return err(c, "Channel not supported", 400);
+  return err(c, "Canal no soportado.", 400);
 }
