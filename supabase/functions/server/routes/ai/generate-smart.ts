@@ -48,6 +48,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { isUuid, isOneOf, isNonNegInt } from "../../validate.ts";
 import {
   requireInstitutionRole,
@@ -77,7 +78,7 @@ function isTargetDeduped(
 
 // ── Fetch per-target context (prof notes + BKT) ───────────────
 async function fetchTargetContext(
-  db: any,
+  db: SupabaseClient,
   userId: string,
   target: SmartTarget,
 ): Promise<{ profNotesContext: string; bktContext: string }> {
@@ -134,7 +135,7 @@ function buildPromptContext(
 
 // ── Generate + Insert single item ─────────────────────────────
 async function generateAndInsert(
-  db: any,
+  db: SupabaseClient,
   userId: string,
   action: string,
   related: boolean,

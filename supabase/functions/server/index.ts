@@ -56,8 +56,8 @@ app.use(
     origin: (origin) => {
       // Allow requests with no origin (e.g. server-to-server, Postman)
       if (!origin) return "*";
-      // Allow any *.vercel.app subdomain for preview deployments
-      if (origin.endsWith(".vercel.app")) return origin;
+      // Allow project-specific Vercel preview deployments (axon-frontend-*.vercel.app)
+      if (origin.endsWith(".vercel.app") && origin.includes("axon-frontend")) return origin;
       // Allow explicitly listed origins
       if (ALLOWED_ORIGINS.includes(origin)) return origin;
       // Deny others
