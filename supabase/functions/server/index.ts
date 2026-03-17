@@ -40,6 +40,19 @@ const app = new Hono();
 
 // ─── Middleware ───────────────────────────────────────────────────
 
+// Explicit preflight handler — Supabase gateway may not forward OPTIONS to Hono middleware
+app.options("*", (c) => {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Access-Token",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Max-Age": "600",
+    },
+  });
+});
+
 app.use("*", logger(console.log));
 
 // MVP: CORS open to all origins for development flexibility.
