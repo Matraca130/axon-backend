@@ -203,7 +203,7 @@ async function fetchAdjacentChunks(
 
 // --- Phase 5: Smart context assembly ------------------------------
 
-const MAX_CONTEXT_CHARS = 3000;
+const MAX_CONTEXT_CHARS = 8000;
 
 function assembleContext(
   matches: MatchedChunk[],
@@ -494,7 +494,7 @@ Responde en espanol.${profileContext}`;
       prompt: userPrompt,
       systemPrompt,
       temperature: 0.5,
-      maxTokens: 1500,
+      maxTokens: 2500,
     });
 
     const latencyMs = Date.now() - t0;
