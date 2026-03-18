@@ -493,7 +493,7 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
     ? wrapXml("conversation_history", sanitizeForPrompt(conversationHistory, 3000))
     : "";
   const sanitizedMessage = wrapXml("user_message", sanitizeForPrompt(message, 2000));
-  const sanitizedContext = ragContext ? wrapXml("course_content", ragContext) : "";
+  const sanitizedContext = ragContext ? wrapXml("course_content", sanitizeForPrompt(ragContext, 6000)) : "";
   const userPrompt = `${sanitizedHistory}\n${sanitizedMessage}\n${sanitizedContext}`;
 
   try {

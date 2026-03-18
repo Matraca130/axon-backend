@@ -203,7 +203,7 @@ Responde SOLO con JSON valido, sin explicaciones adicionales.`;
 
     userPrompt = `Genera UNA pregunta de quiz sobre:
 Tema: ${summary.title}
-Keyword: ${keyword?.name || "general"} \u2014 ${keyword?.definition ? sanitizeForPrompt(keyword.definition, 500) : ""}
+Keyword: ${sanitizeForPrompt(keyword?.name || "general", 200)} \u2014 ${keyword?.definition ? sanitizeForPrompt(keyword.definition, 500) : ""}
 ${subtopicName ? `Subtema: ${subtopicName}` : ""}
 ${blockContext}
 ${wrapXml("course_content", contentSnippet)}
@@ -225,11 +225,11 @@ Nota: difficulty debe ser un entero: 1 (facil), 2 (medio), 3 (dificil).`;
   } else {
     // flashcard
     const scope = related
-      ? `Genera una flashcard RELACIONADA al keyword "${keyword?.name}".`
+      ? `Genera una flashcard RELACIONADA al keyword "${sanitizeForPrompt(keyword?.name || "general", 200)}".`
       : `Genera una flashcard GENERAL del resumen "${summary.title}".`;
 
     userPrompt = `${scope}
-Keyword: ${keyword?.name || "general"} \u2014 ${keyword?.definition ? sanitizeForPrompt(keyword.definition, 500) : ""}
+Keyword: ${sanitizeForPrompt(keyword?.name || "general", 200)} \u2014 ${keyword?.definition ? sanitizeForPrompt(keyword.definition, 500) : ""}
 ${subtopicName ? `Subtema: ${subtopicName}` : ""}
 ${blockContext}
 ${wrapXml("course_content", contentSnippet)}
