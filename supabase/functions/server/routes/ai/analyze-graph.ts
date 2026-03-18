@@ -213,17 +213,18 @@ aiAnalyzeGraphRoutes.post(
     }
 
     // ── Step 6: Map BKT states back to keywords ────────────────
-    const keywordMastery: Record<string, number> = {};
+    const kwMasterySum: Record<string, number> = {};
+    const kwMasteryCount: Record<string, number> = {};
     for (const bkt of bktStates) {
       const kwId = subtopicToKeyword[bkt.subtopic_id];
       if (kwId) {
-        // If multiple subtopics map to same keyword, take the average
-        if (keywordMastery[kwId] !== undefined) {
-          keywordMastery[kwId] = (keywordMastery[kwId] + bkt.p_know) / 2;
-        } else {
-          keywordMastery[kwId] = bkt.p_know;
-        }
+        kwMasterySum[kwId] = (kwMasterySum[kwId] || 0) + bkt.p_know;
+        kwMasteryCount[kwId] = (kwMasteryCount[kwId] || 0) + 1;
       }
+    }
+    const keywordMastery: Record<string, number> = {};
+    for (const kwId of Object.keys(kwMasterySum)) {
+      keywordMastery[kwId] = kwMasterySum[kwId] / kwMasteryCount[kwId];
     }
 
     // ── Step 7: Build prompt with graph data ───────────────────

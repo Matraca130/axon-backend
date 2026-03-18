@@ -206,6 +206,6 @@ aiWeakPointsRoutes.get(
     results.sort((a, b) => a.mastery - b.mastery);
     const top20 = results.slice(0, 20);
 
-    return ok(c, { data: top20 });
+    return ok(c, top20);
   },
 );
