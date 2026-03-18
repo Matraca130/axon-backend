@@ -412,6 +412,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
             p_top_summaries: 3,
             p_top_chunks: 8,
             p_similarity_threshold: 0.3,
+            p_query_text: message,
           },
         );
 

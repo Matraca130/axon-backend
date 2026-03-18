@@ -17,7 +17,7 @@
  *   PF-05 FIX: Security comment about DB query before Gemini call
  *
  * Live-audit fixes applied:
- *   LA-07 FIX: truncateAtWord() respects word boundaries
+ *   LA-07 FIX: truncateForPrompt() respects word boundaries
  *
  * Deploy fixes:
  *   D-18 FIX: Use GENERATE_MODEL constant in _meta (was hardcoded as gemini-2.0-flash)
@@ -41,21 +41,11 @@ import {
 import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.ts";
 import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
 import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
+import { truncateForPrompt } from "./generate-smart-helpers.ts";
 
 export const aiGenerateRoutes = new Hono();
 
 const ACTIONS = ["quiz_question", "flashcard"] as const;
-
-// ── LA-07 FIX: Truncate respecting word boundaries ────────────
-function truncateAtWord(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  const truncated = text.substring(0, maxLen);
-  const lastSpace = truncated.lastIndexOf(" ");
-  // Only break at word boundary if it's not too far back (> 80% of maxLen)
-  return lastSpace > maxLen * 0.8
-    ? truncated.substring(0, lastSpace) + "..."
-    : truncated + "...";
-}
 
 aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -186,7 +176,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
 
   // ── Build prompt ───────────────────────────────────────
   // LA-07 FIX: Use truncateAtWord instead of raw substring
-  const contentSnippet = truncateAtWord(
+  const contentSnippet = truncateForPrompt(
     summary.content_markdown || "",
     1500,
   );

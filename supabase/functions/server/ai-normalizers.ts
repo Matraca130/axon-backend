@@ -1,7 +1,7 @@
 /**
  * ai-normalizers.ts — Shared normalizers for AI-generated content → DB
  *
- * Gemini (and other LLMs) may return fields in formats that don't match
+ * LLMs (Claude, Gemini, etc.) may return fields in formats that don't match
  * the database schema. These normalizers ensure type safety before INSERT.
  *
  * Used by: generate-smart.ts, generate.ts, pre-generate.ts
@@ -35,7 +35,7 @@ const DIFFICULTY_STR_TO_INT: Record<string, DbDifficulty> = {
 };
 
 /**
- * Normalize difficulty from Gemini output to DB integer.
+ * Normalize difficulty from LLM output to DB integer.
  *
  * Accepts:
  *   - number 1/2/3 → pass through
@@ -81,7 +81,7 @@ const QUESTION_TYPE_MAP: Record<string, DbQuestionType> = {
 };
 
 /**
- * Normalize question_type from Gemini output to DB enum.
+ * Normalize question_type from LLM output to DB enum.
  *
  * Accepts any reasonable LLM variation (English/Spanish, with/without
  * underscores/spaces) and maps to the 4 valid DB enum values.
@@ -102,10 +102,10 @@ export interface SanitizedQuizFields {
 
 /**
  * Sanitize all AI-generated quiz question fields that need normalization.
- * Call this on the parsed Gemini JSON before DB insert.
+ * Call this on the parsed LLM JSON before DB insert.
  *
  * Usage:
- *   const g = parseGeminiJson(result.text);
+ *   const g = parseClaudeJson(result.text);
  *   const safe = sanitizeQuizFields(g);
  *   await db.from("quiz_questions").insert({
  *     ...otherFields,
