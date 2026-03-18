@@ -49,8 +49,7 @@ Seleccion automatica: ${reasonText}
 Tema: ${ctx.summaryTitle}
 Keyword: ${ctx.keywordName}${ctx.keywordDef ? ` \u2014 ${sanitizeForPrompt(ctx.keywordDef, 500)}` : ""}
 ${ctx.subtopicName ? `Subtema: ${ctx.subtopicName}` : ""}
-${ctx.profNotesContext}
-${ctx.profNotesContext ? wrapXml('professor_notes', ctx.profNotesContext) : ''}
+${ctx.profNotesContext ? wrapXml('professor_notes', sanitizeForPrompt(ctx.profNotesContext, 1000)) : ''}
 ${wrapXml('course_content', ctx.contentSnippet)}
 ${ctx.bktContext}
 
@@ -91,8 +90,7 @@ Seleccion automatica: ${reasonText}
 
 Keyword: ${ctx.keywordName}${ctx.keywordDef ? ` \u2014 ${sanitizeForPrompt(ctx.keywordDef, 500)}` : ""}
 ${ctx.subtopicName ? `Subtema: ${ctx.subtopicName}` : ""}
-${ctx.profNotesContext}
-${ctx.profNotesContext ? wrapXml('professor_notes', ctx.profNotesContext) : ''}
+${ctx.profNotesContext ? wrapXml('professor_notes', sanitizeForPrompt(ctx.profNotesContext, 1000)) : ''}
 ${wrapXml('course_content', ctx.contentSnippet)}
 
 Adapta el contenido segun el dominio (${pct}%):

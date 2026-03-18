@@ -12,6 +12,7 @@
  */
 
 import { getAdminClient } from "../db.ts";
+import { sanitizeForPrompt } from "../prompt-sanitize.ts";
 import {
   selectStrategy,
   executeRetrievalEmbedding,
@@ -107,12 +108,12 @@ export async function ragSearch(
         const remaining = RAG_MAX_CONTEXT_CHARS - contextChars;
         if (remaining > 200) {
           contextParts.push(
-            `## ${chunk.summary_title}\n${chunk.content.slice(0, remaining)}...`,
+            `## ${sanitizeForPrompt(chunk.summary_title, 200)}\n${sanitizeForPrompt(chunk.content, remaining)}`,
           );
         }
         break;
       }
-      contextParts.push(`## ${chunk.summary_title}\n${chunk.content}`);
+      contextParts.push(`## ${sanitizeForPrompt(chunk.summary_title, 200)}\n${sanitizeForPrompt(chunk.content, 3000)}`);
       contextChars += chunk.content.length;
       if (!sources.includes(chunk.summary_title)) {
         sources.push(chunk.summary_title);
