@@ -16,5 +16,6 @@ export function sanitizeForPrompt(text: string, maxLen = 2000): string {
 
 /** Wrap content in XML tags to clearly delimit untrusted content in prompts */
 export function wrapXml(tag: string, content: string): string {
-  return `<${tag}>\n${content}\n</${tag}>`;
+  const escaped = content.replace(new RegExp(`</${tag}>`, 'gi'), `</${tag}[escaped]>`);
+  return `<${tag}>\n${escaped}\n</${tag}>`;
 }

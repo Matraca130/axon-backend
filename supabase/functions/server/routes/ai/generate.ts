@@ -40,6 +40,7 @@ import {
 } from "../../auth-helpers.ts";
 import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.ts";
 import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
+import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
 
 export const aiGenerateRoutes = new Hono();
 
@@ -197,15 +198,15 @@ Responde SOLO con JSON valido, sin explicaciones adicionales.`;
 
   if (action === "quiz_question") {
     const wrongCtx = wrongAnswer
-      ? `\nEl alumno respondio incorrectamente: "${wrongAnswer}". Genera una pregunta que aborde este error especifico, reformulando el concepto de otra manera.`
+      ? `\nEl alumno respondio incorrectamente: ${wrapXml("student_answer", sanitizeForPrompt(wrongAnswer, 300))}. Genera una pregunta que aborde este error especifico, reformulando el concepto de otra manera.`
       : "";
 
     userPrompt = `Genera UNA pregunta de quiz sobre:
 Tema: ${summary.title}
-Keyword: ${keyword?.name || "general"} \u2014 ${keyword?.definition || ""}
+Keyword: ${sanitizeForPrompt(keyword?.name || "general", 200)} \u2014 ${keyword?.definition ? sanitizeForPrompt(keyword.definition, 500) : ""}
 ${subtopicName ? `Subtema: ${subtopicName}` : ""}
 ${blockContext}
-Contenido relevante: ${contentSnippet}
+${wrapXml("course_content", contentSnippet)}
 ${profileContext}
 ${bktContext}
 ${wrongCtx}
@@ -224,14 +225,14 @@ Nota: difficulty debe ser un entero: 1 (facil), 2 (medio), 3 (dificil).`;
   } else {
     // flashcard
     const scope = related
-      ? `Genera una flashcard RELACIONADA al keyword "${keyword?.name}".`
+      ? `Genera una flashcard RELACIONADA al keyword "${sanitizeForPrompt(keyword?.name || "general", 200)}".`
       : `Genera una flashcard GENERAL del resumen "${summary.title}".`;
 
     userPrompt = `${scope}
-Keyword: ${keyword?.name || "general"} \u2014 ${keyword?.definition || ""}
+Keyword: ${sanitizeForPrompt(keyword?.name || "general", 200)} \u2014 ${keyword?.definition ? sanitizeForPrompt(keyword.definition, 500) : ""}
 ${subtopicName ? `Subtema: ${subtopicName}` : ""}
 ${blockContext}
-Contenido relevante: ${contentSnippet}
+${wrapXml("course_content", contentSnippet)}
 ${profileContext}
 
 Responde en JSON con este schema exacto:
