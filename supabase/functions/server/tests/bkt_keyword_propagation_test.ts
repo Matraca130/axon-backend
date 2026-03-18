@@ -22,17 +22,7 @@ import {
   getTypeMultiplier,
   calculateRecoveryMultiplier,
 } from "../lib/bkt-v4.ts";
-import { BKT_PARAMS } from "../lib/types.ts";
-
-// ─── Keyword propagation weights (spec v4.2) ────────────────
-// These constants define how much of the BKT mastery update
-// propagates from an instrument review to a linked keyword.
-
-const BKT_WEIGHTS = {
-  FLASHCARD: 0.3,
-  QUIZ: 0.5,
-  KEYWORD_DIRECT: 1.0,
-} as const;
+import { BKT_PARAMS, BKT_WEIGHTS } from "../lib/types.ts";
 
 // ─── Helpers ─────────────────────────────────────────────────
 
@@ -87,9 +77,9 @@ function computeKeywordUpdate(
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Deno.test("BKT_WEIGHTS: flashcard=0.3, quiz=0.5, keyword_direct=1.0", () => {
-  assertEquals(BKT_WEIGHTS.FLASHCARD, 0.3);
-  assertEquals(BKT_WEIGHTS.QUIZ, 0.5);
-  assertEquals(BKT_WEIGHTS.KEYWORD_DIRECT, 1.0);
+  assertEquals(BKT_WEIGHTS.flashcard, 0.3);
+  assertEquals(BKT_WEIGHTS.quiz, 0.5);
+  assertEquals(BKT_WEIGHTS.keyword_direct, 1.0);
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -99,7 +89,7 @@ Deno.test("BKT_WEIGHTS: flashcard=0.3, quiz=0.5, keyword_direct=1.0", () => {
 Deno.test("Flashcard correct with weight 0.3: gain is 30% of normal", () => {
   // Base BKT for flashcard: (1-0) * 0.18 * 1.0 * 1.0 = 0.18
   // Weighted for keyword: 0.18 * 0.3 = 0.054
-  const result = computeKeywordUpdate(0, 0, true, "flashcard", BKT_WEIGHTS.FLASHCARD);
+  const result = computeKeywordUpdate(0, 0, true, "flashcard", BKT_WEIGHTS.flashcard);
   assertAlmostEquals(result.newMastery, 0.054, 0.001);
   assertAlmostEquals(result.delta, 0.054, 0.001);
 });
@@ -107,7 +97,7 @@ Deno.test("Flashcard correct with weight 0.3: gain is 30% of normal", () => {
 Deno.test("Quiz correct with weight 0.5: gain is 50% of normal", () => {
   // Base BKT for quiz: (1-0) * 0.18 * 0.70 * 1.0 = 0.126
   // Weighted for keyword: 0.126 * 0.5 = 0.063
-  const result = computeKeywordUpdate(0, 0, true, "quiz", BKT_WEIGHTS.QUIZ);
+  const result = computeKeywordUpdate(0, 0, true, "quiz", BKT_WEIGHTS.quiz);
   assertAlmostEquals(result.newMastery, 0.063, 0.001);
   assertAlmostEquals(result.delta, 0.063, 0.001);
 });
@@ -115,14 +105,14 @@ Deno.test("Quiz correct with weight 0.5: gain is 50% of normal", () => {
 Deno.test("Keyword direct with weight 1.0: full gain (flashcard)", () => {
   // Base BKT for flashcard: (1-0) * 0.18 * 1.0 * 1.0 = 0.18
   // Weighted: 0.18 * 1.0 = 0.18 (no scaling)
-  const result = computeKeywordUpdate(0, 0, true, "flashcard", BKT_WEIGHTS.KEYWORD_DIRECT);
+  const result = computeKeywordUpdate(0, 0, true, "flashcard", BKT_WEIGHTS.keyword_direct);
   assertAlmostEquals(result.newMastery, 0.18, 0.001);
 });
 
 Deno.test("Keyword direct with weight 1.0: full gain (quiz)", () => {
   // Base BKT for quiz: (1-0) * 0.18 * 0.70 * 1.0 = 0.126
   // Weighted: 0.126 * 1.0 = 0.126
-  const result = computeKeywordUpdate(0, 0, true, "quiz", BKT_WEIGHTS.KEYWORD_DIRECT);
+  const result = computeKeywordUpdate(0, 0, true, "quiz", BKT_WEIGHTS.keyword_direct);
   assertAlmostEquals(result.newMastery, 0.126, 0.001);
 });
 
@@ -130,7 +120,7 @@ Deno.test("Flashcard correct at mastery 0.5 with weight 0.3", () => {
   // Base gain: (1-0.5) * 0.18 * 1.0 * 1.0 = 0.09
   // Weighted: 0.09 * 0.3 = 0.027
   // New: 0.5 + 0.027 = 0.527
-  const result = computeKeywordUpdate(0.5, 0.5, true, "flashcard", BKT_WEIGHTS.FLASHCARD);
+  const result = computeKeywordUpdate(0.5, 0.5, true, "flashcard", BKT_WEIGHTS.flashcard);
   assertAlmostEquals(result.newMastery, 0.527, 0.001);
   assertAlmostEquals(result.delta, 0.027, 0.001);
 });
@@ -139,7 +129,7 @@ Deno.test("Quiz correct at mastery 0.5 with weight 0.5", () => {
   // Base gain: (1-0.5) * 0.18 * 0.70 * 1.0 = 0.063
   // Weighted: 0.063 * 0.5 = 0.0315
   // New: 0.5 + 0.0315 = 0.5315
-  const result = computeKeywordUpdate(0.5, 0.5, true, "quiz", BKT_WEIGHTS.QUIZ);
+  const result = computeKeywordUpdate(0.5, 0.5, true, "quiz", BKT_WEIGHTS.quiz);
   assertAlmostEquals(result.newMastery, 0.5315, 0.001);
 });
 
@@ -152,7 +142,7 @@ Deno.test("Flashcard incorrect with weight 0.3: forget is weighted", () => {
   // Base forget: 0.8 * 0.25 = 0.2
   // Weighted forget: 0.2 * 0.3 = 0.06
   // New: 0.8 - 0.06 = 0.74
-  const result = computeKeywordUpdate(0.8, 0.8, false, "flashcard", BKT_WEIGHTS.FLASHCARD);
+  const result = computeKeywordUpdate(0.8, 0.8, false, "flashcard", BKT_WEIGHTS.flashcard);
   assertAlmostEquals(result.newMastery, 0.74, 0.001);
   assertAlmostEquals(result.delta, -0.06, 0.001);
 });
@@ -161,7 +151,7 @@ Deno.test("Quiz incorrect with weight 0.5: forget is weighted", () => {
   // Base forget: 0.8 * 0.25 = 0.2
   // Weighted forget: 0.2 * 0.5 = 0.1
   // New: 0.8 - 0.1 = 0.7
-  const result = computeKeywordUpdate(0.8, 0.8, false, "quiz", BKT_WEIGHTS.QUIZ);
+  const result = computeKeywordUpdate(0.8, 0.8, false, "quiz", BKT_WEIGHTS.quiz);
   assertAlmostEquals(result.newMastery, 0.7, 0.001);
   assertAlmostEquals(result.delta, -0.1, 0.001);
 });
@@ -170,7 +160,7 @@ Deno.test("Keyword direct incorrect with weight 1.0: full forget", () => {
   // Base forget: 0.8 * 0.25 = 0.2
   // Weighted forget: 0.2 * 1.0 = 0.2
   // New: 0.8 - 0.2 = 0.6 (same as base BKT)
-  const result = computeKeywordUpdate(0.8, 0.8, false, "flashcard", BKT_WEIGHTS.KEYWORD_DIRECT);
+  const result = computeKeywordUpdate(0.8, 0.8, false, "flashcard", BKT_WEIGHTS.keyword_direct);
   assertAlmostEquals(result.newMastery, 0.6, 0.001);
 
   // Verify this matches base BKT behavior
@@ -179,9 +169,9 @@ Deno.test("Keyword direct incorrect with weight 1.0: full forget", () => {
 });
 
 Deno.test("Incorrect: weighted forget is less severe than base BKT", () => {
-  const flashcardResult = computeKeywordUpdate(0.8, 0.8, false, "flashcard", BKT_WEIGHTS.FLASHCARD);
-  const quizResult = computeKeywordUpdate(0.8, 0.8, false, "quiz", BKT_WEIGHTS.QUIZ);
-  const directResult = computeKeywordUpdate(0.8, 0.8, false, "flashcard", BKT_WEIGHTS.KEYWORD_DIRECT);
+  const flashcardResult = computeKeywordUpdate(0.8, 0.8, false, "flashcard", BKT_WEIGHTS.flashcard);
+  const quizResult = computeKeywordUpdate(0.8, 0.8, false, "quiz", BKT_WEIGHTS.quiz);
+  const directResult = computeKeywordUpdate(0.8, 0.8, false, "flashcard", BKT_WEIGHTS.keyword_direct);
 
   // Flashcard weight 0.3 should lose least
   // Quiz weight 0.5 loses more
@@ -200,7 +190,7 @@ Deno.test("Flashcard: 20 correct reviews with weight 0.3 -> keyword mastery ~0.6
   const trajectory: number[] = [0];
 
   for (let i = 0; i < 20; i++) {
-    const result = computeKeywordUpdate(m, max, true, "flashcard", BKT_WEIGHTS.FLASHCARD);
+    const result = computeKeywordUpdate(m, max, true, "flashcard", BKT_WEIGHTS.flashcard);
     m = result.newMastery;
     max = Math.max(max, m);
     trajectory.push(m);
@@ -223,7 +213,7 @@ Deno.test("Quiz: 10 correct reviews with weight 0.5 -> keyword mastery ~0.60", (
   const trajectory: number[] = [0];
 
   for (let i = 0; i < 10; i++) {
-    const result = computeKeywordUpdate(m, max, true, "quiz", BKT_WEIGHTS.QUIZ);
+    const result = computeKeywordUpdate(m, max, true, "quiz", BKT_WEIGHTS.quiz);
     m = result.newMastery;
     max = Math.max(max, m);
     trajectory.push(m);
@@ -245,7 +235,7 @@ Deno.test("Mixed: 5 flashcard + 5 quiz -> intermediate mastery", () => {
 
   // 5 flashcard reviews (weight 0.3)
   for (let i = 0; i < 5; i++) {
-    const result = computeKeywordUpdate(m, max, true, "flashcard", BKT_WEIGHTS.FLASHCARD);
+    const result = computeKeywordUpdate(m, max, true, "flashcard", BKT_WEIGHTS.flashcard);
     m = result.newMastery;
     max = Math.max(max, m);
   }
@@ -253,7 +243,7 @@ Deno.test("Mixed: 5 flashcard + 5 quiz -> intermediate mastery", () => {
 
   // 5 quiz reviews (weight 0.5)
   for (let i = 0; i < 5; i++) {
-    const result = computeKeywordUpdate(m, max, true, "quiz", BKT_WEIGHTS.QUIZ);
+    const result = computeKeywordUpdate(m, max, true, "quiz", BKT_WEIGHTS.quiz);
     m = result.newMastery;
     max = Math.max(max, m);
   }
@@ -297,7 +287,7 @@ Deno.test("Flashcard weight 0.3 converges slower than direct", () => {
 Deno.test("Recovery factor applies even with weighted updates", () => {
   // Keyword had high mastery (0.8), dropped to 0.3
   // maxKeywordMastery=0.8 > 0.50 threshold, current=0.3 < max -> recovery active
-  const result = computeKeywordUpdate(0.3, 0.8, true, "flashcard", BKT_WEIGHTS.FLASHCARD);
+  const result = computeKeywordUpdate(0.3, 0.8, true, "flashcard", BKT_WEIGHTS.flashcard);
 
   // Base gain with recovery: (1-0.3) * 0.18 * 1.0 * 3.0 = 0.378
   // Weighted: 0.378 * 0.3 = 0.1134
@@ -308,7 +298,7 @@ Deno.test("Recovery factor applies even with weighted updates", () => {
 
 Deno.test("Recovery + quiz weight 0.5: combined multiplier", () => {
   // Recovery active: mastery 0.3, max 0.8
-  const result = computeKeywordUpdate(0.3, 0.8, true, "quiz", BKT_WEIGHTS.QUIZ);
+  const result = computeKeywordUpdate(0.3, 0.8, true, "quiz", BKT_WEIGHTS.quiz);
 
   // Base gain with recovery + quiz: (1-0.3) * 0.18 * 0.70 * 3.0 = 0.2646
   // Weighted: 0.2646 * 0.5 = 0.1323
@@ -318,10 +308,10 @@ Deno.test("Recovery + quiz weight 0.5: combined multiplier", () => {
 
 Deno.test("Recovery with weight still faster than non-recovery with weight", () => {
   // With recovery (max=0.8, current=0.3)
-  const withRecovery = computeKeywordUpdate(0.3, 0.8, true, "flashcard", BKT_WEIGHTS.FLASHCARD);
+  const withRecovery = computeKeywordUpdate(0.3, 0.8, true, "flashcard", BKT_WEIGHTS.flashcard);
 
   // Without recovery (max=0.3, current=0.3 — never had higher mastery)
-  const withoutRecovery = computeKeywordUpdate(0.3, 0.3, true, "flashcard", BKT_WEIGHTS.FLASHCARD);
+  const withoutRecovery = computeKeywordUpdate(0.3, 0.3, true, "flashcard", BKT_WEIGHTS.flashcard);
 
   // Recovery should produce a larger gain even when weighted
   assertEquals(withRecovery.delta > withoutRecovery.delta, true);
@@ -331,7 +321,7 @@ Deno.test("Recovery with weight still faster than non-recovery with weight", () 
 
 Deno.test("Recovery NOT active for keyword if max < 0.50", () => {
   // max=0.4 < MIN_MASTERY_FOR_RECOVERY(0.50), so no recovery
-  const result = computeKeywordUpdate(0.2, 0.4, true, "flashcard", BKT_WEIGHTS.FLASHCARD);
+  const result = computeKeywordUpdate(0.2, 0.4, true, "flashcard", BKT_WEIGHTS.flashcard);
 
   // Base gain without recovery: (1-0.2) * 0.18 * 1.0 * 1.0 = 0.144
   // Weighted: 0.144 * 0.3 = 0.0432
@@ -364,7 +354,7 @@ Deno.test("Multiple keywords linked: each gets independent update", () => {
   ];
 
   const results = keywords.map((kw) =>
-    computeKeywordUpdate(kw.mastery, kw.max, true, "flashcard", BKT_WEIGHTS.FLASHCARD)
+    computeKeywordUpdate(kw.mastery, kw.max, true, "flashcard", BKT_WEIGHTS.flashcard)
   );
 
   // Each keyword should get a different delta based on its own mastery
@@ -387,7 +377,7 @@ Deno.test("Multiple keywords linked: each gets independent update", () => {
 });
 
 Deno.test("Keyword already at 1.0: weighted update stays clamped", () => {
-  const result = computeKeywordUpdate(1.0, 1.0, true, "flashcard", BKT_WEIGHTS.FLASHCARD);
+  const result = computeKeywordUpdate(1.0, 1.0, true, "flashcard", BKT_WEIGHTS.flashcard);
   assertEquals(result.newMastery, 1.0);
   assertEquals(result.delta, 0);
 });
@@ -396,24 +386,24 @@ Deno.test("Keyword at 1.0 incorrect with weight: drops proportionally", () => {
   // Base forget: 1.0 * 0.25 = 0.25
   // Weighted: 0.25 * 0.3 = 0.075
   // New: 1.0 - 0.075 = 0.925
-  const result = computeKeywordUpdate(1.0, 1.0, false, "flashcard", BKT_WEIGHTS.FLASHCARD);
+  const result = computeKeywordUpdate(1.0, 1.0, false, "flashcard", BKT_WEIGHTS.flashcard);
   assertAlmostEquals(result.newMastery, 0.925, 0.001);
 });
 
 Deno.test("Keyword at 0.0 incorrect: no change (nothing to forget)", () => {
-  const result = computeKeywordUpdate(0.0, 0.0, false, "flashcard", BKT_WEIGHTS.FLASHCARD);
+  const result = computeKeywordUpdate(0.0, 0.0, false, "flashcard", BKT_WEIGHTS.flashcard);
   assertEquals(result.newMastery, 0.0);
   assertEquals(result.delta, 0);
 });
 
 Deno.test("Very small mastery: weighted update doesn't go negative", () => {
-  const result = computeKeywordUpdate(0.001, 0.001, false, "quiz", BKT_WEIGHTS.QUIZ);
+  const result = computeKeywordUpdate(0.001, 0.001, false, "quiz", BKT_WEIGHTS.quiz);
   assertEquals(result.newMastery >= 0, true);
 });
 
 Deno.test("Weight ordering: quiz(0.5) contributes more than flashcard(0.3)", () => {
-  const flashcard = computeKeywordUpdate(0.0, 0.0, true, "flashcard", BKT_WEIGHTS.FLASHCARD);
-  const quiz = computeKeywordUpdate(0.0, 0.0, true, "quiz", BKT_WEIGHTS.QUIZ);
+  const flashcard = computeKeywordUpdate(0.0, 0.0, true, "flashcard", BKT_WEIGHTS.flashcard);
+  const quiz = computeKeywordUpdate(0.0, 0.0, true, "quiz", BKT_WEIGHTS.quiz);
 
   // Flashcard base=0.18, weighted=0.054
   // Quiz base=0.126, weighted=0.063
