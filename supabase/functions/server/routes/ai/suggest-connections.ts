@@ -193,12 +193,18 @@ aiSuggestConnectionsRoutes.post(
     ].join("\n\n");
 
     // ── 7. Call Claude ────────────────────────────────────────
-    const result = await generateText({
-      prompt,
-      systemPrompt: SYSTEM_PROMPT,
-      temperature: 0.8,
-      maxTokens: 1500,
-    });
+    let result: { text: string };
+    try {
+      result = await generateText({
+        prompt,
+        systemPrompt: SYSTEM_PROMPT,
+        temperature: 0.8,
+        maxTokens: 1500,
+      });
+    } catch (e) {
+      console.error(`[suggest-connections] Claude error: ${(e as Error).message}`);
+      return err(c, "AI analysis failed. Please try again later.", 502);
+    }
 
     // ── 8. Parse + validate response ──────────────────────────
     let suggestions: Array<{
