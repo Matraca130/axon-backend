@@ -42,6 +42,7 @@ import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.t
 import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
 import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
 import { truncateForPrompt } from "./generate-smart-helpers.ts";
+import { validateQuizQuestion, validateFlashcard } from "../../lib/validate-llm-output.ts";
 
 export const aiGenerateRoutes = new Hono();
 
@@ -132,7 +133,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
       .eq("id", blockId)
       .single();
     if (block) {
-      blockContext = `\nBloque especifico: "${block.heading_text || ""}": ${block.content?.substring(0, 500)}`;
+      blockContext = `\n${wrapXml('block_context', sanitizeForPrompt(`${block.heading_text || ""}: ${block.content || ""}`, 500))}`;
     }
   }
 
@@ -146,8 +147,8 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
     .limit(3);
 
   if (profNotes && profNotes.length > 0) {
-    blockContext += "\nNotas del profesor: " +
-      profNotes.map((n: { note: string }) => n.note).join("; ");
+    const notesJoined = profNotes.map((n: { note: string }) => n.note).join("; ");
+    blockContext += `\n${wrapXml('professor_notes', sanitizeForPrompt(notesJoined, 1000))}`;
   }
 
   // ── Fetch student profile ────────────────────────────────
@@ -247,6 +248,7 @@ Responde en JSON con este schema exacto:
     // ── Insert into DB ───────────────────────────────────
     if (action === "quiz_question") {
       const g = generated as Record<string, unknown>;
+      const validated = validateQuizQuestion(g);  // AI-001 FIX: sanitize LLM output
       const { data: inserted, error: insertErr } = await db
         .from("quiz_questions")
         .insert({
@@ -254,10 +256,10 @@ Responde en JSON con este schema exacto:
           keyword_id: keywordId,
           subtopic_id: subtopicId,
           question_type: normalizeQuestionType(g.question_type),
-          question: g.question,
-          options: g.options || null,
-          correct_answer: g.correct_answer,
-          explanation: g.explanation || null,
+          question: validated.question,
+          options: validated.options,
+          correct_answer: validated.correct_answer,
+          explanation: validated.explanation,
           difficulty: normalizeDifficulty(g.difficulty),
           source: "ai",
           created_by: user.id,  // BUG-1 FIX
@@ -278,14 +280,15 @@ Responde en JSON con este schema exacto:
       }, 201);
     } else {
       const g = generated as Record<string, unknown>;
+      const validated = validateFlashcard(g);  // AI-001 FIX: sanitize LLM output
       const { data: inserted, error: insertErr } = await db
         .from("flashcards")
         .insert({
           summary_id: summaryId,
           keyword_id: keywordId,
           subtopic_id: subtopicId,
-          front: g.front,
-          back: g.back,
+          front: validated.front,
+          back: validated.back,
           source: "ai",
           created_by: user.id,  // BUG-1 FIX
         })
