@@ -148,7 +148,11 @@ export interface ClaudeChatResponse {
 
 const CLAUDE_TIMEOUT_MS = 30_000;
 
-export async function generateText(
+/**
+ * Internal text generation -- called by the public generateText() wrapper.
+ * Handles a single model attempt (no cross-model fallback).
+ */
+async function generateTextInternal(
   opts: ClaudeGenerateOpts,
 ): Promise<ClaudeGenerateResult> {
   const key = getApiKey();
@@ -202,6 +206,26 @@ export async function generateText(
       output: data.usage?.output_tokens ?? 0,
     },
   };
+}
+
+/**
+ * Public text generation with automatic fallback tier-down.
+ * If the target model (sonnet/opus) fails, falls back to haiku.
+ * If haiku itself fails, the error propagates normally.
+ */
+export async function generateText(
+  opts: ClaudeGenerateOpts,
+): Promise<ClaudeGenerateResult> {
+  const targetModel = opts.model ?? "sonnet";
+  try {
+    return await generateTextInternal({ ...opts, model: targetModel });
+  } catch (err) {
+    if (targetModel === "haiku") throw err; // No further fallback
+    console.warn(
+      `[AI Fallback] ${targetModel} failed: ${(err as Error).message}. Falling back to haiku.`,
+    );
+    return await generateTextInternal({ ...opts, model: "haiku" });
+  }
 }
 
 // ─── Chat with Tools (Agentic) ──────────────────────────

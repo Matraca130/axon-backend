@@ -1,7 +1,8 @@
 /**
- * routes/whatsapp/tools.ts — Gemini Function Calling definitions + executor
+ * routes/whatsapp/tools.ts -- Claude tool_use definitions + executor
  *
  * 9 tools available to the WhatsApp chatbot.
+ * Migrated from Gemini function_declarations to Claude tool_use format.
  *
  * Phase 3 changes:
  *   S14: handle_voice_message now uses Gemini multimodal STT
@@ -9,23 +10,17 @@
  *        (embeddings + hybrid search + re-ranking)
  *
  * N8 FIX: Integrated formatters for check_progress, get_schedule,
- *         browse_content. Gemini gets pre-formatted WhatsApp text.
+ *         browse_content. Claude gets pre-formatted WhatsApp text.
  *
  * W3-01 FIX: ragSearch() RPC params corrected to match chat.ts
- * W3-02 FIX: course_members → memberships (table doesn't exist)
+ * W3-02 FIX: course_members -> memberships (table doesn't exist)
  * W3-03 FIX: institution_id resolution added (cross-tenant data leak)
  * W3-07 FIX: browse_content course listing via memberships
  */
 
 import { getAdminClient } from "../../db.ts";
-import { generateText } from "../../claude-ai.ts";
-import {
-  selectStrategy,
-  executeRetrievalEmbedding,
-  rerankWithClaude,
-  mergeSearchResults,
-  type MatchedChunk,
-} from "../../retrieval-strategies.ts";
+import { generateText, type ClaudeTool } from "../../claude-ai.ts";
+import { ragSearch } from "../../lib/rag-search.ts";
 import {
   formatProgressSummary,
   formatScheduleSummary,
@@ -41,45 +36,35 @@ export interface ToolExecutionResult {
   isAsync?: boolean;
 }
 
-interface GeminiFunctionDeclaration {
-  name: string;
-  description: string;
-  parameters: {
-    type: string;
-    properties: Record<string, unknown>;
-    required?: string[];
-  };
-}
+// ─── Tool Declarations for Claude API ─────────────────────
 
-// ─── Tool Declarations for Gemini API ─────────────────────
-
-export const WHATSAPP_TOOLS: GeminiFunctionDeclaration[] = [
+export const WHATSAPP_TOOLS: ClaudeTool[] = [
   {
     name: "get_study_queue",
     description:
       "Obtiene las flashcards pendientes de estudio del alumno, ordenadas por urgencia (FSRS + BKT). " +
-      "Si el alumno dice 'qué debo estudiar', 'tengo que repasar', 'flashcards pendientes', usa esta tool. " +
-      "Inicia el modo Session Mode (revisión interactiva de flashcards).",
-    parameters: {
+      "Si el alumno dice 'que debo estudiar', 'tengo que repasar', 'flashcards pendientes', usa esta tool. " +
+      "Inicia el modo Session Mode (revision interactiva de flashcards).",
+    input_schema: {
       type: "object",
       properties: {
         course_id: { type: "string", description: "UUID del curso (opcional)" },
-        limit: { type: "integer", description: "Máximo flashcards (default: 10)" },
+        limit: { type: "number", description: "Maximo flashcards (default: 10)" },
       },
     },
   },
   {
     name: "ask_academic_question",
     description:
-      "Responde una pregunta académica usando RAG (Retrieval Augmented Generation) " +
-      "sobre el contenido del curso del alumno. Busca en resúmenes, PDFs, y notas. " +
-      "Usa esta tool cuando el alumno hace preguntas como 'explicáme mitosis', " +
-      "'qué es la ley de Ohm', 'cómo se calcula el PIB'.",
-    parameters: {
+      "Responde una pregunta academica usando RAG (Retrieval Augmented Generation) " +
+      "sobre el contenido del curso del alumno. Busca en resumenes, PDFs, y notas. " +
+      "Usa esta tool cuando el alumno hace preguntas como 'explicame mitosis', " +
+      "'que es la ley de Ohm', 'como se calcula el PIB'.",
+    input_schema: {
       type: "object",
       properties: {
-        question: { type: "string", description: "La pregunta académica del alumno" },
-        summary_id: { type: "string", description: "UUID del resumen específico (opcional)" },
+        question: { type: "string", description: "La pregunta academica del alumno" },
+        summary_id: { type: "string", description: "UUID del resumen especifico (opcional)" },
       },
       required: ["question"],
     },
@@ -87,8 +72,8 @@ export const WHATSAPP_TOOLS: GeminiFunctionDeclaration[] = [
   {
     name: "check_progress",
     description:
-      "Muestra el progreso del alumno: mastery por topic, porcentaje de avance, topics débiles.",
-    parameters: {
+      "Muestra el progreso del alumno: mastery por topic, porcentaje de avance, topics debiles.",
+    input_schema: {
       type: "object",
       properties: {
         course_name: { type: "string", description: "Nombre del curso (opcional)" },
@@ -99,7 +84,7 @@ export const WHATSAPP_TOOLS: GeminiFunctionDeclaration[] = [
     name: "get_schedule",
     description:
       "Muestra tareas pendientes, deadlines, sesiones planificadas.",
-    parameters: {
+    input_schema: {
       type: "object",
       properties: {
         period: { type: "string", enum: ["today", "week"], description: "hoy o semana" },
@@ -109,32 +94,32 @@ export const WHATSAPP_TOOLS: GeminiFunctionDeclaration[] = [
   {
     name: "submit_review",
     description:
-      "Registra calificación de flashcard. SOLO durante Session Mode. Rating: 1=Fail, 3=Good, 4=Easy.",
-    parameters: {
+      "Registra calificacion de flashcard. SOLO durante Session Mode. Rating: 1=Fail, 3=Good, 4=Easy.",
+    input_schema: {
       type: "object",
       properties: {
         flashcard_id: { type: "string", description: "UUID de la flashcard" },
-        rating: { type: "integer", enum: [1, 3, 4], description: "1=Fail, 3=Good, 4=Easy" },
+        rating: { type: "number", enum: [1, 3, 4], description: "1=Fail, 3=Good, 4=Easy" },
       },
       required: ["flashcard_id", "rating"],
     },
   },
   {
     name: "browse_content",
-    description: "Navega el árbol de contenido: cursos, secciones, keywords.",
-    parameters: {
+    description: "Navega el arbol de contenido: cursos, secciones, keywords.",
+    input_schema: {
       type: "object",
       properties: {
         course_id: { type: "string", description: "UUID del curso (opcional)" },
-        section_id: { type: "string", description: "UUID de la sección (opcional)" },
+        section_id: { type: "string", description: "UUID de la seccion (opcional)" },
       },
     },
   },
   {
     name: "generate_content",
     description:
-      "Genera flashcards o quiz. Operación LENTA (~10s), se encola.",
-    parameters: {
+      "Genera flashcards o quiz. Operacion LENTA (~10s), se encola.",
+    input_schema: {
       type: "object",
       properties: {
         action: { type: "string", enum: ["flashcard", "quiz"], description: "Tipo" },
@@ -145,15 +130,18 @@ export const WHATSAPP_TOOLS: GeminiFunctionDeclaration[] = [
   },
   {
     name: "generate_weekly_report",
-    description: "Genera reporte semanal. Operación LENTA (~15s), se encola.",
-    parameters: { type: "object", properties: {} },
+    description: "Genera reporte semanal. Operacion LENTA (~15s), se encola.",
+    input_schema: {
+      type: "object",
+      properties: {},
+    },
   },
   {
     name: "handle_voice_message",
     description:
       "Procesa un mensaje de voz: transcribe y responde. " +
-      "Se activa automáticamente cuando el alumno envía un audio.",
-    parameters: {
+      "Se activa automaticamente cuando el alumno envia un audio.",
+    input_schema: {
       type: "object",
       properties: {
         audio_base64: { type: "string", description: "Audio en base64" },
@@ -170,139 +158,28 @@ export const WHATSAPP_SYSTEM_PROMPT = `Eres Axon, un asistente de estudio inteli
 
 PERSONALIDAD:
 - Amigable, motivador, y directo
-- Español informal (tuteo), con emojis moderados
-- Respuestas CORTAS: máximo 900 caracteres
+- Espanol informal (tuteo), con emojis moderados
+- Respuestas CORTAS: maximo 900 caracteres
 - Si necesitas dar info larga, usa bullets
 
 CAPACIDADES:
 - Flashcards pendientes + sesiones de repaso interactivas
-- Preguntas académicas con RAG (búsqueda semántica en contenido del curso)
+- Preguntas academicas con RAG (busqueda semantica en contenido del curso)
 - Progreso, agenda, contenido del curso
 - Generar material de estudio (flashcards, quizzes)
 - Transcribir y responder mensajes de voz
 
 REGLAS:
 1. SIEMPRE usa las tools en lugar de inventar respuestas
-2. Si no tienes info suficiente, pregunta al alumno qué curso o tema
-3. Para preguntas académicas, SIEMPRE usa ask_academic_question
-4. submit_review SOLO durante sesión de flashcards activa
-5. generate_content y generate_weekly_report son lentas — avisa al alumno
-6. Si ves functionResponse con status:'queued', la operación está EN PROCESO
-7. Cuando recibes un functionResponse con formatted_text, usa ESE texto como base de tu respuesta (ya está optimizado para WhatsApp). Podés ajustarlo levemente pero no lo reescribas desde cero.
+2. Si no tienes info suficiente, pregunta al alumno que curso o tema
+3. Para preguntas academicas, SIEMPRE usa ask_academic_question
+4. submit_review SOLO durante sesion de flashcards activa
+5. generate_content y generate_weekly_report son lentas -- avisa al alumno
+6. Cuando recibes un tool_result con formatted_text, usa ESE texto como base de tu respuesta (ya esta optimizado para WhatsApp). Podes ajustarlo levemente pero no lo reescribas desde cero.
 
 CONTEXTO DEL ALUMNO:
 {STUDENT_CONTEXT}
 `;
-
-// ─── S15: RAG Search Helper ─────────────────────────────
-// W3-01 FIX: All RPC params corrected to match rag_hybrid_search signature.
-// W3-02 FIX: course_members → memberships (course_members table doesn't exist).
-// W3-03 FIX: institution_id resolved and passed to RPC (prevents cross-tenant data leak).
-// W3-04 NOTE: getAdminClient() was already used — the broken params were the real blocker.
-
-const RAG_MAX_CONTEXT_CHARS = 4000;
-const RAG_TOP_K = 5;
-
-async function ragSearch(
-  question: string,
-  userId: string,
-  summaryId?: string,
-): Promise<{ context: string; sources: string[]; strategy: string }> {
-  const db = getAdminClient();
-
-  try {
-    // W3-02 FIX: Resolve institution via memberships (was course_members which doesn't exist)
-    // W3-03 FIX: We need institution_id for tenant-scoped search
-    let institutionId: string | null = null;
-
-    if (summaryId) {
-      // Resolve institution from the summary
-      const { data: instId } = await db.rpc("resolve_parent_institution", {
-        p_table: "summaries",
-        p_id: summaryId,
-      });
-      institutionId = instId as string | null;
-    }
-
-    if (!institutionId) {
-      // Resolve from user's active membership
-      const { data: membership } = await db
-        .from("memberships")
-        .select("institution_id")
-        .eq("user_id", userId)
-        .eq("is_active", true)
-        .limit(1)
-        .single();
-      institutionId = membership?.institution_id ?? null;
-    }
-
-    if (!institutionId) {
-      return { context: "", sources: [], strategy: "no_institution" };
-    }
-
-    const strategy = summaryId ? "standard" : selectStrategy(question, summaryId ?? null, 0);
-    const { embeddings } = await executeRetrievalEmbedding(strategy, question);
-
-    const searchPromises = embeddings.map(async ({ embedding }) => {
-      // W3-01 FIX: Correct RPC parameter names to match chat.ts / rag_hybrid_search signature
-      // OLD (broken): p_embedding, missing p_query_text, missing p_institution_id
-      // NEW (correct): p_query_embedding, p_query_text, p_institution_id, p_similarity_threshold
-      const { data, error } = await db.rpc("rag_hybrid_search", {
-        p_query_embedding: JSON.stringify(embedding),   // FIX: was p_embedding (wrong param name)
-        p_query_text: question,                          // FIX: was missing entirely
-        p_institution_id: institutionId,                 // FIX: was missing (CROSS-TENANT LEAK!)
-        p_match_count: RAG_TOP_K * 2,
-        p_similarity_threshold: 0.3,                     // FIX: was missing
-        p_summary_id: summaryId ?? null,                 // Pass null when not scoped
-      });
-
-      if (error) {
-        console.warn(`[WA-RAG] hybrid search failed: ${error.message}`);
-        return [] as MatchedChunk[];
-      }
-      return (data ?? []) as MatchedChunk[];
-    });
-
-    const resultSets = await Promise.all(searchPromises);
-    let merged = mergeSearchResults(resultSets);
-
-    if (merged.length === 0) {
-      return { context: "", sources: [], strategy: `${strategy}_empty` };
-    }
-
-    merged = await rerankWithClaude(question, merged, RAG_TOP_K);
-
-    let contextChars = 0;
-    const contextParts: string[] = [];
-    const sources: string[] = [];
-
-    for (const chunk of merged) {
-      if (contextChars + chunk.content.length > RAG_MAX_CONTEXT_CHARS) {
-        const remaining = RAG_MAX_CONTEXT_CHARS - contextChars;
-        if (remaining > 200) {
-          contextParts.push(
-            `## ${chunk.summary_title}\n${chunk.content.slice(0, remaining)}...`,
-          );
-        }
-        break;
-      }
-      contextParts.push(`## ${chunk.summary_title}\n${chunk.content}`);
-      contextChars += chunk.content.length;
-      if (!sources.includes(chunk.summary_title)) {
-        sources.push(chunk.summary_title);
-      }
-    }
-
-    return {
-      context: contextParts.join("\n\n"),
-      sources,
-      strategy,
-    };
-  } catch (e) {
-    console.error(`[WA-RAG] Pipeline failed: ${(e as Error).message}`);
-    return { context: "", sources: [], strategy: "error" };
-  }
-}
 
 // ─── Tool Executor ───────────────────────────────────────
 
@@ -408,9 +285,6 @@ export async function executeToolCall(
         let browseResult: { level: string; items: unknown[] };
 
         if (args.section_id) {
-          // W3-08 NOTE: keywords don't have section_id directly.
-          // They link via summary_id → topics → sections.
-          // Using a join through summaries → topics for correct traversal.
           const { data: topics } = await db
             .from("topics")
             .select("id")
@@ -441,7 +315,7 @@ export async function executeToolCall(
           if (error) throw new Error(`sections: ${error.message}`);
           browseResult = { level: "sections", items: data ?? [] };
         } else {
-          // W3-07 FIX: course_members doesn't exist → use memberships + courses
+          // W3-07 FIX: course_members doesn't exist -> use memberships + courses
           const { data: memData } = await db
             .from("memberships")
             .select("institution_id")
@@ -499,7 +373,7 @@ export async function executeToolCall(
         return { name, result: { review_id: data?.id, rating } };
       }
 
-      // S15: Full RAG pipeline
+      // S15: Full RAG pipeline (now uses shared ragSearch from lib/rag-search.ts)
       case "ask_academic_question": {
         const question = args.question as string;
         const summaryId = args.summary_id as string | undefined;
@@ -529,12 +403,12 @@ export async function executeToolCall(
 
         const { text } = await generateText({
           prompt: finalContext
-            ? `Contexto del curso (encontrado por búsqueda semántica):\n${finalContext}\n\n---\nPregunta: ${question}`
-            : `Pregunta académica (sin contexto disponible del curso): ${question}`,
+            ? `Contexto del curso (encontrado por busqueda semantica):\n${finalContext}\n\n---\nPregunta: ${question}`
+            : `Pregunta academica (sin contexto disponible del curso): ${question}`,
           systemPrompt:
-            "Eres un tutor universitario experto. Respondé de forma clara y concisa en español. " +
-            "Máximo 800 caracteres (es para WhatsApp). Si tenés contexto del curso, bastate en él. " +
-            "Si no tenés suficiente información, decilo honestamente. " +
+            "Eres un tutor universitario experto. Responde de forma clara y concisa en espanol. " +
+            "Maximo 800 caracteres (es para WhatsApp). Si tenes contexto del curso, basate en el. " +
+            "Si no tenes suficiente informacion, decilo honestamente. " +
             (sources.length > 0
               ? `Fuentes encontradas: ${sources.join(", ")}.`
               : ""),
@@ -557,7 +431,7 @@ export async function executeToolCall(
           name,
           result: {
             status: "queued",
-            message: "Generando contenido... Te aviso cuando esté listo.",
+            message: "Generando contenido... Te aviso cuando este listo.",
             action: args.action,
             summary_id: args.summary_id,
           },
@@ -570,7 +444,7 @@ export async function executeToolCall(
           name,
           result: {
             status: "queued",
-            message: "Generando tu reporte semanal... Te lo envío en unos segundos.",
+            message: "Generando tu reporte semanal... Te lo envio en unos segundos.",
           },
           isAsync: true,
         };
@@ -580,8 +454,8 @@ export async function executeToolCall(
         return {
           name,
           result: {
-            message: "La transcripción de voz se procesa automáticamente. " +
-              "El texto transcrito se envía como mensaje normal.",
+            message: "La transcripcion de voz se procesa automaticamente. " +
+              "El texto transcrito se envia como mensaje normal.",
           },
         };
       }

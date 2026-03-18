@@ -13,13 +13,7 @@ import {
   generateText as claudeGenerateText,
   type ClaudeTool,
 } from "../../claude-ai.ts";
-import {
-  selectStrategy,
-  executeRetrievalEmbedding,
-  rerankWithClaude,
-  mergeSearchResults,
-  type MatchedChunk,
-} from "../../retrieval-strategies.ts";
+import { ragSearch } from "../../lib/rag-search.ts";
 import {
   formatProgressSummary,
   formatScheduleSummary,
@@ -231,100 +225,8 @@ CONTEXTO DEL ALUMNO:
 {STUDENT_CONTEXT}
 `;
 
-// ─── RAG Search Helper ──────────────────────────────────
-
-const RAG_MAX_CONTEXT_CHARS = 4000;
-const RAG_TOP_K = 5;
-
-async function ragSearch(
-  question: string,
-  userId: string,
-  summaryId?: string,
-): Promise<{ context: string; sources: string[]; strategy: string }> {
-  const db = getAdminClient();
-
-  try {
-    let institutionId: string | null = null;
-
-    if (summaryId) {
-      const { data: instId } = await db.rpc("resolve_parent_institution", {
-        p_table: "summaries",
-        p_id: summaryId,
-      });
-      institutionId = instId as string | null;
-    }
-
-    if (!institutionId) {
-      const { data: membership } = await db
-        .from("memberships")
-        .select("institution_id")
-        .eq("user_id", userId)
-        .eq("is_active", true)
-        .limit(1)
-        .single();
-      institutionId = membership?.institution_id ?? null;
-    }
-
-    if (!institutionId) {
-      return { context: "", sources: [], strategy: "no_institution" };
-    }
-
-    const strategy = summaryId ? "standard" : selectStrategy(question, summaryId ?? null, 0);
-    const { embeddings } = await executeRetrievalEmbedding(strategy, question);
-
-    const searchPromises = embeddings.map(async ({ embedding }) => {
-      const { data, error } = await db.rpc("rag_hybrid_search", {
-        p_query_embedding: JSON.stringify(embedding),
-        p_query_text: question,
-        p_institution_id: institutionId,
-        p_match_count: RAG_TOP_K * 2,
-        p_similarity_threshold: 0.3,
-        p_summary_id: summaryId ?? null,
-      });
-
-      if (error) {
-        console.warn(`[TG-RAG] hybrid search failed: ${error.message}`);
-        return [] as MatchedChunk[];
-      }
-      return (data ?? []) as MatchedChunk[];
-    });
-
-    const resultSets = await Promise.all(searchPromises);
-    let merged = mergeSearchResults(resultSets);
-
-    if (merged.length === 0) {
-      return { context: "", sources: [], strategy: `${strategy}_empty` };
-    }
-
-    merged = await rerankWithClaude(question, merged, RAG_TOP_K);
-
-    let contextChars = 0;
-    const contextParts: string[] = [];
-    const sources: string[] = [];
-
-    for (const chunk of merged) {
-      if (contextChars + chunk.content.length > RAG_MAX_CONTEXT_CHARS) {
-        const remaining = RAG_MAX_CONTEXT_CHARS - contextChars;
-        if (remaining > 200) {
-          contextParts.push(
-            `## ${chunk.summary_title}\n${chunk.content.slice(0, remaining)}...`,
-          );
-        }
-        break;
-      }
-      contextParts.push(`## ${chunk.summary_title}\n${chunk.content}`);
-      contextChars += chunk.content.length;
-      if (!sources.includes(chunk.summary_title)) {
-        sources.push(chunk.summary_title);
-      }
-    }
-
-    return { context: contextParts.join("\n\n"), sources, strategy };
-  } catch (e) {
-    console.error(`[TG-RAG] Pipeline failed: ${(e as Error).message}`);
-    return { context: "", sources: [], strategy: "error" };
-  }
-}
+// ─── RAG Search ─────────────────────────────────────────
+// Shared ragSearch imported from ../../lib/rag-search.ts
 
 // ─── Tool Executor ───────────────────────────────────────
 
