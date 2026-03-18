@@ -503,6 +503,8 @@ Responde en espanol.${profileContext}`;
 
       const logId = crypto.randomUUID();
       const encoder = new TextEncoder();
+      let inputTokens = 0;
+      let outputTokens = 0;
 
       const outputStream = new ReadableStream<Uint8Array>({
         async start(controller) {
@@ -524,6 +526,14 @@ Responde en espanol.${profileContext}`;
                 try {
                   const event = JSON.parse(line.slice(6));
 
+                  // Track token usage from Anthropic stream events
+                  if (event.type === "message_start" && event.message?.usage) {
+                    inputTokens = event.message.usage.input_tokens ?? 0;
+                  }
+                  if (event.type === "message_delta" && event.usage) {
+                    outputTokens = event.usage.output_tokens ?? 0;
+                  }
+
                   // content_block_delta with text
                   if (
                     event.type === "content_block_delta" &&
@@ -543,11 +553,11 @@ Responde en espanol.${profileContext}`;
             const sourcesEvent = JSON.stringify({ type: "sources", sources: sourcesUsed });
             controller.enqueue(encoder.encode(`data: ${sourcesEvent}\n\n`));
 
-            // Send done event
+            // Send done event with real token counts from Anthropic stream
             const doneEvent = JSON.stringify({
               type: "done",
               log_id: logId,
-              tokens: { input: 0, output: 0 },
+              tokens: { input: inputTokens, output: outputTokens },
             });
             controller.enqueue(encoder.encode(`data: ${doneEvent}\n\n`));
 

@@ -341,7 +341,10 @@ export async function generateTextStream(
     throw new Error(`Claude streaming failed (${res.status}): ${errBody.slice(0, 200)}`);
   }
 
-  return res.body!;
+  if (!res.body) {
+    throw new Error("Claude streaming response has no body");
+  }
+  return res.body;
 }
 
 // ─── Parse JSON safely from Claude output ─────────────────
