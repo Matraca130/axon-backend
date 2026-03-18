@@ -48,6 +48,7 @@ const ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "http://localhost:3000",
   "https://axon-frontend.vercel.app",
+  "https://numero1-sseki-2325-55.vercel.app",
 ];
 
 app.use(
@@ -56,8 +57,9 @@ app.use(
     origin: (origin) => {
       // Allow requests with no origin (e.g. server-to-server, Postman)
       if (!origin) return "*";
-      // Allow project-specific Vercel preview deployments (axon-frontend-*.vercel.app)
-      if (origin.endsWith(".vercel.app") && origin.includes("axon-frontend")) return origin;
+      // Allow Vercel preview deployments for both repo names
+      if (origin.endsWith(".vercel.app") &&
+          (origin.includes("axon-frontend") || origin.includes("numero1-sseki-2325-55"))) return origin;
       // Allow explicitly listed origins
       if (ALLOWED_ORIGINS.includes(origin)) return origin;
       // Deny others
