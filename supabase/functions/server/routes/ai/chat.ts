@@ -489,7 +489,12 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
     .map((h: Record<string, string>) => `${h.role === "user" ? "Alumno" : "Tutor"}: ${h.content}`)
     .join("\n");
 
-  const userPrompt = `${conversationHistory ? `Conversacion previa:\n${conversationHistory}\n\n` : ""}${wrapXml("user_message", sanitizeForPrompt(message, 2000))}${ragContext}`;
+  const sanitizedHistory = conversationHistory
+    ? wrapXml("conversation_history", sanitizeForPrompt(conversationHistory, 3000))
+    : "";
+  const sanitizedMessage = wrapXml("user_message", sanitizeForPrompt(message, 2000));
+  const sanitizedContext = ragContext ? wrapXml("course_content", ragContext) : "";
+  const userPrompt = `${sanitizedHistory}\n${sanitizedMessage}\n${sanitizedContext}`;
 
   try {
     const result = await generateText({
