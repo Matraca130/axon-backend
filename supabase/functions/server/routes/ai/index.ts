@@ -78,6 +78,7 @@ async function aiRateLimitMiddleware(c: Context, next: Next) {
       p_window_ms: AI_RATE_WINDOW_MS,
     });
 
+    // Fail-closed: deny on RPC error to prevent unmetered API usage
     if (error) {
       console.error(`[AI RateLimit] RPC failed: ${error.message}. Denying request.`);
       return err(c, "Could not verify rate limit status. Please try again later.", 500);
