@@ -136,7 +136,8 @@ aiAnalyzeGraphRoutes.post(
     const { data: keywords, error: kwErr } = await db
       .from("keywords")
       .select("id, name, definition, summary_id")
-      .in("summary_id", summaryIds);
+      .in("summary_id", summaryIds)
+      .is("deleted_at", null);
 
     if (kwErr)
       return err(c, `Failed to fetch keywords: ${kwErr.message}`, 500);
@@ -326,6 +327,15 @@ aiAnalyzeGraphRoutes.post(
 
     // Enrich study_path with keyword_name from fetched keywords
     const kwNameMap = new Map(keywords.map((k: { id: string; name: string }) => [k.id, k.name]));
+
+    // Filter out AI-hallucinated keyword_ids not in our actual keyword set
+    parsed.weak_areas = (parsed.weak_areas || []).filter((wa) => kwNameMap.has(wa.keyword_id));
+    parsed.strong_areas = (parsed.strong_areas || []).filter((sa) => kwNameMap.has(sa.keyword_id));
+    parsed.study_path = (parsed.study_path || []).filter((s) => kwNameMap.has(s.keyword_id));
+    parsed.missing_connections = (parsed.missing_connections || []).filter(
+      (mc) => kwNameMap.has(mc.from_keyword) && kwNameMap.has(mc.to_keyword),
+    );
+
     const enrichedStudyPath = parsed.study_path.map((step) => ({
       ...step,
       keyword_name: kwNameMap.get(step.keyword_id) || step.keyword_id,

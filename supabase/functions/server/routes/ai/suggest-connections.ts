@@ -143,7 +143,8 @@ aiSuggestConnectionsRoutes.post(
     const { data: keywords, error: kwErr } = await db
       .from("keywords")
       .select("id, name, definition")
-      .in("summary_id", summaryIds);
+      .in("summary_id", summaryIds)
+      .is("deleted_at", null);
 
     if (kwErr)
       return err(c, `Failed to fetch keywords: ${kwErr.message}`, 500);
