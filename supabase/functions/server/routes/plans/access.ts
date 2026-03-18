@@ -13,6 +13,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import type { Context } from "npm:hono";
 
@@ -35,7 +36,7 @@ accessRoutes.get(`${PREFIX}/content-access`, async (c: Context) => {
     .in("status", ["active", "trialing"])
     .order("created_at", { ascending: false }).limit(1).maybeSingle();
 
-  if (subErr) return err(c, `Subscription lookup failed: ${subErr.message}`, 500);
+  if (subErr) return safeErr(c, "Subscription lookup", subErr);
   if (!sub) return ok(c, { access: "none", rules: [], plan_name: null, features: null });
 
   if (sub.current_period_end && new Date(sub.current_period_end) < new Date()) {
@@ -55,7 +56,7 @@ accessRoutes.get(`${PREFIX}/content-access`, async (c: Context) => {
 
   const { data: rules, error: rulesErr } = await db
     .from("plan_access_rules").select("scope_type, scope_id").eq("plan_id", sub.plan_id);
-  if (rulesErr) return err(c, `Rules lookup failed: ${rulesErr.message}`, 500);
+  if (rulesErr) return safeErr(c, "Rules lookup", rulesErr);
 
   return ok(c, { access: "restricted", rules: rules ?? [], plan_name: plan.name, features });
 });

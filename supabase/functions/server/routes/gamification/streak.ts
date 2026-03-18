@@ -11,6 +11,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX, getAdminClient } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import { computeStreakStatus, performDailyCheckIn } from "../../streak-engine.ts";
 import { awardXP, XP_TABLE } from "../../xp-engine.ts";
@@ -34,7 +35,7 @@ streakRoutes.get(`${PREFIX}/gamification/streak-status`, async (c: Context) => {
     const status = await computeStreakStatus(db, user.id, institutionId);
     return ok(c, status);
   } catch (e) {
-    return err(c, `Streak status failed: ${(e as Error).message}`, 500);
+    return safeErr(c, "Streak status", e instanceof Error ? e : null);
   }
 });
 
@@ -80,7 +81,7 @@ streakRoutes.post(`${PREFIX}/gamification/daily-check-in`, async (c: Context) =>
 
     return ok(c, result);
   } catch (e) {
-    return err(c, `Daily check-in failed: ${(e as Error).message}`, 500);
+    return safeErr(c, "Daily check-in", e instanceof Error ? e : null);
   }
 });
 
@@ -106,7 +107,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
     .is("used_on", null);
 
   if (countErr) {
-    return err(c, `Freeze count check failed: ${countErr.message}`, 500);
+    return safeErr(c, "Freeze count check", countErr);
   }
 
   if ((currentFreezes ?? 0) >= MAX_FREEZES) {
@@ -125,7 +126,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
     .maybeSingle();
 
   if (xpErr) {
-    return err(c, `XP check failed: ${xpErr.message}`, 500);
+    return safeErr(c, "XP check", xpErr);
   }
 
   const totalXp = xpData?.total_xp ?? 0;
@@ -148,7 +149,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
     .eq("institution_id", institutionId);
 
   if (deductErr) {
-    return err(c, `XP deduction failed: ${deductErr.message}`, 500);
+    return safeErr(c, "XP deduction", deductErr);
   }
 
   // G-001 FIX: Include freeze_type and xp_cost in INSERT
@@ -173,7 +174,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
       .eq("student_id", user.id)
       .eq("institution_id", institutionId);
 
-    return err(c, `Freeze creation failed: ${freezeErr.message}`, 500);
+    return safeErr(c, "Freeze creation", freezeErr);
   }
 
   await adminDb.from("xp_transactions").insert({
@@ -231,7 +232,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
     .maybeSingle();
 
   if (xpErr) {
-    return err(c, `XP check failed: ${xpErr.message}`, 500);
+    return safeErr(c, "XP check", xpErr);
   }
 
   const totalXp = xpData?.total_xp ?? 0;
@@ -253,7 +254,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
     .eq("institution_id", institutionId);
 
   if (deductErr) {
-    return err(c, `XP deduction failed: ${deductErr.message}`, 500);
+    return safeErr(c, "XP deduction", deductErr);
   }
 
   const today = new Date().toISOString().split("T")[0];
@@ -273,7 +274,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
       .eq("student_id", user.id)
       .eq("institution_id", institutionId);
 
-    return err(c, `Streak restore failed: ${statsErr.message}`, 500);
+    return safeErr(c, "Streak restore", statsErr);
   }
 
   // A-004 FIX: Include institution_id and repair_date in INSERT

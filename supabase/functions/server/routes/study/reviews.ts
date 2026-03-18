@@ -13,6 +13,7 @@
 import { Hono } from "npm:hono";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import {
   isUuid,
   isNonEmpty,
@@ -50,7 +51,7 @@ async function verifySessionOwnership(
     .maybeSingle();
 
   if (sessionErr) {
-    return err(c, `Session lookup failed: ${sessionErr.message}`, 500);
+    return safeErr(c, "Session lookup", sessionErr);
   }
   if (!session) {
     return err(c, "Session not found or does not belong to you", 404);
@@ -94,7 +95,7 @@ reviewRoutes.get(`${PREFIX}/reviews`, async (c: Context) => {
     .order("created_at", { ascending: true })
     .range(offset, offset + limit - 1);
 
-  if (error) return err(c, `List reviews failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "List reviews", error);
   return ok(c, data);
 });
 
@@ -145,7 +146,7 @@ reviewRoutes.post(`${PREFIX}/reviews`, async (c: Context) => {
     .select()
     .single();
 
-  if (error) return err(c, `Create review failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Create review", error);
 
   // Sprint 1: Fire-and-forget XP hook (contract §4.3)
   // Never delays HTTP response. Hook resolves institution internally.
@@ -193,7 +194,7 @@ reviewRoutes.get(`${PREFIX}/quiz-attempts`, async (c: Context) => {
 
   const { data, error } = await query;
   if (error)
-    return err(c, `List quiz_attempts failed: ${error.message}`, 500);
+    return safeErr(c, "List quiz_attempts", error);
   return ok(c, data);
 });
 
@@ -237,7 +238,7 @@ reviewRoutes.post(`${PREFIX}/quiz-attempts`, async (c: Context) => {
     .single();
 
   if (error)
-    return err(c, `Create quiz_attempt failed: ${error.message}`, 500);
+    return safeErr(c, "Create quiz_attempt", error);
 
   // Sprint 1: Fire-and-forget XP hook (contract §4.3)
   // quiz_attempts has summary_id via quiz_question → resolves institution internally.

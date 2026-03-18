@@ -17,6 +17,7 @@ import {
   PREFIX,
 } from "../../db.ts";
 import { isUuid } from "../../validate.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -171,7 +172,7 @@ aiIngestPdfRoutes.post(`${PREFIX}/ai/ingest-pdf`, async (c: Context) => {
     .single();
 
   if (insertErr || !newSummary) {
-    return err(c, `Failed to create summary: ${insertErr?.message ?? "no data returned"}`, 500);
+    return safeErr(c, "Create summary", insertErr);
   }
 
   const summaryId = newSummary.id as string;

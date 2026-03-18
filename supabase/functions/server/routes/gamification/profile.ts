@@ -10,6 +10,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 
 export const profileRoutes = new Hono();
@@ -48,7 +49,7 @@ profileRoutes.get(`${PREFIX}/gamification/profile`, async (c: Context) => {
   ]);
 
   if (xpResult.error) {
-    return err(c, `Profile fetch failed: ${xpResult.error.message}`, 500);
+    return safeErr(c, "XP profile fetch", xpResult.error);
   }
 
   const xp = xpResult.data;
@@ -101,7 +102,7 @@ profileRoutes.get(`${PREFIX}/gamification/xp-history`, async (c: Context) => {
     .order("created_at", { ascending: false })
     .range(offset, offset + limit - 1);
 
-  if (error) return err(c, `XP history failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "XP history", error);
   return ok(c, { items: data, total: count, limit, offset });
 });
 
@@ -163,7 +164,7 @@ profileRoutes.get(`${PREFIX}/gamification/leaderboard`, async (c: Context) => {
   }
 
   if (fetchError) {
-    return err(c, `Leaderboard failed: ${fetchError.message}`, 500);
+    return safeErr(c, "Leaderboard", fetchError);
   }
 
   // Find caller's rank

@@ -17,6 +17,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 
 export const searchEndpoint = new Hono();
 
@@ -44,7 +45,7 @@ searchEndpoint.get(`${PREFIX}/search`, async (c: Context) => {
       p_limit: 20,
     });
 
-    if (error) return err(c, `Search error: ${error.message}`, 500);
+    if (error) return safeErr(c, "Search", error);
 
     // Map RPC column names to the API response format
     const results = (data ?? []).map(
@@ -59,6 +60,6 @@ searchEndpoint.get(`${PREFIX}/search`, async (c: Context) => {
 
     return ok(c, { results });
   } catch (e: any) {
-    return err(c, `Search error: ${e.message}`, 500);
+    return safeErr(c, "Search", e);
   }
 });

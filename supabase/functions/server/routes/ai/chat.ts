@@ -63,6 +63,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX, getAdminClient } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
 import {
@@ -626,7 +627,7 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
       });
     } catch (e) {
       console.error("[RAG Chat] Streaming error:", e);
-      return err(c, `Chat streaming failed: ${(e as Error).message}`, 500);
+      return safeErr(c, "Chat streaming", e instanceof Error ? e : null);
     }
   }
 
@@ -694,6 +695,6 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
     });
   } catch (e) {
     console.error("[RAG Chat] Claude error:", e);
-    return err(c, `Chat failed: ${(e as Error).message}`, 500);
+    return safeErr(c, "Chat", e instanceof Error ? e : null);
   }
 });

@@ -18,6 +18,7 @@ import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import {
   NEED_CONFIG,
@@ -307,6 +308,6 @@ studyQueueRoutes.get(`${PREFIX}/study-queue`, async (c: Context) => {
     });
   } catch (e) {
     console.error("[StudyQueue] Unexpected error:", e);
-    return err(c, `Study queue generation failed: ${(e as Error).message}`, 500);
+    return safeErr(c, "Study queue generation", e instanceof Error ? e : null);
   }
 });

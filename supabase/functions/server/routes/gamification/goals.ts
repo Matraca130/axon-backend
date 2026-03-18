@@ -11,6 +11,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX, getAdminClient } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid, isNonNegInt } from "../../validate.ts";
 import { requireInstitutionRole, isDenied, ALL_ROLES } from "../../auth-helpers.ts";
 import { awardXP } from "../../xp-engine.ts";
@@ -66,7 +67,7 @@ goalRoutes.put(`${PREFIX}/gamification/daily-goal`, async (c: Context) => {
     .single();
 
   if (error) {
-    return err(c, `Update daily goal failed: ${error.message}`, 500);
+    return safeErr(c, "Update daily goal", error);
   }
 
   return ok(c, data);
@@ -116,7 +117,7 @@ goalRoutes.post(`${PREFIX}/gamification/goals/complete`, async (c: Context) => {
     .eq("source_id", sourceId);
 
   if (checkErr) {
-    return err(c, `Goal check failed: ${checkErr.message}`, 500);
+    return safeErr(c, "Goal check", checkErr);
   }
 
   if ((existing ?? 0) > 0) {
@@ -140,7 +141,7 @@ goalRoutes.post(`${PREFIX}/gamification/goals/complete`, async (c: Context) => {
       bonus_type: result?.bonus_type ?? null,
     });
   } catch (e) {
-    return err(c, `Goal completion failed: ${(e as Error).message}`, 500);
+    return safeErr(c, "Goal completion", e instanceof Error ? e : null);
   }
 });
 
@@ -191,7 +192,7 @@ goalRoutes.post(`${PREFIX}/gamification/onboarding`, async (c: Context) => {
     });
 
   if (xpErr) {
-    return err(c, `Onboarding XP init failed: ${xpErr.message}`, 500);
+    return safeErr(c, "Onboarding XP init", xpErr);
   }
 
   const { error: statsErr } = await adminDb

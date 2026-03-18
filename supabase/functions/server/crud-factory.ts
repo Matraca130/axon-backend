@@ -37,6 +37,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "./db.ts";
+import { safeErr } from "./lib/safe-error.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -301,7 +302,7 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     query = query.range(offset, offset + limit - 1);
 
     const { data, count, error } = await query;
-    if (error) return err(c, `List ${cfg.table} failed: ${error.message}`, 500);
+    if (error) return safeErr(c, `List ${cfg.table}`, error);
     return ok(c, { items: data, total: count, limit, offset });
   });
 
@@ -328,7 +329,7 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
 
     const { data, error } = await query.single();
     if (error)
-      return err(c, `Get ${cfg.table} ${id} failed: ${error.message}`, 404);
+      return safeErr(c, `Get ${cfg.table}`, error, 404);
     return ok(c, data);
   });
 
@@ -386,7 +387,7 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       .select()
       .single();
     if (error)
-      return err(c, `Create ${cfg.table} failed: ${error.message}`, 500);
+      return safeErr(c, `Create ${cfg.table}`, error);
 
     // Fase 5: Fire-and-forget afterWrite hook (e.g. auto-ingest for summaries).
     // Wrapped in try/catch to absorb synchronous exceptions from hook setup.
@@ -444,7 +445,7 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
 
     const { data, error } = await query.select().single();
     if (error)
-      return err(c, `Update ${cfg.table} ${id} failed: ${error.message}`, 500);
+      return safeErr(c, `Update ${cfg.table}`, error);
 
     // Fase 5: Fire-and-forget afterWrite hook.
     // updatedFields reflects ONLY what the client sent (not updated_at).
@@ -493,11 +494,7 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
 
       const { data, error } = await query.select().single();
       if (error)
-        return err(
-          c,
-          `Soft-delete ${cfg.table} ${id} failed: ${error.message}`,
-          500,
-        );
+        return safeErr(c, `Soft-delete ${cfg.table}`, error);
       return ok(c, data);
     } else {
       let query = db.from(cfg.table).delete().eq("id", id);
@@ -505,11 +502,7 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
 
       const { error } = await query;
       if (error)
-        return err(
-          c,
-          `Delete ${cfg.table} ${id} failed: ${error.message}`,
-          500,
-        );
+        return safeErr(c, `Delete ${cfg.table}`, error);
       return ok(c, { deleted: id });
     }
   });
@@ -543,11 +536,7 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
 
       const { data, error } = await query.select().single();
       if (error)
-        return err(
-          c,
-          `Restore ${cfg.table} ${id} failed: ${error.message}`,
-          500,
-        );
+        return safeErr(c, `Restore ${cfg.table}`, error);
       return ok(c, data);
     });
   }

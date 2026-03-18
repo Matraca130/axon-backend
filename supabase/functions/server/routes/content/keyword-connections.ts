@@ -31,6 +31,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -118,7 +119,7 @@ keywordConnectionRoutes.get(connBase, async (c: Context) => {
     .limit(200);
 
   if (error)
-    return err(c, `List keyword_connections failed: ${error.message}`, 500);
+    return safeErr(c, "List keyword_connections", error);
 
   // ── F3 FIX: Post-filter for students ───────────────────────
   // Students must not see connections to keywords in draft summaries.
@@ -183,12 +184,7 @@ keywordConnectionRoutes.get(`${connBase}/:id`, async (c: Context) => {
     .select(CONNECTION_SELECT)
     .eq("id", id)
     .single();
-  if (error)
-    return err(
-      c,
-      `Get keyword_connection ${id} failed: ${error.message}`,
-      404,
-    );
+  if (error) return safeErr(c, "Get keyword_connection", error, 404);
   return ok(c, data);
 });
 
@@ -286,12 +282,7 @@ keywordConnectionRoutes.post(connBase, async (c: Context) => {
     .select()
     .single();
 
-  if (error)
-    return err(
-      c,
-      `Create keyword_connection failed: ${error.message}`,
-      500,
-    );
+  if (error) return safeErr(c, "Create keyword_connection", error);
   return ok(c, data, 201);
 });
 
@@ -313,11 +304,6 @@ keywordConnectionRoutes.delete(`${connBase}/:id`, async (c: Context) => {
     .from("keyword_connections")
     .delete()
     .eq("id", id);
-  if (error)
-    return err(
-      c,
-      `Delete keyword_connection ${id} failed: ${error.message}`,
-      500,
-    );
+  if (error) return safeErr(c, "Delete keyword_connection", error);
   return ok(c, { deleted: id });
 });

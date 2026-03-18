@@ -40,6 +40,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid, isOneOf } from "../../validate.ts";
 import {
   requireInstitutionRole,
@@ -156,7 +157,7 @@ aiReportDashboardRoutes.get(
     );
 
     if (error)
-      return err(c, `Report stats query failed: ${error.message}`, 500);
+      return safeErr(c, "Report stats query", error);
 
     // ── Step 6: Extract + fallback ───────────────────────────
     // RPC returns TABLE → Supabase client wraps in array.
@@ -279,7 +280,7 @@ aiReportDashboardRoutes.get(
     const { data, count, error } = await query;
 
     if (error)
-      return err(c, `Report listing failed: ${error.message}`, 500);
+      return safeErr(c, "Report listing", error);
 
     // ── Step 7: Return consistent shape ──────────────────────
     // Same response shape as crud-factory LIST endpoints.

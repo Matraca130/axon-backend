@@ -17,6 +17,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { getAdminClient, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import { timingSafeEqual } from "../../timing-safe.ts";
 
@@ -181,7 +182,7 @@ webhookRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";
     console.error(`[Stripe Webhook] Error processing ${event.type}: ${msg}`);
-    return err(c, `Webhook processing failed: ${msg}`, 500);
+    return safeErr(c, "Webhook processing", e instanceof Error ? e : null);
   }
 });
 

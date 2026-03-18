@@ -19,6 +19,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -65,7 +66,7 @@ trashRestoreRoutes.get(`${PREFIX}/trash`, async (c: Context) => {
       p_limit: 50,
     });
 
-    if (error) return err(c, `Trash error: ${error.message}`, 500);
+    if (error) return safeErr(c, "Trash query", error);
 
     const items = (data ?? []).map(
       (row: { result_type: string; result_id: string; title: string; deleted_at: string }) => ({
@@ -78,7 +79,7 @@ trashRestoreRoutes.get(`${PREFIX}/trash`, async (c: Context) => {
 
     return ok(c, { items });
   } catch (e: any) {
-    return err(c, `Trash error: ${e.message}`, 500);
+    return safeErr(c, "Trash query", e);
   }
 });
 
@@ -154,10 +155,10 @@ trashRestoreRoutes.post(`${PREFIX}/restore/:table/:id`, async (c: Context) => {
       .select()
       .single();
 
-    if (error) return err(c, error.message, 400);
+    if (error) return safeErr(c, "Restore item", error, 400);
     if (!data) return err(c, "Item not found or already active", 404);
     return ok(c, { restored: true, item: data });
   } catch (e: any) {
-    return err(c, `Restore error: ${e.message}`, 500);
+    return safeErr(c, "Restore item", e);
   }
 });

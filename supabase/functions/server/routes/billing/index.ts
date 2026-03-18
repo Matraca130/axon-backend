@@ -17,6 +17,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid, isNonEmpty } from "../../validate.ts";
 import { getStripe } from "./stripe-client.ts";
 import { webhookRoutes } from "./webhook.ts";
@@ -43,7 +44,7 @@ billingRoutes.post(`${PREFIX}/billing/checkout-session`, async (c: Context) => {
   const { data: plan, error: planErr } = await db
     .from("institution_plans").select("*").eq("id", plan_id).single();
 
-  if (planErr || !plan) return err(c, `Plan not found: ${planErr?.message ?? "no data"}`, 404);
+  if (planErr || !plan) return safeErr(c, "Plan lookup", planErr, 404);
   if (!plan.stripe_price_id) return err(c, "Plan does not have a Stripe price configured", 400);
 
   const { data: existingSub } = await db
@@ -70,8 +71,7 @@ billingRoutes.post(`${PREFIX}/billing/checkout-session`, async (c: Context) => {
     const session = await stripe.request("POST", "/checkout/sessions", sessionParams);
     return ok(c, { url: session.url, session_id: session.id });
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : "Unknown Stripe error";
-    return err(c, `Stripe checkout failed: ${msg}`, 500);
+    return safeErr(c, "Stripe checkout", e instanceof Error ? e : null);
   }
 });
 
@@ -106,8 +106,7 @@ billingRoutes.post(`${PREFIX}/billing/portal-session`, async (c: Context) => {
     });
     return ok(c, { url: session.url });
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : "Unknown Stripe error";
-    return err(c, `Stripe portal failed: ${msg}`, 500);
+    return safeErr(c, "Stripe portal", e instanceof Error ? e : null);
   }
 });
 
@@ -130,7 +129,7 @@ billingRoutes.get(`${PREFIX}/billing/subscription-status`, async (c: Context) =>
     .order("created_at", { ascending: false })
     .limit(1).maybeSingle();
 
-  if (subErr) return err(c, `Subscription lookup failed: ${subErr.message}`, 500);
+  if (subErr) return safeErr(c, "Subscription lookup", subErr);
 
   if (!sub) {
     const { data: freePlan } = await db
