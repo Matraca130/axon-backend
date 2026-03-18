@@ -316,11 +316,26 @@ aiAnalyzeGraphRoutes.post(
       return err(c, "AI returned invalid response. Please try again.", 502);
     }
 
-    // ── Step 10: Return with _meta ─────────────────────────────
+    // ── Step 10: Validate and enrich response ─────────────────
+    // Clamp overall_score to [0, 1]
+    parsed.overall_score = Math.max(0, Math.min(1, parsed.overall_score || 0));
+
+    // Clamp mastery values in weak/strong areas
+    for (const wa of parsed.weak_areas) wa.mastery = Math.max(0, Math.min(1, wa.mastery || 0));
+    for (const sa of parsed.strong_areas) sa.mastery = Math.max(0, Math.min(1, sa.mastery || 0));
+
+    // Enrich study_path with keyword_name from fetched keywords
+    const kwNameMap = new Map(keywords.map((k: { id: string; name: string }) => [k.id, k.name]));
+    const enrichedStudyPath = parsed.study_path.map((step) => ({
+      ...step,
+      keyword_name: kwNameMap.get(step.keyword_id) || step.keyword_id,
+    }));
+
     return ok(
       c,
       {
         ...parsed,
+        study_path: enrichedStudyPath,
         _meta: {
           model: GENERATE_MODEL,
           tokens: result.tokensUsed,

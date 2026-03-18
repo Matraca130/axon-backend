@@ -227,6 +227,13 @@ aiSuggestConnectionsRoutes.post(
     // Filter to only valid keyword IDs and known connection types
     const connectionTypeSet = new Set<string>(CONNECTION_TYPES);
 
+    // Build set of existing connections for dedup (both directions)
+    const existingConnSet = new Set<string>();
+    for (const conn of existingConns || []) {
+      existingConnSet.add(`${conn.keyword_a_id}|${conn.keyword_b_id}`);
+      existingConnSet.add(`${conn.keyword_b_id}|${conn.keyword_a_id}`);
+    }
+
     const filtered = suggestions.filter(
       (s) =>
         validKeywordIds.has(s.source) &&
@@ -236,7 +243,8 @@ aiSuggestConnectionsRoutes.post(
         typeof s.reason === "string" &&
         typeof s.confidence === "number" &&
         s.confidence >= 0 &&
-        s.confidence <= 1,
+        s.confidence <= 1 &&
+        !existingConnSet.has(`${s.source}|${s.target}`),
     );
 
     // Sort by confidence descending

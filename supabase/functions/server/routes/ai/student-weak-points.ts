@@ -83,7 +83,7 @@ aiWeakPointsRoutes.get(
       return err(c, `Failed to fetch summaries: ${sumErr.message}`, 500);
 
     const summaryIds = (summaries || []).map((s: { id: string }) => s.id);
-    if (summaryIds.length === 0) return ok(c, { data: [] });
+    if (summaryIds.length === 0) return ok(c, []);
 
     // ── 2. Fetch keywords for those summaries ───────────────────
     const { data: keywords, error: kwErr } = await db
@@ -94,7 +94,7 @@ aiWeakPointsRoutes.get(
     if (kwErr)
       return err(c, `Failed to fetch keywords: ${kwErr.message}`, 500);
 
-    if (!keywords || keywords.length === 0) return ok(c, { data: [] });
+    if (!keywords || keywords.length === 0) return ok(c, []);
 
     const keywordIds = keywords.map((k: { id: string }) => k.id);
 
@@ -107,7 +107,7 @@ aiWeakPointsRoutes.get(
     if (stErr)
       return err(c, `Failed to fetch subtopics: ${stErr.message}`, 500);
 
-    if (!subtopics || subtopics.length === 0) return ok(c, { data: [] });
+    if (!subtopics || subtopics.length === 0) return ok(c, []);
 
     // ── 4. Fetch BKT states for the student ─────────────────────
     const subtopicIds = subtopics.map((s: { id: string }) => s.id);
