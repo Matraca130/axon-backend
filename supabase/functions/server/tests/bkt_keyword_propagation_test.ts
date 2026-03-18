@@ -23,10 +23,7 @@ import {
   calculateRecoveryMultiplier,
 } from "../lib/bkt-v4.ts";
 import { BKT_PARAMS, BKT_WEIGHTS } from "../lib/types.ts";
-<<<<<<< Updated upstream
-=======
 
->>>>>>> Stashed changes
 
 // ─── Helpers ─────────────────────────────────────────────────
 
