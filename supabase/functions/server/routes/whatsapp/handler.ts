@@ -1,17 +1,26 @@
 /**
- * routes/whatsapp/handler.ts — WhatsApp bot orchestrator
+ * routes/whatsapp/handler.ts -- WhatsApp bot orchestrator with Claude AI
+ *
+ * Migrated from Gemini to Claude AI agentic loop (tool_use).
+ * Voice transcription (STT) still uses Gemini multimodal.
  *
  * Phase 3 additions:
  *   S14: Voice messages transcribed via Gemini multimodal, then processed
  *        through the normal Agentic Loop (no separate tool call needed).
  *
  * Audit fixes applied: C1, C3, C7, C11, N3
- * W3-05 FIX: profiles.first_name/last_name → profiles.full_name
- * W3-06 FIX: course_members → memberships + courses (table doesn't exist)
+ * W3-05 FIX: profiles.first_name/last_name -> profiles.full_name
+ * W3-06 FIX: course_members -> memberships + courses (table doesn't exist)
  */
 
 import { getAdminClient } from "../../db.ts";
-import { getApiKey, GENERATE_MODEL, fetchWithRetry } from "../../gemini.ts";
+import { getApiKey as getGeminiKey, GENERATE_MODEL as GEMINI_MODEL, fetchWithRetry as geminiFetchWithRetry } from "../../gemini.ts";
+import {
+  chat as claudeChat,
+  selectModelForTask,
+  type ClaudeMessage,
+  type ClaudeContentBlock,
+} from "../../claude-ai.ts";
 import { sendText, downloadMedia } from "./wa-client.ts";
 import {
   WHATSAPP_TOOLS,
@@ -41,15 +50,10 @@ export interface HandleMessageParams {
   audioMediaId?: string;
 }
 
-interface GeminiMessage {
-  role: "user" | "model";
-  parts: Array<Record<string, unknown>>;
-}
-
 interface SessionRow {
   phone_hash: string;
   user_id: string | null;
-  history: GeminiMessage[];
+  history: ClaudeMessage[];
   current_tool: string | null;
   current_context: Record<string, unknown>;
   mode: string;
@@ -61,9 +65,8 @@ interface SessionRow {
 
 // ─── Constants ───────────────────────────────────────────
 
-const MAX_AGENTIC_ITERATIONS = 3;
+const MAX_AGENTIC_ITERATIONS = 5;
 const MAX_HISTORY_TURNS = 6;
-const GEMINI_TIMEOUT_MS = 15_000;
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
 // ─── Session Management ─────────────────────────────────
@@ -125,6 +128,7 @@ async function updateSession(
 }
 
 // ─── S14: Voice Transcription via Gemini Multimodal ───────
+// STT still uses Gemini because Claude does not support audio input.
 
 async function transcribeVoiceMessage(audioMediaId: string): Promise<string | null> {
   try {
@@ -138,16 +142,16 @@ async function transcribeVoiceMessage(audioMediaId: string): Promise<string | nu
     }
     const audioBase64 = btoa(binary);
 
-    const apiKey = getApiKey();
-    const url = `${GEMINI_BASE}/${GENERATE_MODEL}:generateContent?key=${apiKey}`;
+    const apiKey = getGeminiKey();
+    const url = `${GEMINI_BASE}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 
     const body = {
       contents: [{
         parts: [
           {
-            text: "Transcribí este mensaje de voz en español. " +
-              "Retorná SOLO la transcripción textual, sin explicaciones ni prefijos. " +
-              "Si no podés entender el audio, respondé '[inaudible]'.",
+            text: "Transcribi este mensaje de voz en espanol. " +
+              "Retorna SOLO la transcripcion textual, sin explicaciones ni prefijos. " +
+              "Si no podes entender el audio, responde '[inaudible]'.",
           },
           {
             inline_data: {
@@ -163,7 +167,7 @@ async function transcribeVoiceMessage(audioMediaId: string): Promise<string | nu
       },
     };
 
-    const res = await fetchWithRetry(
+    const res = await geminiFetchWithRetry(
       url,
       {
         method: "POST",
@@ -193,80 +197,13 @@ async function transcribeVoiceMessage(audioMediaId: string): Promise<string | nu
   }
 }
 
-// ─── Gemini API Call (N3 FIX: uses fetchWithRetry) ────────
-
-interface GeminiResponse {
-  functionCall?: { name: string; args: Record<string, unknown> };
-  text?: string;
-}
-
-async function callGemini(
-  history: GeminiMessage[],
-  studentContext: string,
-): Promise<GeminiResponse> {
-  const apiKey = getApiKey();
-  const url = `${GEMINI_BASE}/${GENERATE_MODEL}:generateContent?key=${apiKey}`;
-
-  const systemPrompt = WHATSAPP_SYSTEM_PROMPT.replace(
-    "{STUDENT_CONTEXT}",
-    studentContext || "No hay contexto adicional del alumno.",
-  );
-
-  const body = {
-    contents: history,
-    tools: [{ function_declarations: WHATSAPP_TOOLS }],
-    tool_config: { function_calling_config: { mode: "AUTO" } },
-    system_instruction: { parts: [{ text: systemPrompt }] },
-    generation_config: { temperature: 0.3, max_output_tokens: 1024 },
-  };
-
-  const res = await fetchWithRetry(
-    url,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-    GEMINI_TIMEOUT_MS,
-    2,
-  );
-
-  if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`Gemini API ${res.status}: ${errBody.slice(0, 300)}`);
-  }
-
-  const data = await res.json();
-  const candidate = data.candidates?.[0];
-
-  if (!candidate?.content?.parts?.[0]) {
-    const blockReason = candidate?.finishReason ?? data.promptFeedback?.blockReason;
-    if (blockReason && blockReason !== "STOP") {
-      return { text: "No pude procesar tu mensaje. Intentá reformularlo." };
-    }
-    return { text: "No obtuve respuesta. Intentá de nuevo." };
-  }
-
-  const part = candidate.content.parts[0];
-  if (part.functionCall) {
-    return {
-      functionCall: {
-        name: part.functionCall.name,
-        args: part.functionCall.args ?? {},
-      },
-    };
-  }
-  return { text: part.text ?? "" };
-}
-
 // ─── Student Context Builder ───────────────────────────
-// W3-05 FIX: profiles.first_name/last_name → profiles.full_name
-// W3-06 FIX: course_members → memberships + courses join
+// W3-05 FIX: profiles.first_name/last_name -> profiles.full_name
+// W3-06 FIX: course_members -> memberships + courses join
 
 async function buildStudentContext(userId: string): Promise<string> {
   const db = getAdminClient();
   try {
-    // W3-05 FIX: Use full_name instead of first_name/last_name (columns don't exist)
     const profileRes = await db
       .from("profiles")
       .select("full_name")
@@ -275,8 +212,6 @@ async function buildStudentContext(userId: string): Promise<string> {
 
     const name = profileRes.data?.full_name ?? "Alumno";
 
-    // W3-06 FIX: course_members table doesn't exist.
-    // Resolve courses via: memberships → institutions → courses
     const { data: membershipData } = await db
       .from("memberships")
       .select("institution_id")
@@ -299,7 +234,7 @@ async function buildStudentContext(userId: string): Promise<string> {
 
     return [
       `Nombre: ${name}`,
-      `Cursos: ${courses.length > 0 ? courses.join(", ") : "Ningún curso inscrito"}`,
+      `Cursos: ${courses.length > 0 ? courses.join(", ") : "Ningun curso inscrito"}`,
     ].join("\n");
   } catch (e) {
     console.warn(`[WA-Handler] buildStudentContext failed: ${(e as Error).message}`);
@@ -309,7 +244,7 @@ async function buildStudentContext(userId: string): Promise<string> {
 
 // ─── History Trimmer ──────────────────────────────────
 
-function trimHistory(history: GeminiMessage[]): GeminiMessage[] {
+function trimHistory(history: ClaudeMessage[]): ClaudeMessage[] {
   const maxMessages = MAX_HISTORY_TURNS * 2;
   if (history.length <= maxMessages) return history;
   return history.slice(-maxMessages);
@@ -323,7 +258,7 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
 
   try {
     const session = await loadOrCreateSession(phoneHash, userId);
-    let history: GeminiMessage[] = Array.isArray(session.history) ? [...session.history] : [];
+    let history: ClaudeMessage[] = Array.isArray(session.history) ? [...session.history] : [];
 
     // ── Step 2: Session Mode routing ──
     if (session.mode === "flashcard_review") {
@@ -355,42 +290,65 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
     // ── Step 3: Build user message (S14: voice transcription) ──
     let userMessage = text ?? "";
     if (messageType === "interactive" && buttonPayload) {
-      userMessage = `[Botón seleccionado: ${buttonPayload}]`;
+      userMessage = `[Boton seleccionado: ${buttonPayload}]`;
     } else if (messageType === "audio" && audioMediaId) {
       await sendText(phone, "Transcribiendo tu audio... \uD83C\uDFA4");
       const transcription = await transcribeVoiceMessage(audioMediaId);
       if (!transcription) {
-        await sendText(phone, "No pude entender el audio. Probá enviando tu pregunta por texto. \uD83D\uDE14");
+        await sendText(phone, "No pude entender el audio. Proba enviando tu pregunta por texto. \uD83D\uDE14");
         updateLogRecord(messageId, ["voice_failed"], Date.now() - startMs);
         return;
       }
       userMessage = transcription;
-      await sendText(phone, `\uD83D\uDCDD Escuché: \"${transcription.slice(0, 200)}${transcription.length > 200 ? "..." : ""}\"`);
+      await sendText(phone, `\uD83D\uDCDD Escuche: \"${transcription.slice(0, 200)}${transcription.length > 200 ? "..." : ""}\"`);
     }
 
     if (!userMessage.trim()) {
-      await sendText(phone, "No entendí tu mensaje. Probá escribiendo tu pregunta. \uD83D\uDE0A");
+      await sendText(phone, "No entendi tu mensaje. Proba escribiendo tu pregunta. \uD83D\uDE0A");
       return;
     }
 
-    // ── Step 4: Agentic Loop ──
+    // ── Step 4: Agentic Loop with Claude ──
     const studentContext = await buildStudentContext(userId);
-    history.push({ role: "user", parts: [{ text: userMessage }] });
+    history.push({ role: "user", content: userMessage });
 
     let finalText = "";
     const toolsUsed: string[] = [];
 
-    for (let iteration = 0; iteration < MAX_AGENTIC_ITERATIONS; iteration++) {
-      const response = await callGemini(history, studentContext);
+    const systemPrompt = WHATSAPP_SYSTEM_PROMPT.replace(
+      "{STUDENT_CONTEXT}",
+      studentContext || "No hay contexto adicional del alumno.",
+    );
 
-      if (response.functionCall) {
-        const { name: toolName, args: toolArgs } = response.functionCall;
+    for (let iteration = 0; iteration < MAX_AGENTIC_ITERATIONS; iteration++) {
+      const response = await claudeChat({
+        messages: history,
+        systemPrompt,
+        tools: WHATSAPP_TOOLS,
+        model: iteration === 0 ? selectModelForTask(userMessage) : "sonnet",
+        temperature: 0.3,
+        maxTokens: 1024,
+      });
+
+      // Extract tool_use blocks
+      const toolUseBlock = response.content.find(
+        (b) => b.type === "tool_use",
+      ) as ClaudeContentBlock | undefined;
+
+      const textBlock = response.content.find(
+        (b) => b.type === "text",
+      ) as ClaudeContentBlock | undefined;
+
+      if (toolUseBlock?.name && toolUseBlock.id) {
+        const toolName = toolUseBlock.name;
+        const toolArgs = (toolUseBlock.input ?? {}) as Record<string, unknown>;
         toolsUsed.push(toolName);
         console.log(`[WA-Handler] Tool #${iteration + 1}: ${toolName}(${JSON.stringify(toolArgs).slice(0, 100)})`);
 
+        // Add assistant message with tool_use to history
         history.push({
-          role: "model",
-          parts: [{ functionCall: { name: toolName, args: toolArgs } }],
+          role: "assistant",
+          content: response.content,
         });
 
         const toolResult = await executeToolCall(toolName, toolArgs, userId, session.current_context);
@@ -413,12 +371,12 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
           await sendText(phone, (asyncResult?.message as string) ?? "Procesando... \u23F3");
           history.push({
             role: "user",
-            parts: [{ functionResponse: { name: toolName, response: { content: toolResult.result } } }],
+            content: [{ type: "tool_result", tool_use_id: toolUseBlock.id, content: JSON.stringify(toolResult.result) }],
           });
           break;
         }
 
-        // S10: get_study_queue → Session Mode
+        // S10: get_study_queue -> Session Mode
         if (toolName === "get_study_queue" && toolResult.result) {
           const queueResult = toolResult.result as { cards: FlashcardItem[]; count: number };
           if (queueResult.count > 0) {
@@ -432,27 +390,40 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
           }
         }
 
+        // Add tool_result to history
         history.push({
           role: "user",
-          parts: [{
-            functionResponse: {
-              name: toolName,
-              response: {
-                content: toolResult.error ? { error: toolResult.error } : toolResult.result,
-              },
-            },
+          content: [{
+            type: "tool_result",
+            tool_use_id: toolUseBlock.id,
+            content: JSON.stringify(
+              toolResult.error ? { error: toolResult.error } : toolResult.result,
+            ),
           }],
         });
         continue;
       }
 
-      if (response.text) {
-        finalText = response.text;
-        history.push({ role: "model", parts: [{ text: finalText }] });
+      if (textBlock?.text) {
+        finalText = textBlock.text;
+        history.push({ role: "assistant", content: finalText });
         break;
       }
 
-      console.warn(`[WA-Handler] Gemini empty at iteration ${iteration}`);
+      // If response has text content directly
+      if (response.stopReason === "end_turn" && response.content.length > 0) {
+        const allText = response.content
+          .filter((b) => b.type === "text")
+          .map((b) => b.text ?? "")
+          .join("");
+        if (allText) {
+          finalText = allText;
+          history.push({ role: "assistant", content: finalText });
+          break;
+        }
+      }
+
+      console.warn(`[WA-Handler] Claude empty at iteration ${iteration}`);
       break;
     }
 
@@ -477,7 +448,7 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
     const errorMsg = (e as Error).message;
     console.error(`[WA-Handler] Fatal: ${errorMsg}`);
     try {
-      await sendText(phone, "Ups, algo salió mal. Intentá de nuevo en unos segundos. \uD83D\uDE14");
+      await sendText(phone, "Ups, algo salio mal. Intenta de nuevo en unos segundos. \uD83D\uDE14");
     } catch { /* */ }
 
     const db = getAdminClient();
