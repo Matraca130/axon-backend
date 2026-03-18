@@ -110,7 +110,15 @@ $$;
 COMMENT ON FUNCTION rag_coarse_to_fine_search IS
   'Two-stage RAG search v4 — adds optional FTS scoring (ts_rank Spanish).';
 
--- Re-apply REVOKE/GRANT with updated signature (new parameter added)
+-- Revoke old 5-param signature if it exists (CREATE OR REPLACE doesn't drop it)
+DO $$ BEGIN
+  REVOKE EXECUTE ON FUNCTION rag_coarse_to_fine_search(
+    vector(1536), UUID, INT, INT, FLOAT
+  ) FROM anon, authenticated;
+EXCEPTION WHEN undefined_function THEN NULL;
+END $$;
+
+-- Re-apply REVOKE/GRANT with updated 6-param signature
 REVOKE EXECUTE ON FUNCTION rag_coarse_to_fine_search(
   vector(1536), UUID, INT, INT, FLOAT, TEXT
 ) FROM anon, authenticated;
