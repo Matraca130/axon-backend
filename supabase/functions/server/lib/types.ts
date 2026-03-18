@@ -115,6 +115,18 @@ export const BKT_PARAMS = {
   FLASHCARD_MULTIPLIER: 1.00, // Flashcard: produccion (peso completo)
 } as const;
 
+// ─── BKT Weight Propagation (spec §4.2) ─────────────────────
+// When a student reviews an item, the BKT mastery update propagates
+// to linked keyword subtopics with these weights:
+//   keyword_direct → full weight (1.0)
+//   flashcard review → partial weight (0.3)
+//   quiz review → partial weight (0.5)
+export const BKT_WEIGHTS = {
+  keyword_direct: 1.0,
+  flashcard: 0.3,
+  quiz: 0.5,
+} as const;
+
 // ─── isCorrect Thresholds (spec §6.1, critico) ──────────────
 // FSRS: Hard (grade=2) IS successful recall (w15=0.29 reduces growth, but S still grows)
 // BKT:  grade >= 3 is correct (only Good and Easy)

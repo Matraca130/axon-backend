@@ -34,7 +34,7 @@ import type { Context } from "npm:hono";
 // ── PATH B imports: server-side FSRS + BKT compute ──────────
 import { computeFsrsV4Update } from "../../lib/fsrs-v4.ts";
 import { computeBktV4Update } from "../../lib/bkt-v4.ts";
-import { THRESHOLDS } from "../../lib/types.ts";
+import { THRESHOLDS, BKT_WEIGHTS } from "../../lib/types.ts";
 import type { FsrsCardState } from "../../lib/types.ts";
 
 // ── Gamification: batch XP hook ──────────────────────────────
@@ -86,6 +86,123 @@ async function loadLeechThreshold(
     return globalData?.leech_threshold ?? DEFAULT_LEECH_THRESHOLD;
   } catch {
     return DEFAULT_LEECH_THRESHOLD;
+  }
+}
+
+// ─── Keyword BKT Propagation (spec §4.2) ─────────────────────
+// After a flashcard/quiz review updates its subtopic's BKT state,
+// propagate a weighted BKT update to ALL sibling subtopics under
+// the same keyword. Fire-and-forget: errors are logged, not thrown.
+
+async function propagateKeywordBkt(
+  db: SupabaseClient,
+  userId: string,
+  itemId: string,
+  instrumentType: string,
+  isCorrect: boolean,
+  sourceSubtopicId: string | undefined,
+): Promise<void> {
+  try {
+    // 1. Determine the source table based on instrument type
+    const table = instrumentType === "quiz" ? "quiz_questions" : "flashcards";
+
+    // 2. Look up the item's keyword_id
+    const { data: item, error: itemErr } = await db
+      .from(table)
+      .select("keyword_id")
+      .eq("id", itemId)
+      .maybeSingle();
+
+    if (itemErr || !item?.keyword_id) {
+      if (itemErr) {
+        console.warn(`[KW-BKT] Failed to look up ${table} keyword_id:`, itemErr.message);
+      }
+      return; // No keyword linked — nothing to propagate
+    }
+
+    const keywordId = item.keyword_id as string;
+
+    // 3. Find all subtopics under this keyword
+    const { data: subtopics, error: subErr } = await db
+      .from("subtopics")
+      .select("id")
+      .eq("keyword_id", keywordId)
+      .is("deleted_at", null);
+
+    if (subErr || !subtopics || subtopics.length === 0) {
+      if (subErr) {
+        console.warn("[KW-BKT] Failed to look up subtopics:", subErr.message);
+      }
+      return; // No subtopics — nothing to propagate
+    }
+
+    // 4. Determine the weight for this instrument type
+    const weight = instrumentType === "quiz"
+      ? BKT_WEIGHTS.quiz
+      : BKT_WEIGHTS.flashcard;
+
+    const nowIso = new Date().toISOString();
+
+    // 5. For each subtopic (excluding the one already updated), apply weighted BKT
+    for (const sub of subtopics) {
+      if (sub.id === sourceSubtopicId) continue; // Already updated by main flow
+
+      try {
+        // Read current BKT state for this subtopic
+        const { data: existingBkt } = await db
+          .from("bkt_states")
+          .select("p_know, max_p_know, total_attempts, correct_attempts, p_transit, p_slip, p_guess")
+          .eq("student_id", userId)
+          .eq("subtopic_id", sub.id)
+          .maybeSingle();
+
+        const currentMastery = existingBkt?.p_know ?? 0;
+        const maxReachedMastery = existingBkt?.max_p_know ?? 0;
+
+        // Compute BKT update using the engine (with keyword_direct type for full calc)
+        const bktResult = computeBktV4Update({
+          currentMastery,
+          maxReachedMastery,
+          isCorrect,
+          instrumentType: instrumentType === "quiz" ? "quiz" : "flashcard",
+        });
+
+        // Apply weight to the delta: scale the gain, but keep direction
+        // weighted_p_know = currentMastery + (delta * weight)
+        const weightedDelta = bktResult.delta * weight;
+        const weightedPKnow = Math.max(0, Math.min(1, currentMastery + weightedDelta));
+        const weightedMaxPKnow = Math.max(maxReachedMastery, weightedPKnow);
+
+        const existingTotal = existingBkt?.total_attempts ?? 0;
+        const existingCorrect = existingBkt?.correct_attempts ?? 0;
+
+        const bktRow = {
+          student_id: userId,
+          subtopic_id: sub.id,
+          p_know: Math.round(weightedPKnow * 10000) / 10000,
+          max_p_know: Math.round(weightedMaxPKnow * 10000) / 10000,
+          p_transit: existingBkt?.p_transit ?? 0.18,
+          p_slip: existingBkt?.p_slip ?? 0.10,
+          p_guess: existingBkt?.p_guess ?? 0.25,
+          delta: Math.round(weightedDelta * 10000) / 10000,
+          total_attempts: existingTotal + 1,
+          correct_attempts: existingCorrect + (isCorrect ? 1 : 0),
+          last_attempt_at: nowIso,
+        };
+
+        const { error: upsertErr } = await atomicUpsert(
+          db, "bkt_states", "student_id,subtopic_id", bktRow,
+        );
+
+        if (upsertErr) {
+          console.warn(`[KW-BKT] Upsert failed for subtopic ${sub.id}:`, upsertErr.message);
+        }
+      } catch (e) {
+        console.warn(`[KW-BKT] Error propagating to subtopic ${sub.id}:`, (e as Error).message);
+      }
+    }
+  } catch (e) {
+    console.warn("[KW-BKT] Keyword propagation failed:", (e as Error).message);
   }
 }
 
@@ -349,6 +466,14 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           errors.push({ index: i, step: "bkt", message: bktErr.message });
         } else {
           bktUpdated++;
+
+          // §4.2: Fire-and-forget keyword BKT propagation (PATH A)
+          const pathAGrade = mapToFsrsGrade(item.grade);
+          const pathAIsCorrect = pathAGrade >= THRESHOLDS.BKT_CORRECT_MIN_GRADE;
+          propagateKeywordBkt(
+            db, user.id, item.item_id, item.instrument_type,
+            pathAIsCorrect, bkt.subtopic_id,
+          ).catch((e) => console.warn("[KW-BKT] PATH A propagation error:", (e as Error).message));
         }
       } catch (e) {
         errors.push({ index: i, step: "bkt", message: (e as Error).message });
@@ -405,6 +530,12 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           errors.push({ index: i, step: "bkt_pathb", message: bktErr.message });
         } else {
           bktUpdated++;
+
+          // §4.2: Fire-and-forget keyword BKT propagation (PATH B)
+          propagateKeywordBkt(
+            db, user.id, item.item_id, item.instrument_type,
+            isCorrect, item.subtopic_id,
+          ).catch((e) => console.warn("[KW-BKT] PATH B propagation error:", (e as Error).message));
 
           const lastResult = computedResults[computedResults.length - 1];
           if (lastResult && lastResult.item_id === item.item_id) {
