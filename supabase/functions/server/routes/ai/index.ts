@@ -69,6 +69,7 @@ async function aiRateLimitMiddleware(c: Context, next: Next) {
     const auth = await authenticate(c);
     if (auth instanceof Response) return auth;
     const userId = auth.user.id;
+    c.set("userId", userId);
 
     const adminDb = getAdminClient();
     const { data, error } = await adminDb.rpc("check_rate_limit", {
@@ -77,9 +78,10 @@ async function aiRateLimitMiddleware(c: Context, next: Next) {
       p_window_ms: AI_RATE_WINDOW_MS,
     });
 
+    // Fail-closed: deny on RPC error to prevent unmetered API usage
     if (error) {
-      console.warn(`[AI RateLimit] RPC failed: ${error.message}. Allowing request.`);
-      return next();
+      console.error(`[AI RateLimit] RPC failed: ${error.message}. Denying request.`);
+      return err(c, "Could not verify rate limit status. Please try again later.", 500);
     }
 
     if (data && !data.allowed) {
@@ -91,7 +93,8 @@ async function aiRateLimitMiddleware(c: Context, next: Next) {
       );
     }
   } catch (e) {
-    console.warn(`[AI RateLimit] Exception: ${(e as Error).message}. Allowing request.`);
+    console.error(`[AI RateLimit] Exception: ${(e as Error).message}. Denying request.`);
+    return err(c, "Could not verify rate limit status. Please try again later.", 500);
   }
 
   return next();

@@ -127,7 +127,8 @@ async function fetchAdjacentChunks(
     const { data: matchedWithOrder, error: orderErr } = await db
       .from("chunks")
       .select("id, summary_id, content, order_index")
-      .in("id", matchedIds);
+      .in("id", matchedIds)
+      .is("deleted_at", null);
 
     if (orderErr || !matchedWithOrder) return [];
 

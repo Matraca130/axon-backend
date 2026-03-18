@@ -276,9 +276,17 @@ export function selectModelForTask(task: string): ClaudeModel {
   // Opus for complex tasks
   if (
     lowerTask.includes("report") ||
+    lowerTask.includes("reporte") ||
+    lowerTask.includes("informe") ||
     lowerTask.includes("analysis") ||
+    lowerTask.includes("análisis") ||
+    lowerTask.includes("analisis") ||
     lowerTask.includes("explain in depth") ||
-    lowerTask.includes("compare and contrast")
+    lowerTask.includes("explicar en profundidad") ||
+    lowerTask.includes("explicar en detalle") ||
+    lowerTask.includes("compare and contrast") ||
+    lowerTask.includes("comparar y contrastar") ||
+    lowerTask.includes("comparar")
   ) {
     return "opus";
   }
@@ -286,9 +294,18 @@ export function selectModelForTask(task: string): ClaudeModel {
   // Haiku for simple tasks
   if (
     lowerTask.includes("format") ||
+    lowerTask.includes("formatear") ||
+    lowerTask.includes("formato") ||
     lowerTask.includes("translate") ||
+    lowerTask.includes("traducir") ||
+    lowerTask.includes("traducción") ||
+    lowerTask.includes("traduccion") ||
     lowerTask.includes("summarize briefly") ||
-    lowerTask.includes("list")
+    lowerTask.includes("resumir brevemente") ||
+    lowerTask.includes("resumir") ||
+    lowerTask.includes("list") ||
+    lowerTask.includes("listar") ||
+    lowerTask.includes("enumerar")
   ) {
     return "haiku";
   }

@@ -20,7 +20,7 @@ export const EMBEDDING_DIMENSIONS = 1536;
 
 const OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings";
 const TIMEOUT_MS = 10_000;
-const MAX_RETRIES = 3;
+const MAX_ATTEMPTS = 3;
 const BASE_DELAY_MS = 1000;
 
 // ─── API Key ────────────────────────────────────────────────────
@@ -48,7 +48,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
   const key = getOpenAIKey();
   let lastError: Error | null = null;
 
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
@@ -70,10 +70,10 @@ export async function generateEmbedding(text: string): Promise<number[]> {
       clearTimeout(timer);
 
       // Retry on rate limit or server error
-      if ((res.status === 429 || res.status === 503) && attempt < MAX_RETRIES) {
+      if ((res.status === 429 || res.status === 503) && attempt < MAX_ATTEMPTS) {
         const delay = Math.min(BASE_DELAY_MS * 2 ** attempt, 8000);
         console.warn(
-          `[OpenAI Embed] ${res.status}, retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms`,
+          `[OpenAI Embed] ${res.status}, retry ${attempt + 1}/${MAX_ATTEMPTS} in ${delay}ms`,
         );
         await new Promise((r) => setTimeout(r, delay));
         continue;
@@ -110,10 +110,10 @@ export async function generateEmbedding(text: string): Promise<number[]> {
         lastError = e as Error;
       }
 
-      if (attempt < MAX_RETRIES) {
+      if (attempt < MAX_ATTEMPTS) {
         const delay = Math.min(BASE_DELAY_MS * 2 ** attempt, 8000);
         console.warn(
-          `[OpenAI Embed] Error, retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms: ${lastError.message}`,
+          `[OpenAI Embed] Error, retry ${attempt + 1}/${MAX_ATTEMPTS} in ${delay}ms: ${lastError.message}`,
         );
         await new Promise((r) => setTimeout(r, delay));
         continue;
@@ -157,7 +157,7 @@ async function generateEmbeddingBatch(texts: string[]): Promise<number[][]> {
   const key = getOpenAIKey();
   let lastError: Error | null = null;
 
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS * 2);
 
@@ -181,7 +181,7 @@ async function generateEmbeddingBatch(texts: string[]): Promise<number[][]> {
       if (res.status === 429 || res.status === 503) {
         const delay = BASE_DELAY_MS * Math.pow(2, attempt);
         console.warn(
-          `[OpenAI Batch Embed] ${res.status}, retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms`,
+          `[OpenAI Batch Embed] ${res.status}, retry ${attempt + 1}/${MAX_ATTEMPTS} in ${delay}ms`,
         );
         await new Promise((r) => setTimeout(r, delay));
         continue;
@@ -222,10 +222,10 @@ async function generateEmbeddingBatch(texts: string[]): Promise<number[][]> {
         lastError = e instanceof Error ? e : new Error(String(e));
       }
 
-      if (attempt < MAX_RETRIES - 1) {
+      if (attempt < MAX_ATTEMPTS - 1) {
         const delay = BASE_DELAY_MS * Math.pow(2, attempt);
         console.warn(
-          `[OpenAI Batch Embed] Error, retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms: ${lastError.message}`,
+          `[OpenAI Batch Embed] Error, retry ${attempt + 1}/${MAX_ATTEMPTS} in ${delay}ms: ${lastError.message}`,
         );
         await new Promise((r) => setTimeout(r, delay));
       }
