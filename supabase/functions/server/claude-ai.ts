@@ -345,6 +345,49 @@ export function selectModelForTask(task: string): ClaudeModel {
 
 export const GENERATE_MODEL = "claude-sonnet-4-20250514";
 
+// ─── Streaming Text Generation ──────────────────────────
+
+/**
+ * Streaming text generation via Anthropic Messages API.
+ * Returns a ReadableStream that yields SSE-formatted chunks.
+ */
+export async function generateTextStream(
+  opts: ClaudeGenerateOpts,
+): Promise<ReadableStream<Uint8Array>> {
+  const key = getApiKey();
+  const modelId = getModelId(opts.model ?? "sonnet");
+  const url = `${CLAUDE_BASE}/messages`;
+
+  const body: Record<string, unknown> = {
+    model: modelId,
+    max_tokens: opts.maxTokens ?? 2048,
+    messages: [{ role: "user", content: opts.prompt }],
+    stream: true,
+  };
+  if (opts.systemPrompt) body.system = opts.systemPrompt;
+  if (opts.temperature !== undefined) body.temperature = opts.temperature;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": key,
+      "anthropic-version": ANTHROPIC_VERSION,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Claude streaming failed (${res.status}): ${errBody.slice(0, 200)}`);
+  }
+
+  if (!res.body) {
+    throw new Error("Claude streaming response has no body");
+  }
+  return res.body;
+}
+
 // ─── Parse JSON safely from Claude output ─────────────────
 // Claude sometimes wraps JSON in markdown code blocks.
 // Same logic as gemini.ts parseGeminiJson (drop-in replacement).

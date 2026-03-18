@@ -70,7 +70,7 @@ import {
   isDenied,
   ALL_ROLES,
 } from "../../auth-helpers.ts";
-import { generateText, GENERATE_MODEL } from "../../claude-ai.ts";
+import { generateText, generateTextStream, GENERATE_MODEL } from "../../claude-ai.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { xpHookForRagQuestion } from "../../xp-hooks.ts";
 
@@ -498,6 +498,139 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
   const sanitizedContext = ragContext ? wrapXml("course_content", sanitizeForPrompt(ragContext, 6000)) : "";
   const userPrompt = `${sanitizedHistory}\n${sanitizedMessage}\n${sanitizedContext}`;
 
+  // --- Streaming path: ?stream=1 --------------------------------
+  const isStream = new URL(c.req.url).searchParams.get("stream") === "1";
+
+  if (isStream) {
+    try {
+      const anthropicStream = await generateTextStream({
+        prompt: userPrompt,
+        systemPrompt,
+        temperature: 0.5,
+        maxTokens: 2500,
+      });
+
+      const logId = crypto.randomUUID();
+      const encoder = new TextEncoder();
+      let inputTokens = 0;
+      let outputTokens = 0;
+
+      const outputStream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          const reader = anthropicStream.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+
+              const lines = buffer.split("\n");
+              buffer = lines.pop() ?? "";
+
+              for (const line of lines) {
+                if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
+                try {
+                  const event = JSON.parse(line.slice(6));
+
+                  // Track token usage from Anthropic stream events
+                  if (event.type === "message_start" && event.message?.usage) {
+                    inputTokens = event.message.usage.input_tokens ?? 0;
+                  }
+                  if (event.type === "message_delta" && event.usage) {
+                    outputTokens = event.usage.output_tokens ?? 0;
+                  }
+
+                  // content_block_delta with text
+                  if (
+                    event.type === "content_block_delta" &&
+                    event.delta?.type === "text_delta" &&
+                    event.delta.text
+                  ) {
+                    const chunk = JSON.stringify({ type: "chunk", text: event.delta.text });
+                    controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
+                  }
+                } catch {
+                  // skip malformed events
+                }
+              }
+            }
+
+            // Send sources after text stream completes
+            const sourcesEvent = JSON.stringify({ type: "sources", sources: sourcesUsed });
+            controller.enqueue(encoder.encode(`data: ${sourcesEvent}\n\n`));
+
+            // Send done event with real token counts from Anthropic stream
+            const doneEvent = JSON.stringify({
+              type: "done",
+              log_id: logId,
+              tokens: { input: inputTokens, output: outputTokens },
+            });
+            controller.enqueue(encoder.encode(`data: ${doneEvent}\n\n`));
+
+            controller.close();
+          } catch (streamErr) {
+            const errorEvent = JSON.stringify({
+              type: "error",
+              message: (streamErr as Error).message,
+            });
+            controller.enqueue(encoder.encode(`data: ${errorEvent}\n\n`));
+            controller.close();
+          }
+
+          // Fire-and-forget: log + XP (same as non-streaming path)
+          const latencyMs = Date.now() - t0;
+          const sims = sourcesUsed.map((s) => s.similarity);
+          const logSearchType = wasAugmented ? `${searchType}_augmented` : searchType;
+
+          getAdminClient()
+            .from("rag_query_log")
+            .insert({
+              id: logId,
+              user_id: user.id,
+              institution_id: institutionId,
+              query_text: message,
+              summary_id: summaryId,
+              results_count: sourcesUsed.length,
+              top_similarity: sims.length ? Math.max(...sims) : null,
+              avg_similarity: sims.length
+                ? Math.round((sims.reduce((a, b) => a + b, 0) / sims.length) * 1000) / 1000
+                : null,
+              latency_ms: latencyMs,
+              search_type: logSearchType,
+              model_used: GENERATE_MODEL,
+              retrieval_strategy: strategy,
+              rerank_applied: rerankApplied,
+            })
+            .then(({ error }) => {
+              if (error) console.warn("[RAG Log] Insert failed:", error.message);
+            });
+
+          try {
+            xpHookForRagQuestion(user.id, institutionId, logId);
+          } catch (hookErr) {
+            console.warn("[XP Hook] RAG question setup error:", (hookErr as Error).message);
+          }
+        },
+      });
+
+      return new Response(outputStream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+          "X-Accel-Buffering": "no",
+        },
+      });
+    } catch (e) {
+      console.error("[RAG Chat] Streaming error:", e);
+      return err(c, `Chat streaming failed: ${(e as Error).message}`, 500);
+    }
+  }
+
+  // --- Non-streaming path (original) ----------------------------
   try {
     const result = await generateText({
       prompt: userPrompt,
