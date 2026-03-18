@@ -13,6 +13,11 @@
 -- and REVOKE/GRANT from 20260311_02_rag_security_hardening.sql.
 -- ════════════════════════════════════════════════════════════════════
 
+-- Drop old 5-param signature to prevent PostgreSQL function overload.
+-- CREATE OR REPLACE with different param count creates a second function,
+-- not a replacement. This ensures only the new 6-param version exists.
+DROP FUNCTION IF EXISTS rag_coarse_to_fine_search(vector(1536), UUID, INT, INT, FLOAT);
+
 CREATE OR REPLACE FUNCTION rag_coarse_to_fine_search(
   p_query_embedding      vector(1536),
   p_institution_id       UUID,
