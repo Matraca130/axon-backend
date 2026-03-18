@@ -26,7 +26,7 @@
  *   D14: CONTENT_WRITE_ROLES — only professors/admins can pre-generate.
  *        Students access AI content via /ai/generate or /ai/generate-smart.
  *   D15: Sequential Claude calls, NOT parallel.
- *        Gemini has 15 RPM for generation. 5 parallel calls could spike.
+ *        LLM APIs have RPM limits. 5 parallel calls could spike.
  *        Sequential also gives cleaner partial-success error handling.
  *   D16: Partial-success response — if 3 of 5 succeed, return the 3
  *        successful items + 2 error entries. Never all-or-nothing.
@@ -54,7 +54,7 @@
  * SECURITY FIX (Gemini Code Assist review):
  *   Rate limiter changed from fail-open to FAIL-CLOSED.
  *   If check_rate_limit() RPC fails, the request is DENIED (500)
- *   instead of allowed through. This prevents uncontrolled Gemini
+ *   instead of allowed through. This prevents uncontrolled LLM
  *   API usage and unexpected costs when the DB is unreachable.
  */
 
@@ -69,6 +69,7 @@ import {
 } from "../../auth-helpers.ts";
 import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.ts";
 import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
+import { truncateForPrompt } from "./generate-smart-helpers.ts";
 
 export const aiPreGenerateRoutes = new Hono();
 
@@ -80,16 +81,6 @@ const DEFAULT_COUNT = 3; // Default items if count not provided
 // D9: Separate rate limit bucket for pre-generation
 const PREGEN_RATE_LIMIT = 10;           // max requests per window
 const PREGEN_RATE_WINDOW_MS = 3_600_000; // 1 hour
-
-// ── D12: Local truncateAtWord (same as generate-smart.ts) ─────
-function truncateAtWord(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  const truncated = text.substring(0, maxLen);
-  const lastSpace = truncated.lastIndexOf(" ");
-  return lastSpace > maxLen * 0.8
-    ? truncated.substring(0, lastSpace) + "..."
-    : truncated + "...";
-}
 
 // ── Types ────────────────────────────────────────────────
 interface GeneratedItem {
@@ -207,7 +198,7 @@ aiPreGenerateRoutes.post(
     if (!summary)
       return err(c, "Summary not found", 404);
 
-    const contentSnippet = truncateAtWord(
+    const contentSnippet = truncateForPrompt(
       summary.content_markdown || "",
       1500,
     );
@@ -320,7 +311,7 @@ Responde en JSON con este schema exacto:
 }`;
         }
 
-        // 7c. Call Gemini (D15: sequential, D17: fixed temperature)
+        // 7c. Call Claude (D15: sequential, D17: fixed temperature)
         const result = await generateText({
           prompt: userPrompt,
           systemPrompt,

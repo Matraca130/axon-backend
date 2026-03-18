@@ -10,9 +10,9 @@
  *   BulkErrorItem      — Bulk error item
  *   ACTIONS            — Allowed action types
  *   MAX_BULK_COUNT     — Max items per bulk request
- *   truncateForPrompt  — Word-boundary truncation for Gemini
+ *   truncateForPrompt  — Word-boundary truncation for LLM prompts
  *   reasonToText       — Maps primary_reason to Spanish explanation
- *   adaptiveTemperature — BKT mastery → Gemini temperature
+ *   adaptiveTemperature — BKT mastery → LLM temperature
  */
 
 import { truncateAtWord } from "../../auto-ingest.ts";
@@ -61,7 +61,7 @@ export interface BulkErrorItem {
 // ─── Helper Functions ─────────────────────────────────────────
 
 /**
- * D12: Prompt-specific truncation — adds "..." to signal truncation to Gemini.
+ * D12: Prompt-specific truncation — adds "..." to signal truncation to LLM.
  * Core word-boundary logic imported from auto-ingest.ts (single source of truth).
  */
 export function truncateForPrompt(text: string, maxLen: number): string {
