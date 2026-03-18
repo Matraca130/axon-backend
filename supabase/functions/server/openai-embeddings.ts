@@ -123,3 +123,114 @@ export async function generateEmbedding(text: string): Promise<number[]> {
 
   throw lastError ?? new Error("OpenAI Embedding: max retries exceeded");
 }
+
+// ─── Batch Embedding ────────────────────────────────────────────
+
+/**
+ * Generate embeddings for multiple texts in a single API call.
+ * OpenAI supports up to 2048 inputs per request.
+ * We batch in groups of 100 for safety and retry per batch.
+ *
+ * @param texts - Array of texts to embed
+ * @returns number[][] of embeddings, one per input text (same order)
+ */
+export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
+  if (texts.length === 0) return [];
+  if (texts.length === 1) {
+    const single = await generateEmbedding(texts[0]);
+    return [single];
+  }
+
+  const BATCH_SIZE = 100;
+  const results: number[][] = [];
+
+  for (let i = 0; i < texts.length; i += BATCH_SIZE) {
+    const batch = texts.slice(i, i + BATCH_SIZE);
+    const batchEmbeddings = await generateEmbeddingBatch(batch);
+    results.push(...batchEmbeddings);
+  }
+
+  return results;
+}
+
+async function generateEmbeddingBatch(texts: string[]): Promise<number[][]> {
+  const key = getOpenAIKey();
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS * 2);
+
+    try {
+      const res = await fetch(OPENAI_EMBEDDINGS_URL, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${key}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: EMBEDDING_MODEL,
+          input: texts,
+          dimensions: EMBEDDING_DIMENSIONS,
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timer);
+
+      if (res.status === 429 || res.status === 503) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        console.warn(
+          `[OpenAI Batch Embed] ${res.status}, retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+
+      if (!res.ok) {
+        const errBody = await res.text();
+        throw new Error(`OpenAI batch embedding failed (${res.status}): ${errBody}`);
+      }
+
+      const data = await res.json();
+      // Sort by index to ensure correct ordering
+      const sorted = data.data.sort(
+        (a: { index: number }, b: { index: number }) => a.index - b.index,
+      );
+      const embeddings = sorted.map(
+        (item: { embedding: number[] }) => item.embedding,
+      );
+
+      // Validate dimensions
+      for (const emb of embeddings) {
+        if (emb.length !== EMBEDDING_DIMENSIONS) {
+          throw new Error(
+            `Batch embedding dimension mismatch: got ${emb.length}, expected ${EMBEDDING_DIMENSIONS}`,
+          );
+        }
+      }
+
+      return embeddings;
+    } catch (e) {
+      clearTimeout(timer);
+
+      if (e instanceof DOMException && e.name === "AbortError") {
+        lastError = new Error(
+          `OpenAI Batch Embedding timeout after ${TIMEOUT_MS * 2}ms (attempt ${attempt + 1})`,
+        );
+      } else {
+        lastError = e instanceof Error ? e : new Error(String(e));
+      }
+
+      if (attempt < MAX_RETRIES - 1) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        console.warn(
+          `[OpenAI Batch Embed] Error, retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms: ${lastError.message}`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  }
+
+  throw lastError ?? new Error("Batch embedding failed after retries");
+}

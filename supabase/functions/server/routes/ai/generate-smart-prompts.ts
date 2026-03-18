@@ -12,6 +12,7 @@
  */
 
 import { reasonToText } from "./generate-smart-helpers.ts";
+import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
 
 // ─── System Prompt ────────────────────────────────────────────
 
@@ -46,11 +47,11 @@ export function buildQuizPrompt(ctx: PromptContext): string {
 Seleccion automatica: ${reasonText}
 
 Tema: ${ctx.summaryTitle}
-Keyword: ${ctx.keywordName}${ctx.keywordDef ? ` \u2014 ${ctx.keywordDef}` : ""}
+Keyword: ${ctx.keywordName}${ctx.keywordDef ? ` \u2014 ${sanitizeForPrompt(ctx.keywordDef, 500)}` : ""}
 ${ctx.subtopicName ? `Subtema: ${ctx.subtopicName}` : ""}
 ${ctx.profNotesContext}
-Contenido relevante: ${ctx.contentSnippet}
-${ctx.profileContext}
+${ctx.profNotesContext ? wrapXml('professor_notes', ctx.profNotesContext) : ''}
+${wrapXml('course_content', ctx.contentSnippet)}
 ${ctx.bktContext}
 
 Adapta la dificultad segun el dominio (${pct}%):
@@ -88,11 +89,11 @@ export function buildFlashcardPrompt(
 
 Seleccion automatica: ${reasonText}
 
-Keyword: ${ctx.keywordName}${ctx.keywordDef ? ` \u2014 ${ctx.keywordDef}` : ""}
+Keyword: ${ctx.keywordName}${ctx.keywordDef ? ` \u2014 ${sanitizeForPrompt(ctx.keywordDef, 500)}` : ""}
 ${ctx.subtopicName ? `Subtema: ${ctx.subtopicName}` : ""}
 ${ctx.profNotesContext}
-Contenido relevante: ${ctx.contentSnippet}
-${ctx.profileContext}
+${ctx.profNotesContext ? wrapXml('professor_notes', ctx.profNotesContext) : ''}
+${wrapXml('course_content', ctx.contentSnippet)}
 
 Adapta el contenido segun el dominio (${pct}%):
 - Dominio bajo: definiciones claras y conceptos fundamentales

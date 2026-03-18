@@ -101,8 +101,14 @@ async function propagateKeywordBkt(
   instrumentType: string,
   isCorrect: boolean,
   sourceSubtopicId: string | undefined,
-): Promise<void> {
+): Promise<string | undefined> {
   try {
+    // Input validation
+    if (!["quiz", "flashcard"].includes(instrumentType)) {
+      console.warn(`[KW-BKT] Invalid instrumentType: ${instrumentType}`);
+      return `Invalid instrumentType: ${instrumentType}`;
+    }
+
     // 1. Determine the source table based on instrument type
     const table = instrumentType === "quiz" ? "quiz_questions" : "flashcards";
 
@@ -116,8 +122,9 @@ async function propagateKeywordBkt(
     if (itemErr || !item?.keyword_id) {
       if (itemErr) {
         console.warn(`[KW-BKT] Failed to look up ${table} keyword_id:`, itemErr.message);
+        return `Failed to look up keyword: ${itemErr.message}`;
       }
-      return; // No keyword linked — nothing to propagate
+      return; // No keyword linked — nothing to propagate (not an error)
     }
 
     const keywordId = item.keyword_id as string;
@@ -132,6 +139,7 @@ async function propagateKeywordBkt(
     if (subErr || !subtopics || subtopics.length === 0) {
       if (subErr) {
         console.warn("[KW-BKT] Failed to look up subtopics:", subErr.message);
+        return `Failed to look up subtopics: ${subErr.message}`;
       }
       return; // No subtopics — nothing to propagate
     }
@@ -143,66 +151,82 @@ async function propagateKeywordBkt(
 
     const nowIso = new Date().toISOString();
 
-    // 5. For each subtopic (excluding the one already updated), apply weighted BKT
-    for (const sub of subtopics) {
-      if (sub.id === sourceSubtopicId) continue; // Already updated by main flow
+    // 5. Filter out source subtopic and collect IDs for batch fetch
+    const targetSubtopics = subtopics.filter(s => s.id !== sourceSubtopicId);
+    if (targetSubtopics.length === 0) return;
 
-      try {
-        // Read current BKT state for this subtopic
-        const { data: existingBkt } = await db
-          .from("bkt_states")
-          .select("p_know, max_p_know, total_attempts, correct_attempts, p_transit, p_slip, p_guess")
-          .eq("student_id", userId)
-          .eq("subtopic_id", sub.id)
-          .maybeSingle();
+    const targetIds = targetSubtopics.map(s => s.id);
 
-        const currentMastery = existingBkt?.p_know ?? 0;
-        const maxReachedMastery = existingBkt?.max_p_know ?? 0;
+    // 6. BATCH fetch all existing BKT states in ONE query (fixes N+1)
+    const { data: allBktStates, error: batchErr } = await db
+      .from("bkt_states")
+      .select("subtopic_id, p_know, max_p_know, total_attempts, correct_attempts, p_transit, p_slip, p_guess")
+      .eq("student_id", userId)
+      .in("subtopic_id", targetIds);
 
-        // Compute BKT update using the engine (with keyword_direct type for full calc)
-        const bktResult = computeBktV4Update({
-          currentMastery,
-          maxReachedMastery,
-          isCorrect,
-          instrumentType: instrumentType === "quiz" ? "quiz" : "flashcard",
-        });
+    if (batchErr) {
+      console.warn("[KW-BKT] Batch fetch failed:", batchErr.message);
+      return `Batch fetch failed: ${batchErr.message}`;
+    }
 
-        // Apply weight to the delta: scale the gain, but keep direction
-        // weighted_p_know = currentMastery + (delta * weight)
-        const weightedDelta = bktResult.delta * weight;
-        const weightedPKnow = Math.max(0, Math.min(1, currentMastery + weightedDelta));
-        const weightedMaxPKnow = Math.max(maxReachedMastery, weightedPKnow);
+    // Create lookup map for O(1) access
+    const bktMap = new Map(
+      (allBktStates ?? []).map(s => [s.subtopic_id, s])
+    );
 
-        const existingTotal = existingBkt?.total_attempts ?? 0;
-        const existingCorrect = existingBkt?.correct_attempts ?? 0;
+    // 7. Compute weighted updates and build upsert batch
+    const upsertRows = [];
+    for (const sub of targetSubtopics) {
+      const existing = bktMap.get(sub.id);
+      const currentMastery = existing?.p_know ?? 0;
+      const maxReachedMastery = existing?.max_p_know ?? 0;
 
-        const bktRow = {
-          student_id: userId,
-          subtopic_id: sub.id,
-          p_know: Math.round(weightedPKnow * 10000) / 10000,
-          max_p_know: Math.round(weightedMaxPKnow * 10000) / 10000,
-          p_transit: existingBkt?.p_transit ?? 0.18,
-          p_slip: existingBkt?.p_slip ?? 0.10,
-          p_guess: existingBkt?.p_guess ?? 0.25,
-          delta: Math.round(weightedDelta * 10000) / 10000,
-          total_attempts: existingTotal + 1,
-          correct_attempts: existingCorrect + (isCorrect ? 1 : 0),
-          last_attempt_at: nowIso,
-        };
+      // Compute BKT update using the engine
+      const bktResult = computeBktV4Update({
+        currentMastery,
+        maxReachedMastery,
+        isCorrect,
+        instrumentType: instrumentType === "quiz" ? "quiz" : "flashcard",
+      });
 
-        const { error: upsertErr } = await atomicUpsert(
-          db, "bkt_states", "student_id,subtopic_id", bktRow,
-        );
+      // Apply weight to the delta
+      const weightedDelta = bktResult.delta * weight;
+      const weightedPKnow = Math.max(0, Math.min(1, currentMastery + weightedDelta));
+      const weightedMaxPKnow = Math.max(maxReachedMastery, weightedPKnow);
 
-        if (upsertErr) {
-          console.warn(`[KW-BKT] Upsert failed for subtopic ${sub.id}:`, upsertErr.message);
-        }
-      } catch (e) {
-        console.warn(`[KW-BKT] Error propagating to subtopic ${sub.id}:`, (e as Error).message);
+      upsertRows.push({
+        student_id: userId,
+        subtopic_id: sub.id,
+        p_know: Math.round(weightedPKnow * 10000) / 10000,
+        max_p_know: Math.round(weightedMaxPKnow * 10000) / 10000,
+        p_transit: existing?.p_transit ?? 0.18,
+        p_slip: existing?.p_slip ?? 0.10,
+        p_guess: existing?.p_guess ?? 0.25,
+        delta: Math.round(weightedDelta * 10000) / 10000,
+        total_attempts: (existing?.total_attempts ?? 0) + 1,
+        correct_attempts: (existing?.correct_attempts ?? 0) + (isCorrect ? 1 : 0),
+        last_attempt_at: nowIso,
+      });
+    }
+
+    // 8. BATCH upsert all rows in ONE query (fixes N+1 writes)
+    if (upsertRows.length > 0) {
+      const { error: upsertErr } = await db
+        .from("bkt_states")
+        .upsert(upsertRows, { onConflict: "student_id,subtopic_id" });
+
+      if (upsertErr) {
+        console.warn(`[KW-BKT] Batch upsert failed (${upsertRows.length} rows):`, upsertErr.message);
+        return `Batch upsert failed: ${upsertErr.message}`;
       }
     }
+
+    // Success — no error to report
+    return;
   } catch (e) {
-    console.warn("[KW-BKT] Keyword propagation failed:", (e as Error).message);
+    const msg = (e as Error).message;
+    console.warn("[KW-BKT] Keyword propagation failed:", msg);
+    return `Propagation error: ${msg}`;
   }
 }
 
@@ -473,7 +497,8 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           propagateKeywordBkt(
             db, user.id, item.item_id, item.instrument_type,
             pathAIsCorrect, bkt.subtopic_id,
-          ).catch((e) => console.warn("[KW-BKT] PATH A propagation error:", (e as Error).message));
+          ).then(err => { if (err) stats.keyword_propagation_error = err; })
+           .catch((e) => { stats.keyword_propagation_error = (e as Error).message; });
         }
       } catch (e) {
         errors.push({ index: i, step: "bkt", message: (e as Error).message });
@@ -535,7 +560,8 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           propagateKeywordBkt(
             db, user.id, item.item_id, item.instrument_type,
             isCorrect, item.subtopic_id,
-          ).catch((e) => console.warn("[KW-BKT] PATH B propagation error:", (e as Error).message));
+          ).then(err => { if (err) stats.keyword_propagation_error = err; })
+           .catch((e) => { stats.keyword_propagation_error = (e as Error).message; });
 
           const lastResult = computedResults[computedResults.length - 1];
           if (lastResult && lastResult.item_id === item.item_id) {
