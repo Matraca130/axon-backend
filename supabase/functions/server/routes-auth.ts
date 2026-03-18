@@ -29,13 +29,41 @@ import {
   PREFIX,
 } from "./db.ts";
 import { isEmail, isNonEmpty } from "./validate.ts";
+import { safeErr } from "./lib/safe-error.ts";
 import type { Context } from "npm:hono";
 
 const authRoutes = new Hono();
 
+// ─── Signup Rate Limiter ────────────────────────────────────────
+// ROUTE-005 FIX: Strict rate limit for signups (5 per IP per hour).
+// Separate from the global rate limiter — signup is expensive (creates
+// auth.users + profiles rows) and must be protected against abuse.
+
+const signupAttempts = new Map<string, { count: number; resetAt: number }>();
+
+function checkSignupLimit(ip: string): boolean {
+  const now = Date.now();
+  const entry = signupAttempts.get(ip);
+  if (!entry || now > entry.resetAt) {
+    signupAttempts.set(ip, { count: 1, resetAt: now + 3_600_000 }); // 1 hour
+    return true; // allowed
+  }
+  if (entry.count >= 5) return false; // blocked
+  entry.count++;
+  return true; // allowed
+}
+
 // ─── POST /signup ───────────────────────────────────────────────
 
 authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
+  // ROUTE-005 FIX: Strict rate limit for signups (5 per IP per hour)
+  const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim()
+    || c.req.header("x-real-ip")
+    || "unknown";
+  if (!checkSignupLimit(ip)) {
+    return c.json({ error: "Too many signup attempts. Try again later." }, 429);
+  }
+
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
 
@@ -71,7 +99,7 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
     });
 
   if (authError) {
-    return err(c, `Signup auth failed: ${authError.message}`, 400);
+    return safeErr(c, "Signup", authError, 400);
   }
 
   const userId = userData.user.id;
@@ -89,11 +117,7 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
       `[Axon] Profile creation failed for ${userId}, rolling back auth user: ${profileError.message}`,
     );
     await admin.auth.admin.deleteUser(userId);
-    return err(
-      c,
-      `Profile creation failed (auth rolled back): ${profileError.message}`,
-      500,
-    );
+    return safeErr(c, "Profile creation (auth rolled back)", profileError);
   }
 
   return ok(c, { id: userId, email }, 201);
@@ -139,20 +163,12 @@ authRoutes.get(`${PREFIX}/me`, async (c: Context) => {
         .single();
 
       if (insertErr) {
-        return err(
-          c,
-          `Profile auto-creation failed for user ${user.id}: ${insertErr.message}`,
-          500,
-        );
+        return safeErr(c, "Profile auto-creation", insertErr);
       }
       return ok(c, created);
     }
 
-    return err(
-      c,
-      `Profile fetch failed for user ${user.id}: ${error.message}`,
-      404,
-    );
+    return safeErr(c, "Profile fetch", error, 404);
   }
 
   return ok(c, data);
@@ -193,11 +209,7 @@ authRoutes.put(`${PREFIX}/me`, async (c: Context) => {
     .single();
 
   if (error) {
-    return err(
-      c,
-      `Profile update failed for user ${user.id}: ${error.message}`,
-      500,
-    );
+    return safeErr(c, "Profile update", error);
   }
 
   return ok(c, data);

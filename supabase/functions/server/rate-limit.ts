@@ -149,13 +149,18 @@ export async function rateLimitMiddleware(
     return next();
   }
 
-  // Only rate-limit authenticated requests
+  // AUTH-014 FIX: Rate-limit both authenticated and unauthenticated requests.
+  // Authenticated: key from JWT sub. Unauthenticated: key from client IP.
   const token = extractToken(c);
-  if (!token) {
-    return next();
+  let key: string;
+  if (token) {
+    key = extractKey(token);
+  } else {
+    const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim()
+      || c.req.header("x-real-ip")
+      || "unknown";
+    key = `ip:${ip}`;
   }
-
-  const key = extractKey(token);
   const now = Date.now();
 
   // Periodic cleanup of expired entries
