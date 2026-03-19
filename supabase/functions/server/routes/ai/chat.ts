@@ -386,12 +386,9 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     );
     strategyMeta = embeddingOutput.strategyMeta;
 
-    const allResultSets: MatchedChunk[][] = [];
-
-    for (const { embedding } of embeddingOutput.embeddings) {
+    // Task 4.3: Parallelize vector searches across embeddings (Promise.all)
+    const searchPromises = embeddingOutput.embeddings.map(async ({ embedding }) => {
       const queryEmbeddingJson = JSON.stringify(embedding);
-
-      let matches: MatchedChunk[] = [];
 
       if (summaryId) {
         const { data } = await adminDb.rpc("rag_hybrid_search", {
@@ -402,51 +399,56 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
           p_match_count: 8,
           p_similarity_threshold: 0.3,
         });
-        matches = (data || []) as MatchedChunk[];
         searchType = "hybrid";
-      } else {
-        const { data: c2fData, error: c2fErr } = await adminDb.rpc(
-          "rag_coarse_to_fine_search",
-          {
-            p_query_embedding: queryEmbeddingJson,
-            p_institution_id: institutionId,
-            p_top_summaries: 3,
-            p_top_chunks: 8,
-            p_similarity_threshold: 0.3,
-            p_query_text: message,
-          },
-        );
-
-        if (!c2fErr && c2fData && c2fData.length > 0) {
-          matches = normalizeCoarseToFineResults(c2fData as CoarseToFineRow[]);
-          searchType = "coarse_to_fine";
-        } else {
-          if (c2fErr) {
-            console.warn(
-              "[RAG Chat] Coarse-to-fine RPC failed, using hybrid fallback:",
-              c2fErr.message,
-            );
-          }
-
-          const { data: hybridData } = await adminDb.rpc("rag_hybrid_search", {
-            p_query_embedding: queryEmbeddingJson,
-            p_query_text: message,
-            p_institution_id: institutionId,
-            p_summary_id: null,
-            p_match_count: 8,
-            p_similarity_threshold: 0.3,
-          });
-          matches = (hybridData || []) as MatchedChunk[];
-          searchType = "hybrid_fallback";
-        }
+        return (data || []) as MatchedChunk[];
       }
 
-      allResultSets.push(matches);
-    }
+      const { data: c2fData, error: c2fErr } = await adminDb.rpc(
+        "rag_coarse_to_fine_search",
+        {
+          p_query_embedding: queryEmbeddingJson,
+          p_institution_id: institutionId,
+          p_top_summaries: 3,
+          p_top_chunks: 8,
+          p_similarity_threshold: 0.3,
+          p_query_text: message,
+        },
+      );
+
+      if (!c2fErr && c2fData && c2fData.length > 0) {
+        searchType = "coarse_to_fine";
+        return normalizeCoarseToFineResults(c2fData as CoarseToFineRow[]);
+      }
+
+      if (c2fErr) {
+        console.warn(
+          "[RAG Chat] Coarse-to-fine RPC failed, using hybrid fallback:",
+          c2fErr.message,
+        );
+      }
+
+      const { data: hybridData } = await adminDb.rpc("rag_hybrid_search", {
+        p_query_embedding: queryEmbeddingJson,
+        p_query_text: message,
+        p_institution_id: institutionId,
+        p_summary_id: null,
+        p_match_count: 8,
+        p_similarity_threshold: 0.3,
+      });
+      searchType = "hybrid_fallback";
+      return (hybridData || []) as MatchedChunk[];
+    });
+
+    const allResultSets = await Promise.all(searchPromises);
 
     let mergedMatches = mergeSearchResults(allResultSets);
 
-    if (mergedMatches.length > 1) {
+    // Task 4.5: Conditional re-ranking — skip for high-confidence single results
+    const topSimilarity = mergedMatches.length > 0 ? mergedMatches[0].similarity : 0;
+    const shouldRerank = mergedMatches.length > 1 &&
+      (topSimilarity < 0.7 || mergedMatches.length > 3);
+
+    if (shouldRerank) {
       try {
         mergedMatches = await rerankWithClaude(message, mergedMatches, 5);
         rerankApplied = true;
@@ -607,7 +609,8 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
             })
             .then(({ error }) => {
               if (error) console.warn("[RAG Log] Insert failed:", error.message);
-            });
+            })
+            .catch((e: Error) => console.warn("[RAG Log] Fire-and-forget error:", e.message));
 
           try {
             xpHookForRagQuestion(user.id, institutionId, logId);
@@ -668,7 +671,8 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
       })
       .then(({ error }) => {
         if (error) console.warn("[RAG Log] Insert failed:", error.message);
-      });
+      })
+      .catch((e: Error) => console.warn("[RAG Log] Fire-and-forget error:", e.message));
 
     // PR #99: Fire-and-forget XP for RAG question (5 XP)
     try {
