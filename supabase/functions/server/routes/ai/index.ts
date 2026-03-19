@@ -21,6 +21,8 @@
  *   analyze-graph.ts       — POST  /ai/analyze-knowledge-graph  (Mindmap AI)
  *   suggest-connections.ts — POST  /ai/suggest-student-connections (Mindmap AI)
  *   student-weak-points.ts — GET   /ai/student-weak-points     (Mindmap AI)
+ *   schedule-agent.ts     — POST  /ai/schedule-agent          (Study Schedule AI)
+ *                            GET   /ai/schedule-logs           (Schedule Agent Logs)
  *
  * PHASE-A2 CLEANUP: Removed temporary routes:
  *   - list-models.ts     (diagnostic, no longer needed)
@@ -53,6 +55,7 @@ import { aiRealtimeRoutes } from "./realtime-session.ts";
 import { aiAnalyzeGraphRoutes } from "./analyze-graph.ts";
 import { aiSuggestConnectionsRoutes } from "./suggest-connections.ts";
 import { aiWeakPointsRoutes } from "./student-weak-points.ts";
+import { aiScheduleAgentRoutes } from "./schedule-agent.ts";
 import { authenticate, err, getAdminClient, PREFIX } from "../../db.ts";
 
 const aiRoutes = new Hono();
@@ -70,6 +73,8 @@ async function aiRateLimitMiddleware(c: Context, next: Next) {
   if (url.pathname.endsWith("/ai/report")) return next();
   // D9 FIX: Skip /ai/pre-generate (own rate limit bucket)
   if (url.pathname.endsWith("/ai/pre-generate")) return next();
+  // Schedule agent has own rate limit bucket (10/hour)
+  if (url.pathname.endsWith("/ai/schedule-agent")) return next();
 
   try {
     const auth = await authenticate(c);
@@ -124,5 +129,6 @@ aiRoutes.route("/", aiRealtimeRoutes);             // Voice Call (Realtime API)
 aiRoutes.route("/", aiAnalyzeGraphRoutes);         // Mindmap AI (Knowledge Graph)
 aiRoutes.route("/", aiSuggestConnectionsRoutes);   // Mindmap AI (Suggest Connections)
 aiRoutes.route("/", aiWeakPointsRoutes);           // Mindmap AI (Student Weak Points)
+aiRoutes.route("/", aiScheduleAgentRoutes);        // Study Schedule AI Agent
 
 export { aiRoutes };
