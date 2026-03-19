@@ -11,6 +11,7 @@
 import { Hono } from "npm:hono";
 import type { Context, Next } from "npm:hono";
 import { PREFIX, err, ok } from "../../db.ts";
+import { timingSafeEqual } from "../../timing-safe.ts";
 import { handleIncomingUpdate } from "./webhook.ts";
 import { generateLinkCode, unlinkTelegram } from "./link.ts";
 import { setWebhook, deleteWebhook, getMe } from "./tg-client.ts";
@@ -54,7 +55,7 @@ telegramRoutes.post(`${PREFIX}/telegram/setup-webhook`, async (c: Context) => {
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
-  if (!token || !serviceRoleKey || token !== serviceRoleKey) {
+  if (!token || !serviceRoleKey || !timingSafeEqual(token, serviceRoleKey)) {
     return err(c, "Unauthorized", 401);
   }
 
@@ -83,7 +84,7 @@ telegramRoutes.post(`${PREFIX}/telegram/delete-webhook`, async (c: Context) => {
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
-  if (!token || !serviceRoleKey || token !== serviceRoleKey) {
+  if (!token || !serviceRoleKey || !timingSafeEqual(token, serviceRoleKey)) {
     return err(c, "Unauthorized", 401);
   }
 

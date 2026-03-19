@@ -18,6 +18,9 @@
  *   analytics.ts         — GET   /ai/rag-analytics + /ai/embedding-coverage (T-03)
  *   ingest-pdf.ts        — POST  /ai/ingest-pdf              (Fase 7)
  *   realtime-session.ts  — POST  /ai/realtime-session         (Voice Call)
+ *   analyze-graph.ts       — POST  /ai/analyze-knowledge-graph  (Mindmap AI)
+ *   suggest-connections.ts — POST  /ai/suggest-student-connections (Mindmap AI)
+ *   student-weak-points.ts — GET   /ai/student-weak-points     (Mindmap AI)
  *
  * PHASE-A2 CLEANUP: Removed temporary routes:
  *   - list-models.ts     (diagnostic, no longer needed)
@@ -47,6 +50,9 @@ import { aiFeedbackRoutes } from "./feedback.ts";
 import { aiAnalyticsRoutes } from "./analytics.ts";
 import { aiIngestPdfRoutes } from "./ingest-pdf.ts";
 import { aiRealtimeRoutes } from "./realtime-session.ts";
+import { aiAnalyzeGraphRoutes } from "./analyze-graph.ts";
+import { aiSuggestConnectionsRoutes } from "./suggest-connections.ts";
+import { aiWeakPointsRoutes } from "./student-weak-points.ts";
 import { authenticate, err, getAdminClient, PREFIX } from "../../db.ts";
 
 const aiRoutes = new Hono();
@@ -115,5 +121,8 @@ aiRoutes.route("/", aiFeedbackRoutes);            // T-03
 aiRoutes.route("/", aiAnalyticsRoutes);            // T-03
 aiRoutes.route("/", aiIngestPdfRoutes);            // Fase 7
 aiRoutes.route("/", aiRealtimeRoutes);             // Voice Call (Realtime API)
+aiRoutes.route("/", aiAnalyzeGraphRoutes);         // Mindmap AI (Knowledge Graph)
+aiRoutes.route("/", aiSuggestConnectionsRoutes);   // Mindmap AI (Suggest Connections)
+aiRoutes.route("/", aiWeakPointsRoutes);           // Mindmap AI (Student Weak Points)
 
 export { aiRoutes };
