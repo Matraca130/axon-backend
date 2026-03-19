@@ -86,6 +86,8 @@ streakRoutes.post(`${PREFIX}/gamification/daily-check-in`, async (c: Context) =>
 });
 
 // --- POST /gamification/streak-freeze/buy ---
+// Primary: atomic SQL RPC (buy_streak_freeze) — prevents race condition double-spend.
+// Fallback: original read-then-write JS pattern if RPC not yet deployed.
 
 streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -99,6 +101,49 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
 
   const adminDb = getAdminClient();
 
+  // --- Primary path: atomic SQL RPC ---
+  try {
+    const { data, error: rpcErr } = await adminDb.rpc("buy_streak_freeze", {
+      p_student_id: user.id,
+      p_institution_id: institutionId,
+      p_cost: FREEZE_COST_XP,
+    });
+
+    if (!rpcErr && data) {
+      const result = data as Record<string, unknown>;
+
+      if (result.error === "max_freezes_reached") {
+        return err(
+          c,
+          `Ya tienes el maximo de ${result.max_freezes} streak freezes. Usa uno antes de comprar mas.`,
+          400,
+        );
+      }
+      if (result.error === "insufficient_xp") {
+        return err(
+          c,
+          `No tienes suficiente XP. Necesitas ${FREEZE_COST_XP} XP, tienes ${result.balance}.`,
+          400,
+        );
+      }
+
+      return ok(c, {
+        freeze: { id: result.freeze_id },
+        xp_spent: result.xp_spent,
+        remaining_xp: result.remaining_xp,
+        freezes_owned: result.freezes_owned,
+      });
+    }
+
+    // RPC failed — fall through to JS fallback
+    if (rpcErr) {
+      console.warn("[Streak Freeze] RPC failed, falling back to JS:", rpcErr.message);
+    }
+  } catch (e) {
+    console.warn("[Streak Freeze] RPC exception, falling back to JS:", (e as Error).message);
+  }
+
+  // --- Fallback path: original read-then-write pattern ---
   const { count: currentFreezes, error: countErr } = await adminDb
     .from("streak_freezes")
     .select("id", { count: "exact", head: true })
