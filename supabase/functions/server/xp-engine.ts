@@ -163,7 +163,7 @@ export async function awardXP(
       );
     }
 
-    console.log(
+    console.warn(
       `[XP Engine] Awarded ${(data as AwardResult).xp_awarded} XP to ${studentId} ` +
         `(action=${action}, bonus=${bonusType ?? "none"})`,
     );
@@ -209,7 +209,7 @@ async function awardXPFallback(
       // A-010 FIX: 10% post-cap rate (matches RPC §6.4)
       // Students still earn something to maintain engagement
       cappedXp = Math.max(1, Math.round(xpFinal * POST_CAP_RATE));
-      console.log(
+      console.warn(
         `[XP Engine] Fallback: daily cap reached for ${studentId}, awarding 10% (${cappedXp} XP)`,
       );
     } else {
@@ -259,7 +259,7 @@ async function awardXPFallback(
       return null;
     }
 
-    console.log(
+    console.warn(
       `[XP Engine] Fallback: awarded ${cappedXp} XP to ${studentId} (daily: ${newToday}/${DAILY_CAP})`,
     );
     return {

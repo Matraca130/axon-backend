@@ -72,7 +72,7 @@ export async function generateLinkCode(c: Context): Promise<Response> {
   }
 
   // N4 FIX: Mask code in logs to prevent PII exposure via dashboard
-  console.log(`[WA-Link] Code ****${code.slice(-2)} generated for user ${user.id} (expires ${expiresAt})`);
+  console.warn(`[WA-Link] Code ****${code.slice(-2)} generated for user ${user.id} (expires ${expiresAt})`);
 
   return ok(c, {
     code,
@@ -154,7 +154,7 @@ export async function verifyLinkCode(
     .delete()
     .eq("phone_hash", matchingSession.phone_hash);
 
-  console.log(`[WA-Link] Phone linked for user ${userId}. Hash: ${phoneHash.slice(0, 8)}...`);
+  console.warn(`[WA-Link] Phone linked for user ${userId}. Hash: ${phoneHash.slice(0, 8)}...`);
 
   return { success: true, userId, phoneHash };
 }

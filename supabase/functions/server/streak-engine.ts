@@ -302,7 +302,7 @@ export async function performDailyCheckIn(
           .eq("student_id", studentId)
           .eq("institution_id", institutionId);
 
-        console.log(
+        console.warn(
           `[Streak Engine] Decremented streak_freezes_owned by ${consumed} for ${studentId}`,
         );
       }

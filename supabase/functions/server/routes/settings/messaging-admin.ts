@@ -211,7 +211,7 @@ export async function updateMessagingSettings(c: Context): Promise<Response> {
     return safeErr(c, "Update messaging settings", error);
   }
 
-  console.log(`[Messaging-Admin] ${channel} settings updated by ${user.id} for institution ${institutionId}`);
+  console.warn(`[Messaging-Admin] ${channel} settings updated by ${user.id} for institution ${institutionId}`);
 
   return ok(c, {
     channel,

@@ -270,7 +270,7 @@ export async function handleIncomingUpdate(c: Context): Promise<Response> {
   // ── Dedup check ──
   try {
     if (await isDuplicate(chatId, tgMessageId)) {
-      console.log(`[TG-Webhook] Duplicate ${tgMessageId}, ignoring`);
+      console.warn(`[TG-Webhook] Duplicate ${tgMessageId}, ignoring`);
       return c.text("OK", 200);
     }
   } catch (e) {
@@ -289,7 +289,7 @@ export async function handleIncomingUpdate(c: Context): Promise<Response> {
     messageType = "command";
   }
 
-  console.log(
+  console.warn(
     `[TG-Webhook] ${fromUser?.first_name ?? "?"} (@${username ?? "?"}): ` +
     `type=${messageType}, text="${textContent.slice(0, 80)}"`,
   );
@@ -383,7 +383,7 @@ export async function handleIncomingUpdate(c: Context): Promise<Response> {
   }
 
   const latencyMs = Date.now() - startMs;
-  console.log(`[TG-Webhook] Completed in ${latencyMs}ms`);
+  console.warn(`[TG-Webhook] Completed in ${latencyMs}ms`);
 
   return c.text("OK", 200);
 }

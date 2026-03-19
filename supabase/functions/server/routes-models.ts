@@ -255,7 +255,7 @@ async function ensureModelBucket(): Promise<void> {
       console.error(`[Models3D] Failed to create bucket: ${createErr.message}`);
       throw createErr;
     }
-    console.log(`[Models3D] Created bucket: ${MODEL_BUCKET}`);
+    console.warn(`[Models3D] Created bucket: ${MODEL_BUCKET}`);
   }
   modelBucketReady = true;
 }
@@ -344,7 +344,7 @@ modelRoutes.post(`${PREFIX}/upload-model-3d`, async (c: Context) => {
     .from(MODEL_BUCKET)
     .getPublicUrl(storagePath);
 
-  console.log(
+  console.warn(
     `[Models3D] Uploaded: ${storagePath} (${file.size} bytes) by user ${user.id}`,
   );
 

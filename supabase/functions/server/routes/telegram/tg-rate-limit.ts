@@ -82,6 +82,6 @@ function cleanupExpired(now: number): void {
   }
   lastCleanup = now;
   if (cleaned > 0) {
-    console.log(`[TG-RateLimit] Cleaned ${cleaned} expired entries`);
+    console.warn(`[TG-RateLimit] Cleaned ${cleaned} expired entries`);
   }
 }

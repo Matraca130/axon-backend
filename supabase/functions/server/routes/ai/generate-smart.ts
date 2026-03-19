@@ -269,7 +269,7 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
     }
 
     quizId = newQuiz!.id as string;
-    console.log(`[GenerateSmart] Auto-created quiz ${quizId} for student ${user.id}`);
+    console.warn(`[GenerateSmart] Auto-created quiz ${quizId} for student ${user.id}`);
   }
 
   // ── Step 2: RPC get_smart_generate_target ───────────────────

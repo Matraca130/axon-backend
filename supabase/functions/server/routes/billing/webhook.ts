@@ -52,7 +52,7 @@ webhookRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
         .maybeSingle();
 
       if (existing) {
-        console.log(`[Stripe Webhook] Duplicate event ${eventId}, skipping`);
+        console.warn(`[Stripe Webhook] Duplicate event ${eventId}, skipping`);
         return ok(c, { received: true, deduplicated: true });
       }
     } catch {
@@ -162,7 +162,7 @@ webhookRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
       }
 
       default:
-        console.log(`[Stripe Webhook] Unhandled event type: ${event.type}`);
+        console.warn(`[Stripe Webhook] Unhandled event type: ${event.type}`);
     }
 
     // O-7: Mark event as processed (best-effort)
