@@ -155,23 +155,66 @@ async function insertDedupRecord(
   }
 }
 
-// ─── Phone Lookup ─────────────────────────────────────
+// ─── Phone Lookup (O(1) via phone_lookup_hash index) ──
+
+/**
+ * Compute the global lookup hash for a phone number.
+ * Uses WHATSAPP_APP_SECRET as global salt (not per-user).
+ * This hash is stored in whatsapp_links.phone_lookup_hash
+ * and indexed for O(1) lookups instead of scanning all rows.
+ */
+export async function computeLookupHash(phoneNumber: string): Promise<string> {
+  const secret = Deno.env.get("WHATSAPP_APP_SECRET") ?? "axon-global-salt";
+  return await hashPhone(phoneNumber, secret);
+}
 
 async function lookupLinkedUser(
   phoneNumber: string,
 ): Promise<{ userId: string; phoneHash: string } | null> {
   const admin = getAdminClient();
 
-  const { data: links } = await admin
+  // O(1) lookup via indexed phone_lookup_hash column
+  const lookupHash = await computeLookupHash(phoneNumber);
+
+  const { data } = await admin
     .from("whatsapp_links")
     .select("user_id, phone_hash, phone_salt")
+    .eq("phone_lookup_hash", lookupHash)
+    .eq("is_active", true)
+    .limit(1)
+    .maybeSingle();
+
+  if (data) {
+    // Verify against the per-user-salted hash for extra safety
+    const verified = await hashPhone(phoneNumber, data.phone_salt);
+    if (verified === data.phone_hash) {
+      return { userId: data.user_id, phoneHash: data.phone_hash };
+    }
+    console.warn("[WA-Webhook] Lookup hash matched but per-user hash verification failed");
+  }
+
+  // Fallback: scan for rows without phone_lookup_hash (pre-migration links)
+  const { data: legacyLinks } = await admin
+    .from("whatsapp_links")
+    .select("user_id, phone_hash, phone_salt")
+    .is("phone_lookup_hash", null)
     .eq("is_active", true);
 
-  if (!links || links.length === 0) return null;
+  if (!legacyLinks || legacyLinks.length === 0) return null;
 
-  for (const link of links) {
+  for (const link of legacyLinks) {
     const computedHash = await hashPhone(phoneNumber, link.phone_salt);
     if (computedHash === link.phone_hash) {
+      // Backfill the lookup hash for this link
+      admin
+        .from("whatsapp_links")
+        .update({ phone_lookup_hash: lookupHash })
+        .eq("phone_hash", link.phone_hash)
+        .then(({ error }) => {
+          if (error) console.warn(`[WA-Webhook] Backfill lookup hash failed: ${error.message}`);
+          else console.log(`[WA-Webhook] Backfilled phone_lookup_hash for user ${link.user_id}`);
+        });
+
       return { userId: link.user_id, phoneHash: link.phone_hash };
     }
   }
