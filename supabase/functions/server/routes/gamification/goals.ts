@@ -12,6 +12,7 @@ import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX, getAdminClient } from "../../db.ts";
 import { isUuid, isNonNegInt } from "../../validate.ts";
+import { requireInstitutionRole, isDenied, ALL_ROLES } from "../../auth-helpers.ts";
 import { awardXP } from "../../xp-engine.ts";
 import { GOAL_BONUS_XP } from "./helpers.ts";
 
@@ -23,7 +24,7 @@ export const goalRoutes = new Hono();
 goalRoutes.put(`${PREFIX}/gamification/daily-goal`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { user } = auth;
+  const { user, db } = auth;
 
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
@@ -32,6 +33,10 @@ goalRoutes.put(`${PREFIX}/gamification/daily-goal`, async (c: Context) => {
   if (!institutionId || !isUuid(institutionId)) {
     return err(c, "institution_id must be a valid UUID", 400);
   }
+
+  // ACCESS-004 FIX: Verify caller has membership in this institution
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   // Accept both daily_goal and daily_goal_minutes from frontend
   const dailyGoal = body.daily_goal_minutes ?? body.daily_goal;
@@ -72,7 +77,7 @@ goalRoutes.put(`${PREFIX}/gamification/daily-goal`, async (c: Context) => {
 goalRoutes.post(`${PREFIX}/gamification/goals/complete`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { user } = auth;
+  const { user, db } = auth;
 
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
@@ -81,6 +86,10 @@ goalRoutes.post(`${PREFIX}/gamification/goals/complete`, async (c: Context) => {
   if (!institutionId || !isUuid(institutionId)) {
     return err(c, "institution_id must be a valid UUID", 400);
   }
+
+  // ACCESS-004 FIX: Verify caller has membership in this institution
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   const goalType = body.goal_type as string;
   if (!goalType || !GOAL_BONUS_XP[goalType]) {
@@ -140,7 +149,7 @@ goalRoutes.post(`${PREFIX}/gamification/goals/complete`, async (c: Context) => {
 goalRoutes.post(`${PREFIX}/gamification/onboarding`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { user } = auth;
+  const { user, db } = auth;
 
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
@@ -149,6 +158,10 @@ goalRoutes.post(`${PREFIX}/gamification/onboarding`, async (c: Context) => {
   if (!institutionId || !isUuid(institutionId)) {
     return err(c, "institution_id must be a valid UUID", 400);
   }
+
+  // ACCESS-004 FIX: Verify caller has membership in this institution
+  const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   const adminDb = getAdminClient();
 
