@@ -13,6 +13,8 @@
  * Environment: Reads OPENAI_API_KEY from Deno.env (set via supabase secrets).
  */
 
+import { getCachedEmbedding, setCachedEmbedding } from "./lib/embedding-cache.ts";
+
 // ─── Centralized Constants (D60) ────────────────────────────────
 
 export const EMBEDDING_MODEL = "text-embedding-3-large";
@@ -45,6 +47,10 @@ function getOpenAIKey(): string {
  * @throws Error if all retries fail or dimension mismatch
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
+  // Check cache first to avoid redundant API calls
+  const cached = getCachedEmbedding(text);
+  if (cached) return cached;
+
   const key = getOpenAIKey();
   let lastError: Error | null = null;
 
@@ -97,6 +103,9 @@ export async function generateEmbedding(text: string): Promise<number[]> {
           `Dimension mismatch: expected ${EMBEDDING_DIMENSIONS}, got ${embedding.length}`,
         );
       }
+
+      // Cache the result for future lookups
+      setCachedEmbedding(text, embedding);
 
       return embedding;
     } catch (e) {

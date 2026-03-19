@@ -19,7 +19,7 @@
  *   10. Split oversized chunks at lowest-similarity internal point
  *   11. Merge undersized chunks with neighbor
  *   12. Add overlap between consecutive chunks
- *   13. Return ChunkResult[] with strategy = "semantic"
+ *   13. Return SemanticChunkResult with chunks + paragraphEmbeddings
  *
  * Dependencies:
  *   - chunker.ts: ChunkResult (type), ChunkOptions (type), addOverlap (fn),
@@ -29,7 +29,7 @@
  * Error strategy:
  *   - If ANY embedding call fails → fallback to recursive chunking
  *   - Logs warning on fallback (non-fatal)
- *   - Never throws (returns valid ChunkResult[] always)
+ *   - Never throws (returns valid SemanticChunkResult always)
  *
  * Performance:
  *   - N paragraphs = N embedding calls (sequential, ~200ms each)
@@ -57,6 +57,16 @@ export interface SemanticChunkOptions extends ChunkOptions {
   similarityThreshold?: number;
   minParagraphChars?: number;
   maxParagraphs?: number;
+}
+
+/**
+ * Extended result from chunkSemantic that includes paragraph embeddings.
+ * paragraphEmbeddings maps paragraph text -> embedding for reuse downstream.
+ */
+export interface SemanticChunkResult {
+  chunks: ChunkResult[];
+  /** Map of paragraph content -> its embedding (for reuse in auto-ingest) */
+  paragraphEmbeddings: Map<string, number[]>;
 }
 
 const SEMANTIC_DEFAULTS = {
@@ -90,8 +100,9 @@ export async function chunkSemantic(
   text: string,
   embedFn: (text: string) => Promise<number[]>,
   options?: SemanticChunkOptions,
-): Promise<ChunkResult[]> {
-  if (!text || text.trim().length === 0) return [];
+): Promise<SemanticChunkResult> {
+  const emptyResult: SemanticChunkResult = { chunks: [], paragraphEmbeddings: new Map() };
+  if (!text || text.trim().length === 0) return emptyResult;
 
   const normalized = text.replace(/\r\n/g, "\n").trim();
 
@@ -121,13 +132,16 @@ export async function chunkSemantic(
 
   if (rawParagraphs.length <= 1) {
     return rawParagraphs.length === 0
-      ? []
-      : [{
-          content: rawParagraphs[0],
-          order_index: 0,
-          char_count: rawParagraphs[0].length,
-          strategy: "semantic" as const,
-        }];
+      ? emptyResult
+      : {
+          chunks: [{
+            content: rawParagraphs[0],
+            order_index: 0,
+            char_count: rawParagraphs[0].length,
+            strategy: "semantic" as const,
+          }],
+          paragraphEmbeddings: new Map(),
+        };
   }
 
   // Step 2: Mark mandatory boundaries (headers)
@@ -181,18 +195,21 @@ export async function chunkSemantic(
       `[Semantic Chunker] ${mergedParagraphs.length} paragraphs exceeds ` +
         `maxParagraphs (${opts.maxParagraphs}). Falling back to recursive.`,
     );
-    return fallbackToRecursive(normalized, options);
+    return { chunks: fallbackToRecursive(normalized, options), paragraphEmbeddings: new Map() };
   }
 
   if (mergedParagraphs.length <= 1) {
     return mergedParagraphs.length === 0
-      ? []
-      : [{
-          content: mergedParagraphs[0],
-          order_index: 0,
-          char_count: mergedParagraphs[0].length,
-          strategy: "semantic" as const,
-        }];
+      ? emptyResult
+      : {
+          chunks: [{
+            content: mergedParagraphs[0],
+            order_index: 0,
+            char_count: mergedParagraphs[0].length,
+            strategy: "semantic" as const,
+          }],
+          paragraphEmbeddings: new Map(),
+        };
   }
 
   // Step 5: Embed each paragraph
@@ -208,7 +225,13 @@ export async function chunkSemantic(
       `[Semantic Chunker] Embedding failed: ${(e as Error).message}. ` +
         `Falling back to recursive chunking.`,
     );
-    return fallbackToRecursive(normalized, options);
+    return { chunks: fallbackToRecursive(normalized, options), paragraphEmbeddings: new Map() };
+  }
+
+  // Build paragraph -> embedding map for downstream reuse
+  const paragraphEmbeddings = new Map<string, number[]>();
+  for (let i = 0; i < mergedParagraphs.length; i++) {
+    paragraphEmbeddings.set(mergedParagraphs[i], embeddings[i]);
   }
 
   // Step 6: Compute similarities
@@ -263,12 +286,15 @@ export async function chunkSemantic(
   chunks = addOverlap(chunks, opts.overlapSize);
 
   // Step 13: Build final results
-  return chunks.map((content, i) => ({
-    content,
-    order_index: i,
-    char_count: content.length,
-    strategy: "semantic" as const,
-  }));
+  return {
+    chunks: chunks.map((content, i) => ({
+      content,
+      order_index: i,
+      char_count: content.length,
+      strategy: "semantic" as const,
+    })),
+    paragraphEmbeddings,
+  };
 }
 
 // ─── Internal: Split Oversized Groups ──────────────────────────────

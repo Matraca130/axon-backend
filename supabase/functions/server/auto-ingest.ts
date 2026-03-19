@@ -33,7 +33,7 @@ import {
   type ChunkOptions,
   type ChunkResult,
 } from "./chunker.ts";
-import { chunkSemantic } from "./semantic-chunker.ts";
+import { chunkSemantic, type SemanticChunkResult } from "./semantic-chunker.ts";
 import { generateEmbedding, generateEmbeddings } from "./openai-embeddings.ts";
 import { getAdminClient } from "./db.ts";
 
@@ -181,11 +181,15 @@ export async function autoChunkAndEmbed(
 
   // Step 3b: Execute chosen strategy
   let chunks: ChunkResult[];
+  // Paragraph embeddings from semantic chunker — reused to skip re-embedding
+  let paragraphEmbeddings: Map<string, number[]> = new Map();
 
   if (selectedStrategy === "semantic") {
     // D57: embedFn no longer needs taskType
     const embedFn = (text: string) => generateEmbedding(text);
-    chunks = await chunkSemantic(fullText, embedFn, options);
+    const semanticResult: SemanticChunkResult = await chunkSemantic(fullText, embedFn, options);
+    chunks = semanticResult.chunks;
+    paragraphEmbeddings = semanticResult.paragraphEmbeddings;
   } else {
     chunks = chunkMarkdown(fullText, options);
   }
@@ -252,9 +256,47 @@ export async function autoChunkAndEmbed(
   let failed = 0;
 
   try {
-    // Task 4.1: Batch embeddings — single API call for all chunks
-    const chunkTexts = chunks.map((chunk) => chunk.content);
-    const allEmbeddings = await generateEmbeddings(chunkTexts);
+    // Task 4.8: Reuse semantic chunker embeddings where chunk matches a paragraph
+    const reusedEmbeddings: (number[] | null)[] = chunks.map((chunk) => {
+      if (paragraphEmbeddings.size > 0) {
+        const cached = paragraphEmbeddings.get(chunk.content);
+        if (cached) return cached;
+      }
+      return null;
+    });
+
+    // Only call OpenAI for chunks that don't have a reusable embedding
+    const textsToEmbed: string[] = [];
+    const embedIndices: number[] = [];
+    for (let i = 0; i < chunks.length; i++) {
+      if (!reusedEmbeddings[i]) {
+        textsToEmbed.push(chunks[i].content);
+        embedIndices.push(i);
+      }
+    }
+
+    let newEmbeddings: number[][] = [];
+    if (textsToEmbed.length > 0) {
+      newEmbeddings = await generateEmbeddings(textsToEmbed);
+    }
+
+    // Merge reused and newly generated embeddings
+    const allEmbeddings: number[][] = new Array(chunks.length);
+    let newIdx = 0;
+    for (let i = 0; i < chunks.length; i++) {
+      if (reusedEmbeddings[i]) {
+        allEmbeddings[i] = reusedEmbeddings[i]!;
+      } else {
+        allEmbeddings[i] = newEmbeddings[newIdx++];
+      }
+    }
+
+    const reusedCount = chunks.length - textsToEmbed.length;
+    if (reusedCount > 0) {
+      console.info(
+        `[Auto-Ingest] Reused ${reusedCount}/${chunks.length} embeddings from semantic chunker`,
+      );
+    }
 
     for (let i = 0; i < inserted.length; i++) {
       const { error: embedErr } = await adminDb

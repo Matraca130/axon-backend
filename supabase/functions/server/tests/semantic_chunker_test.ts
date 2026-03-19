@@ -70,14 +70,14 @@ Deno.test("cosineSimilarity: different length vectors → 0.0", () => {
 
 Deno.test("chunkSemantic: empty text → empty array", async () => {
   const { fn } = createMockEmbedFn({});
-  assertEquals((await chunkSemantic("", fn)).length, 0);
-  assertEquals((await chunkSemantic("   \n\n  ", fn)).length, 0);
+  assertEquals((await chunkSemantic("", fn)).chunks.length, 0);
+  assertEquals((await chunkSemantic("   \n\n  ", fn)).chunks.length, 0);
 });
 
 Deno.test("chunkSemantic: single paragraph → 1 chunk", async () => {
   const { fn } = createMockEmbedFn({});
   const text = "La mitosis es un proceso de division celular en el cual una celula madre se divide en dos celulas hijas identicas.";
-  const result = await chunkSemantic(text, fn);
+  const { chunks: result } = await chunkSemantic(text, fn);
   assertEquals(result.length, 1);
   assertEquals(result[0].strategy, "semantic");
   assertEquals(result[0].content, text);
@@ -89,7 +89,7 @@ Deno.test("chunkSemantic: 2 different topics → 2 chunks", async () => {
     "La mitosis es el proceso de division celular que produce dos celulas hijas identicas a la celula madre original.",
     "La fotosintesis es el proceso por el cual las plantas convierten la luz solar en energia quimica utilizando clorofila.",
   ].join("\n\n");
-  const result = await chunkSemantic(text, fn, { maxChunkSize: 2000, minChunkSize: 10, overlapSize: 0 });
+  const { chunks: result } = await chunkSemantic(text, fn, { maxChunkSize: 2000, minChunkSize: 10, overlapSize: 0 });
   assertEquals(result.length, 2);
   assertEquals(result[0].content.includes("mitosis"), true);
   assertEquals(result[1].content.includes("fotosintesis"), true);
@@ -101,7 +101,7 @@ Deno.test("chunkSemantic: 2 same topics → 1 chunk", async () => {
     "La mitosis es el proceso de division celular que produce dos celulas hijas identicas a la celula madre original.",
     "La division celular por mitosis ocurre en cuatro fases principales: profase, metafase, anafase y telofase.",
   ].join("\n\n");
-  const result = await chunkSemantic(text, fn, { maxChunkSize: 2000, minChunkSize: 10, overlapSize: 0 });
+  const { chunks: result } = await chunkSemantic(text, fn, { maxChunkSize: 2000, minChunkSize: 10, overlapSize: 0 });
   assertEquals(result.length, 1);
 });
 
@@ -113,7 +113,7 @@ Deno.test("chunkSemantic: header forces mandatory boundary", async () => {
     "La mitosis es un proceso fundamental de la biologia celular que permite la reproduccion de las celulas somaticas.",
     "## Fases de la Mitosis\nLa profase es la primera fase de la mitosis donde los cromosomas se condensan y se hacen visibles.",
   ].join("\n\n");
-  const result = await chunkSemantic(text, fn, { maxChunkSize: 2000, minChunkSize: 10, overlapSize: 0 });
+  const { chunks: result } = await chunkSemantic(text, fn, { maxChunkSize: 2000, minChunkSize: 10, overlapSize: 0 });
   assertEquals(result.length, 2);
   assertEquals(result[1].content.includes("## Fases"), true);
 });
@@ -136,7 +136,7 @@ Deno.test("chunkSemantic: >maxParagraphs → fallback to recursive", async () =>
     paragraphs.push(`Parrafo numero ${i + 1}: Este es un parrafo suficientemente largo para evitar el pre-merge de parrafos diminutos.`);
   }
   const { fn, getCallCount } = createMockEmbedFn({});
-  const result = await chunkSemantic(paragraphs.join("\n\n"), fn, { maxParagraphs: 50, overlapSize: 0 });
+  const { chunks: result } = await chunkSemantic(paragraphs.join("\n\n"), fn, { maxParagraphs: 50, overlapSize: 0 });
   assertEquals(getCallCount(), 0);
   assertEquals(result.length > 0, true);
   assertEquals(result[0].strategy, "recursive");
@@ -150,7 +150,7 @@ Deno.test("chunkSemantic: embedFn throws → fallback to recursive", async () =>
     "La mitosis es un proceso fundamental de la biologia celular que permite la reproduccion de las celulas somaticas.",
     "La fotosintesis es el proceso por el cual las plantas convierten la luz solar en energia quimica utilizando clorofila.",
   ].join("\n\n");
-  const result = await chunkSemantic(text, failingFn, { overlapSize: 0 });
+  const { chunks: result } = await chunkSemantic(text, failingFn, { overlapSize: 0 });
   assertEquals(result.length > 0, true);
   assertEquals(result[0].strategy, "recursive");
 });
@@ -163,7 +163,7 @@ Deno.test("chunkSemantic: partial embed failure → full fallback", async () => 
     "La meiosis es un tipo especial de division celular que reduce el numero de cromosomas a la mitad para la reproduccion.",
     "La fotosintesis es el proceso por el cual las plantas convierten la luz solar en energia quimica utilizando clorofila.",
   ].join("\n\n");
-  const result = await chunkSemantic(text, partialFn, { overlapSize: 0 });
+  const { chunks: result } = await chunkSemantic(text, partialFn, { overlapSize: 0 });
   assertEquals(result[0].strategy, "recursive");
   assertEquals(c, 3);
 });
