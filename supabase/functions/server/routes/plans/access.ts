@@ -16,8 +16,75 @@ import { authenticate, ok, err, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import type { Context } from "npm:hono";
+import type { SupabaseClient } from "npm:@supabase/supabase-js";
 
 export const accessRoutes = new Hono();
+
+// ── Default for users without a plan (generous free tier) ──────
+const DEFAULT_DAILY_AI_LIMIT = 50;
+
+/**
+ * checkPlanLimit — Enforce daily AI generation limits per plan tier.
+ *
+ * 1. Gets the active subscription for the institution
+ * 2. Reads features.max_ai_generations_daily from the plan
+ * 3. Counts today's generations from ai_generations table
+ * 4. Returns { allowed, remaining, limit }
+ *
+ * If no subscription or no plan exists, uses DEFAULT_DAILY_AI_LIMIT (50/day).
+ */
+export async function checkPlanLimit(
+  db: SupabaseClient,
+  userId: string,
+  institutionId: string,
+): Promise<{ allowed: boolean; remaining: number; limit: number }> {
+  // 1. Get active subscription for this institution
+  const { data: sub } = await db
+    .from("institution_subscriptions")
+    .select("plan_id")
+    .eq("institution_id", institutionId)
+    .in("status", ["active", "trialing"])
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  let limit = DEFAULT_DAILY_AI_LIMIT;
+
+  if (sub?.plan_id) {
+    // 2. Read features.max_ai_generations_daily from the plan
+    const { data: plan } = await db
+      .from("institution_plans")
+      .select("features")
+      .eq("id", sub.plan_id)
+      .single();
+
+    if (plan?.features) {
+      const features = plan.features as Record<string, unknown>;
+      const planLimit = features.max_ai_generations_daily;
+      if (typeof planLimit === "number" && planLimit > 0) {
+        limit = planLimit;
+      }
+    }
+  }
+
+  // 3. Count today's generations (same pattern as usage-today)
+  const todayDate = new Date();
+  const today = todayDate.toISOString().split("T")[0];
+  todayDate.setUTCDate(todayDate.getUTCDate() + 1);
+  const tomorrow = todayDate.toISOString().split("T")[0];
+
+  const { count, error: countErr } = await db
+    .from("ai_generations")
+    .select("id", { count: "exact", head: true })
+    .eq("requested_by", userId)
+    .gte("created_at", `${today}T00:00:00Z`)
+    .lt("created_at", `${tomorrow}T00:00:00Z`);
+
+  const used = countErr ? 0 : (count ?? 0);
+  const remaining = Math.max(0, limit - used);
+
+  return { allowed: remaining > 0, remaining, limit };
+}
 
 accessRoutes.get(`${PREFIX}/content-access`, async (c: Context) => {
   const auth = await authenticate(c);

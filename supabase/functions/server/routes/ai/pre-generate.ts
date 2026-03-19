@@ -72,6 +72,7 @@ import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers
 import { truncateForPrompt } from "./generate-smart-helpers.ts";
 import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
 import { validateQuizQuestion, validateFlashcard } from "../../lib/validate-llm-output.ts";
+import { checkPlanLimit } from "../plans/access.ts";
 
 export const aiPreGenerateRoutes = new Hono();
 
@@ -150,6 +151,12 @@ aiPreGenerateRoutes.post(
     );
     if (isDenied(roleCheck))
       return err(c, roleCheck.message, roleCheck.status);
+
+    // ── Step 3b: Plan limit enforcement ────────────────────────
+    const planCheck = await checkPlanLimit(db, user.id, institutionId as string);
+    if (!planCheck.allowed) {
+      return err(c, `Daily AI generation limit reached (${planCheck.limit}). Upgrade your plan.`, 429);
+    }
 
     // ── Step 4: Pre-gen rate limit (D9: separate bucket) ──────
     // Uses the SAME check_rate_limit() RPC but with a different key.
