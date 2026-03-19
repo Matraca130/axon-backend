@@ -12,7 +12,8 @@
  *     CONTENT_WRITE_ROLES in that institution.
  *
  * A-3 FIX: POST /restore now also sets is_active = true for tables
- *   that use the is_active flag (summaries, keywords, videos).
+ *   that use the is_active flag (summaries, keywords, videos,
+ *   flashcards, quiz_questions).
  *   Previously only deleted_at was cleared, leaving items invisible.
  */
 
@@ -47,6 +48,8 @@ const TABLES_WITH_IS_ACTIVE = new Set([
   "summaries",
   "keywords",
   "videos",
+  "flashcards",
+  "quiz_questions",
 ]);
 
 // ── GET /trash ─────────────────────────────────────────────────────
