@@ -280,9 +280,12 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
   }
 
   let sessionResponse: Response;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
     sessionResponse = await fetch("https://api.openai.com/v1/realtime/sessions", {
       method: "POST",
+      signal: controller.signal,
       headers: {
         "Authorization": `Bearer ${openaiKey}`,
         "Content-Type": "application/json",
@@ -304,6 +307,8 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
   } catch (fetchErr) {
     console.error("[Realtime] OpenAI session request failed:", fetchErr);
     return err(c, "Failed to create realtime session", 502);
+  } finally {
+    clearTimeout(timeout);
   }
 
   if (!sessionResponse.ok) {

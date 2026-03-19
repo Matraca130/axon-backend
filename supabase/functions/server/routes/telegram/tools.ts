@@ -434,12 +434,26 @@ export async function executeToolCall(
       }
 
       case "get_keywords": {
+        // 8.2: Resolve user's institution for scoping
+        const { data: kwMembership } = await db
+          .from("memberships")
+          .select("institution_id")
+          .eq("user_id", userId)
+          .eq("is_active", true)
+          .limit(1)
+          .single();
+        const kwInstitutionId = kwMembership?.institution_id;
+
         if (args.search_term) {
-          const { data, error } = await db
+          let kwSearchQuery = db
             .from("keywords")
-            .select("id, name, definition, topic_id, topics(name, section_id, sections(name, course_id, courses(name)))")
+            .select("id, name, definition, topic_id, topics!inner(name, section_id, sections!inner(name, course_id, courses!inner(name, institution_id)))")
             .ilike("name", `%${args.search_term}%`)
             .limit(5);
+          if (kwInstitutionId) {
+            kwSearchQuery = kwSearchQuery.eq("topics.sections.courses.institution_id", kwInstitutionId);
+          }
+          const { data, error } = await kwSearchQuery;
           if (error) throw new Error(`keywords search: ${error.message}`);
 
           if (!data?.length) {
@@ -476,11 +490,14 @@ export async function executeToolCall(
         // List keywords by course or topic
         let query = db
           .from("keywords")
-          .select("id, name, definition")
+          .select("id, name, definition, topic_id, topics!inner(section_id, sections!inner(course_id, courses!inner(institution_id)))")
           .limit(20);
 
         if (args.topic_id) {
           query = query.eq("topic_id", args.topic_id as string);
+        }
+        if (kwInstitutionId) {
+          query = query.eq("topics.sections.courses.institution_id", kwInstitutionId);
         }
 
         const { data, error } = await query;
@@ -490,12 +507,26 @@ export async function executeToolCall(
       }
 
       case "get_summary": {
+        // 8.2: Resolve user's institution for scoping
+        const { data: sumMembership } = await db
+          .from("memberships")
+          .select("institution_id")
+          .eq("user_id", userId)
+          .eq("is_active", true)
+          .limit(1)
+          .single();
+        const sumInstitutionId = sumMembership?.institution_id;
+
         if (args.summary_id) {
-          const { data, error } = await db
+          // Fetch with institution join to verify scope
+          let sumByIdQuery = db
             .from("summaries")
-            .select("id, title, content_markdown, word_count")
-            .eq("id", args.summary_id as string)
-            .single();
+            .select("id, title, content_markdown, word_count, topic_id, topics!inner(section_id, sections!inner(course_id, courses!inner(institution_id)))")
+            .eq("id", args.summary_id as string);
+          if (sumInstitutionId) {
+            sumByIdQuery = sumByIdQuery.eq("topics.sections.courses.institution_id", sumInstitutionId);
+          }
+          const { data, error } = await sumByIdQuery.single();
           if (error) throw new Error(`summary: ${error.message}`);
           if (!data) return { name, result: { error: "Resumen no encontrado" } };
 
@@ -509,13 +540,17 @@ export async function executeToolCall(
         }
 
         if (args.search_term) {
-          const { data, error } = await db
+          let sumSearchQuery = db
             .from("summaries")
-            .select("id, title, word_count")
+            .select("id, title, word_count, topic_id, topics!inner(section_id, sections!inner(course_id, courses!inner(institution_id)))")
             .ilike("title", `%${args.search_term}%`)
             .eq("is_active", true)
             .is("deleted_at", null)
             .limit(10);
+          if (sumInstitutionId) {
+            sumSearchQuery = sumSearchQuery.eq("topics.sections.courses.institution_id", sumInstitutionId);
+          }
+          const { data, error } = await sumSearchQuery;
           if (error) throw new Error(`summary search: ${error.message}`);
 
           return { name, result: { summaries: data ?? [], count: data?.length ?? 0 } };

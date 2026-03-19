@@ -25,16 +25,22 @@ export const getStripe = () => {
         Authorization: `Bearer ${key}`,
         "Content-Type": "application/x-www-form-urlencoded",
       };
-      const options: RequestInit = { method, headers };
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15_000);
+      const options: RequestInit = { method, headers, signal: controller.signal };
       if (body) {
         options.body = encodeFormData(body);
       }
-      const res = await fetch(url, options);
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data?.error?.message ?? `Stripe API error: ${res.status}`);
+      try {
+        const res = await fetch(url, options);
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data?.error?.message ?? `Stripe API error: ${res.status}`);
+        }
+        return data;
+      } finally {
+        clearTimeout(timeout);
       }
-      return data;
     },
   };
   return _stripe;

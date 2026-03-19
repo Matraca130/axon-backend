@@ -72,7 +72,8 @@ const MAX_ATTEMPTS = 3;
  * Output: base64(iv + ciphertext)
  */
 export async function encryptPhone(phone: string): Promise<string> {
-  const secret = Deno.env.get("WHATSAPP_APP_SECRET") ?? "axon-fallback-key";
+  const secret = Deno.env.get("WHATSAPP_APP_SECRET");
+  if (!secret) throw new Error("WHATSAPP_APP_SECRET not configured");
   const encoder = new TextEncoder();
   const keyMaterial = await crypto.subtle.digest("SHA-256", encoder.encode(secret));
   const key = await crypto.subtle.importKey("raw", keyMaterial, "AES-GCM", false, ["encrypt"]);
@@ -85,7 +86,8 @@ export async function encryptPhone(phone: string): Promise<string> {
 }
 
 async function decryptPhone(encryptedBase64: string): Promise<string> {
-  const secret = Deno.env.get("WHATSAPP_APP_SECRET") ?? "axon-fallback-key";
+  const secret = Deno.env.get("WHATSAPP_APP_SECRET");
+  if (!secret) throw new Error("WHATSAPP_APP_SECRET not configured");
   const encoder = new TextEncoder();
   const keyMaterial = await crypto.subtle.digest("SHA-256", encoder.encode(secret));
   const key = await crypto.subtle.importKey("raw", keyMaterial, "AES-GCM", false, ["decrypt"]);
