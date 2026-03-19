@@ -351,6 +351,8 @@ export const GENERATE_MODEL = "claude-sonnet-4-20250514";
  * Streaming text generation via Anthropic Messages API.
  * Returns a ReadableStream that yields SSE-formatted chunks.
  */
+const STREAM_TIMEOUT_MS = 60_000;
+
 export async function generateTextStream(
   opts: ClaudeGenerateOpts,
 ): Promise<ReadableStream<Uint8Array>> {
@@ -367,25 +369,43 @@ export async function generateTextStream(
   if (opts.systemPrompt) body.system = opts.systemPrompt;
   if (opts.temperature !== undefined) body.temperature = opts.temperature;
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": key,
-      "anthropic-version": ANTHROPIC_VERSION,
-    },
-    body: JSON.stringify(body),
-  });
+  // Task 4.7: AbortController with 60s timeout for streaming requests
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS);
 
-  if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`Claude streaming failed (${res.status}): ${errBody.slice(0, 200)}`);
-  }
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": ANTHROPIC_VERSION,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
 
-  if (!res.body) {
-    throw new Error("Claude streaming response has no body");
+    if (!res.ok) {
+      clearTimeout(timer);
+      const errBody = await res.text();
+      throw new Error(`Claude streaming failed (${res.status}): ${errBody.slice(0, 200)}`);
+    }
+
+    if (!res.body) {
+      clearTimeout(timer);
+      throw new Error("Claude streaming response has no body");
+    }
+
+    // Clear the timeout once we start reading — the stream itself handles its own lifecycle
+    clearTimeout(timer);
+    return res.body;
+  } catch (e) {
+    clearTimeout(timer);
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new Error(`Claude streaming timeout after ${STREAM_TIMEOUT_MS}ms`);
+    }
+    throw e;
   }
-  return res.body;
 }
 
 // ─── Parse JSON safely from Claude output ─────────────────

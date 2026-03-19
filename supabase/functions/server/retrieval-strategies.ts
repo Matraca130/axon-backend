@@ -86,7 +86,8 @@ export function selectStrategy(
 
   // R1 FIX: Deep conversation history has highest priority (after scoped)
   // Multi-turn dialog → reformulations catch context from prior messages
-  if (historyLength > 2) return "multi_query";
+  // Task 4.4: Raise threshold from > 2 to > 4 — avoid multi_query overhead for short conversations
+  if (historyLength > 4) return "multi_query";
 
   const wordCount = message.trim().split(/\s+/).length;
 
@@ -224,6 +225,7 @@ Para cada fragmento, asigna un score de 0 a 10 donde:
 Responde SOLO con JSON: { "scores": [score0, score1, ...] }`,
       systemPrompt:
         "Eres un evaluador de relevancia semántica para contenido educativo. Responde SOLO con JSON válido.",
+      model: "haiku",
       jsonMode: true,
       temperature: 0.0,
       maxTokens: 128,

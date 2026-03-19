@@ -14,6 +14,7 @@
 
 import { Hono } from "npm:hono";
 import { cors } from "npm:hono/cors";
+import { compress } from "npm:hono/compress";
 import { logger } from "npm:hono/logger";
 import { PREFIX } from "./db.ts";
 import { rateLimitMiddleware } from "./rate-limit.ts";
@@ -71,6 +72,9 @@ app.use(
     maxAge: 600,
   }),
 );
+
+// Gzip compression (after CORS, before routes)
+app.use("*", compress());
 
 // O-8 FIX: Rate limiting (after CORS, before routes)
 app.use("*", rateLimitMiddleware);

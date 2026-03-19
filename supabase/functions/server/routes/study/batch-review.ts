@@ -282,6 +282,9 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   const errors: { index: number; step: string; message: string }[] = [];
   const computedResults: ComputedResult[] = [];
 
+  // Stats accumulator for fire-and-forget keyword propagation diagnostics
+  const stats: Record<string, string> = {};
+
   // Track successfully created reviews for XP hook
   const successfulReviews: Array<{ item_id: string; grade: number; instrument_type: string }> = [];
 
