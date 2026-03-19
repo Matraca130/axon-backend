@@ -175,12 +175,17 @@ export async function getLinkStatus(c: Context): Promise<Response> {
   const { user } = auth;
   const db = getAdminClient();
 
-  const { data: link } = await db
+  const { data: link, error } = await db
     .from("telegram_links")
     .select("username, created_at")
     .eq("user_id", user.id)
     .eq("is_active", true)
     .single();
+
+  // PGRST116 = no rows found (not an error, just unlinked)
+  if (error && error.code !== "PGRST116") {
+    return err(c, "Error checking Telegram link status", 500);
+  }
 
   if (link) {
     return ok(c, { is_linked: true, username: link.username, linked_at: link.created_at });
