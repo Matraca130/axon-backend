@@ -114,8 +114,8 @@ export async function autoChunkAndEmbed(
   const lockKey = advisoryLockKey(summaryId);
 
   // Acquire advisory lock to prevent concurrent ingest of the same summary
-  const { data: lockAcquired } = await adminDb.rpc("pg_try_advisory_lock", {
-    key: lockKey,
+  const { data: lockAcquired } = await adminDb.rpc("try_advisory_lock", {
+    lock_key: lockKey,
   });
 
   if (!lockAcquired) {
@@ -344,7 +344,7 @@ export async function autoChunkAndEmbed(
 
   } finally {
     // Release advisory lock
-    await adminDb.rpc("pg_advisory_unlock", { key: lockKey }).catch((e: Error) => {
+    await adminDb.rpc("advisory_unlock", { lock_key: lockKey }).catch((e: Error) => {
       console.warn(`[Auto-Ingest] Failed to release advisory lock for ${summaryId}:`, e.message);
     });
   }
