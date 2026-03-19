@@ -15,7 +15,7 @@
 --   Layer 2 -- Internal auth.uid() check when called outside service_role:
 --              - Content tables: resolve institution via resolve_parent_institution(),
 --                then verify caller has CONTENT_WRITE role (owner/admin/professor)
---              - study_plan_tasks: verify task belongs to caller via study_plans.user_id
+--              - study_plan_tasks: verify task belongs to caller via study_plans.student_id
 --   Layer 3 -- SET search_path = public, pg_temp (prevents search_path hijacking)
 --
 -- The function is FUNCTIONALLY IDENTICAL to the original except for the
@@ -82,7 +82,7 @@ BEGIN
         FROM study_plan_tasks spt
         JOIN study_plans sp ON sp.id = spt.study_plan_id
         WHERE spt.id = v_first_id
-          AND sp.user_id = auth.uid()
+          AND sp.student_id = auth.uid()
       ) THEN
         RAISE EXCEPTION 'Access denied: study_plan_task does not belong to caller'
           USING ERRCODE = 'insufficient_privilege';
