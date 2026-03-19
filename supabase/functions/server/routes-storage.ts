@@ -195,6 +195,7 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
 storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
+  const { user } = auth;
 
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
@@ -207,6 +208,18 @@ storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
     }
     if (body.paths.length > MAX_BATCH_PATHS) {
       return err(c, `Maximum ${MAX_BATCH_PATHS} paths per batch request`, 400);
+    }
+
+    // Ownership check: every path must belong to the requesting user
+    const unauthorized = (body.paths as string[]).filter(
+      (p: string) => !p.includes(`/${user.id}/`),
+    );
+    if (unauthorized.length > 0) {
+      return err(
+        c,
+        `Cannot generate signed URLs for files owned by another user. Unauthorized paths: ${unauthorized.join(", ")}`,
+        403,
+      );
     }
 
     const { data, error } = await admin.storage
@@ -222,6 +235,15 @@ storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
 
   if (!body.path) {
     return err(c, "Missing 'path' or 'paths' in request body", 400);
+  }
+
+  // Ownership check: path must belong to the requesting user
+  if (!(body.path as string).includes(`/${user.id}/`)) {
+    return err(
+      c,
+      "Cannot generate signed URL for a file owned by another user",
+      403,
+    );
   }
 
   const { data, error } = await admin.storage

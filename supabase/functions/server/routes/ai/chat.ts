@@ -168,18 +168,34 @@ async function fetchAdjacentChunks(
       });
     }
 
+    // Consolidated single query: fetch all adjacent chunks at once
+    // instead of N queries per summary group (fixes N+1 loop).
     const summaryEntries = Array.from(summaryGroups.entries()).slice(0, 3);
-    for (const [sumId, orderIndexes] of summaryEntries) {
-      const { data: adjacent } = await db
+    const allSummaryIds = summaryEntries.map(([sumId]) => sumId);
+    const allOrderIndexes = new Set<number>();
+    for (const [, orderIndexes] of summaryEntries) {
+      for (const idx of orderIndexes) allOrderIndexes.add(idx);
+    }
+
+    if (allSummaryIds.length > 0 && allOrderIndexes.size > 0) {
+      const { data: adjacentBatch } = await db
         .from("chunks")
         .select("id, summary_id, content, order_index")
-        .eq("summary_id", sumId)
-        .in("order_index", orderIndexes)
+        .in("summary_id", allSummaryIds)
+        .in("order_index", Array.from(allOrderIndexes))
         .is("deleted_at", null);
 
-      if (adjacent) {
-        for (const adj of adjacent) {
-          if (!matchedSet.has(adj.id)) {
+      if (adjacentBatch) {
+        // Build a lookup set for valid (summary_id, order_index) pairs
+        const validPairs = new Set(
+          summaryEntries.flatMap(([sumId, indexes]) =>
+            indexes.map((idx) => `${sumId}:${idx}`)
+          ),
+        );
+
+        for (const adj of adjacentBatch) {
+          const pairKey = `${adj.summary_id}:${adj.order_index}`;
+          if (!matchedSet.has(adj.id) && validPairs.has(pairKey)) {
             allContextChunks.push({
               id: adj.id,
               summary_id: adj.summary_id,
