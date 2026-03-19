@@ -145,10 +145,6 @@ aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => 
   const completedTaskId = typeof body.completedTaskId === "string"
     ? body.completedTaskId
     : undefined;
-  const model: ClaudeModel = (
-    body.model === "opus" || body.model === "sonnet" || body.model === "haiku"
-  ) ? body.model : "sonnet";
-
   // -- Resolve institution for RBAC
   const institutionId = typeof body.institutionId === "string"
     ? body.institutionId
@@ -163,6 +159,21 @@ aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => 
     }
   }
 
+  // -- Resolve model: explicit body.model > institution setting > default 'sonnet'
+  let model: ClaudeModel = "sonnet";
+  if (body.model === "opus" || body.model === "sonnet" || body.model === "haiku") {
+    model = body.model;
+  } else if (institutionId) {
+    const { data: inst } = await db
+      .from("institutions")
+      .select("ai_model")
+      .eq("id", institutionId)
+      .single();
+    if (inst?.ai_model === "opus" || inst?.ai_model === "sonnet") {
+      model = inst.ai_model;
+    }
+  }
+
   // -- Build prompt and call Claude
   const userMessage = buildUserMessage(
     action as ScheduleAction,
@@ -172,9 +183,6 @@ aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => 
   );
 
   let tokensUsed = 0;
-  let status: "success" | "error" | "fallback" = "success";
-  let errorMessage: string | null = null;
-  let fallbackReason: string | null = null;
 
   try {
     const result = await generateText({
@@ -216,9 +224,7 @@ aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => 
     });
   } catch (e) {
     const latencyMs = Date.now() - startMs;
-    const errMsg = e instanceof Error ? e.message : String(e);
-    status = "error";
-    errorMessage = errMsg.slice(0, 500);
+    const errMsg = (e instanceof Error ? e.message : String(e)).slice(0, 500);
 
     console.error(`[Schedule Agent] Claude error (${action}):`, errMsg);
 
@@ -232,7 +238,7 @@ aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => 
       status: "error",
       tokens_used: tokensUsed,
       latency_ms: latencyMs,
-      error_message: errorMessage,
+      error_message: errMsg,
       fallback_reason: "claude_error",
     }).then(({ error: logErr }) => {
       if (logErr) console.error("[Schedule Agent] Log insert error:", logErr.message);
@@ -247,8 +253,7 @@ aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => 
         tokensUsed: 0,
         latencyMs,
         action,
-        confidence: "none",
-        error: errorMessage,
+        error: errMsg,
       },
     });
   }
