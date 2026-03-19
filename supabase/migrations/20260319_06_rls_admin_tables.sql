@@ -32,32 +32,27 @@
 -- RLS enabled but only service_role has access.
 -- ══════════════════════════════════════════════════════════════════════════════
 
--- 1. TELEGRAM_SESSIONS
-ALTER TABLE telegram_sessions ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "tg_sessions_service_role_only" ON telegram_sessions
-  FOR ALL USING (auth.role() = 'service_role');
-
-
--- 2. TELEGRAM_MESSAGE_LOG
-ALTER TABLE telegram_message_log ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "tg_log_service_role_only" ON telegram_message_log
-  FOR ALL USING (auth.role() = 'service_role');
-
-
--- 3. WHATSAPP_SESSIONS
-ALTER TABLE whatsapp_sessions ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "wa_sessions_service_role_only" ON whatsapp_sessions
-  FOR ALL USING (auth.role() = 'service_role');
-
-
--- 4. WHATSAPP_MESSAGE_LOG
-ALTER TABLE whatsapp_message_log ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "wa_log_service_role_only" ON whatsapp_message_log
-  FOR ALL USING (auth.role() = 'service_role');
+-- 1-4. TELEGRAM + WHATSAPP TABLES (may not exist in all environments)
+DO $$
+DECLARE
+  v_tables TEXT[][] := ARRAY[
+    ARRAY['telegram_sessions', 'tg_sessions_service_role_only'],
+    ARRAY['telegram_message_log', 'tg_log_service_role_only'],
+    ARRAY['whatsapp_sessions', 'wa_sessions_service_role_only'],
+    ARRAY['whatsapp_message_log', 'wa_log_service_role_only']
+  ];
+  v_entry TEXT[];
+BEGIN
+  FOREACH v_entry SLICE 1 IN ARRAY v_tables LOOP
+    IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = v_entry[1]) THEN
+      EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', v_entry[1]);
+      EXECUTE format('CREATE POLICY %I ON %I FOR ALL USING (auth.role() = ''service_role'')', v_entry[2], v_entry[1]);
+      RAISE NOTICE '[OK] % — RLS enabled', v_entry[1];
+    ELSE
+      RAISE NOTICE '[SKIP] % — table does not exist', v_entry[1];
+    END IF;
+  END LOOP;
+END; $$;
 
 
 -- 5. WHATSAPP_JOBS (fallback table; may be pgmq-managed instead)
@@ -77,11 +72,17 @@ BEGIN
 END; $$;
 
 
--- 6. PROCESSED_WEBHOOK_EVENTS
-ALTER TABLE processed_webhook_events ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "pwe_service_role_only" ON processed_webhook_events
-  FOR ALL USING (auth.role() = 'service_role');
+-- 6. PROCESSED_WEBHOOK_EVENTS (may not exist)
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'processed_webhook_events') THEN
+    EXECUTE 'ALTER TABLE processed_webhook_events ENABLE ROW LEVEL SECURITY';
+    EXECUTE 'CREATE POLICY "pwe_service_role_only" ON processed_webhook_events FOR ALL USING (auth.role() = ''service_role'')';
+    RAISE NOTICE '[OK] processed_webhook_events — RLS enabled';
+  ELSE
+    RAISE NOTICE '[SKIP] processed_webhook_events — table does not exist';
+  END IF;
+END; $$;
 
 
 -- 7. AI_CONTENT_REPORTS — institution-scoped, accessed via Edge Functions
@@ -94,16 +95,16 @@ CREATE POLICY "ai_reports_own_select" ON ai_content_reports
   FOR SELECT USING (reported_by = auth.uid());
 
 CREATE POLICY "ai_reports_institution_select" ON ai_content_reports
-  FOR SELECT USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR SELECT USING (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "ai_reports_own_insert" ON ai_content_reports
   FOR INSERT WITH CHECK (
     reported_by = auth.uid()
-    AND institution_id = ANY(auth.user_institution_ids())
+    AND institution_id = ANY(public.user_institution_ids())
   );
 
 CREATE POLICY "ai_reports_institution_update" ON ai_content_reports
-  FOR UPDATE USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR UPDATE USING (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "ai_reports_service_role_all" ON ai_content_reports
   FOR ALL USING (auth.role() = 'service_role');
@@ -118,11 +119,11 @@ CREATE POLICY "ai_reports_service_role_all" ON ai_content_reports
 ALTER TABLE institutions ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "inst_members_select" ON institutions
-  FOR SELECT USING (id = ANY(auth.user_institution_ids()));
+  FOR SELECT USING (id = ANY(public.user_institution_ids()));
 
 -- PUT uses db (user client) in institutions.ts
 CREATE POLICY "inst_members_update" ON institutions
-  FOR UPDATE USING (id = ANY(auth.user_institution_ids()));
+  FOR UPDATE USING (id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "inst_service_role_all" ON institutions
   FOR ALL USING (auth.role() = 'service_role');
@@ -141,9 +142,19 @@ CREATE POLICY "memberships_own_select" ON memberships
 -- Institution admins can see all memberships in their institution
 -- (needed for GET /memberships?institution_id=xxx)
 CREATE POLICY "memberships_institution_select" ON memberships
-  FOR SELECT USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR SELECT USING (institution_id = ANY(public.user_institution_ids()));
 
--- All writes go through getAdminClient() (service_role)
+-- PUT /memberships/:id uses db (user client) — admin/owner can update members
+-- in their own institution. requireInstitutionRole() already enforces hierarchy.
+CREATE POLICY "memberships_institution_update" ON memberships
+  FOR UPDATE USING (institution_id = ANY(public.user_institution_ids()));
+
+-- DELETE /memberships/:id is a soft-delete (UPDATE is_active=false) via db.
+-- Same scoping as UPDATE.
+CREATE POLICY "memberships_institution_delete" ON memberships
+  FOR DELETE USING (institution_id = ANY(public.user_institution_ids()));
+
+-- POST uses getAdminClient() (service_role)
 CREATE POLICY "memberships_service_role_all" ON memberships
   FOR ALL USING (auth.role() = 'service_role');
 
@@ -162,7 +173,7 @@ CREATE POLICY "prof_notes_members_select" ON kw_prof_notes
       SELECT 1 FROM keywords k
       JOIN summaries s ON s.id = k.summary_id
       WHERE k.id = kw_prof_notes.keyword_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -172,7 +183,7 @@ CREATE POLICY "prof_notes_members_insert" ON kw_prof_notes
       SELECT 1 FROM keywords k
       JOIN summaries s ON s.id = k.summary_id
       WHERE k.id = kw_prof_notes.keyword_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -182,7 +193,7 @@ CREATE POLICY "prof_notes_members_update" ON kw_prof_notes
       SELECT 1 FROM keywords k
       JOIN summaries s ON s.id = k.summary_id
       WHERE k.id = kw_prof_notes.keyword_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -192,7 +203,7 @@ CREATE POLICY "prof_notes_members_delete" ON kw_prof_notes
       SELECT 1 FROM keywords k
       JOIN summaries s ON s.id = k.summary_id
       WHERE k.id = kw_prof_notes.keyword_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -204,11 +215,24 @@ CREATE POLICY "prof_notes_service_role_all" ON kw_prof_notes
 -- PLAN TABLES (CRUD via factory with user client)
 -- ══════════════════════════════════════════════════════════════════════════════
 
--- 11. PLATFORM_PLANS — global read (all authenticated), admin write
+-- 11. PLATFORM_PLANS — global table (no institution_id)
+-- Read: all authenticated users (students browse plans)
+-- Write: authenticated users (backend enforces owner-only via requireInstitutionRole)
+-- Note: This is a global table — RLS cannot enforce institution scoping.
+-- The backend's role check is the primary access control for writes.
 ALTER TABLE platform_plans ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "platform_plans_authenticated_select" ON platform_plans
   FOR SELECT USING (auth.role() = 'authenticated');
+
+CREATE POLICY "platform_plans_authenticated_insert" ON platform_plans
+  FOR INSERT WITH CHECK (auth.role() = 'authenticated');
+
+CREATE POLICY "platform_plans_authenticated_update" ON platform_plans
+  FOR UPDATE USING (auth.role() = 'authenticated');
+
+CREATE POLICY "platform_plans_authenticated_delete" ON platform_plans
+  FOR DELETE USING (auth.role() = 'authenticated');
 
 CREATE POLICY "platform_plans_service_role_all" ON platform_plans
   FOR ALL USING (auth.role() = 'service_role');
@@ -218,16 +242,16 @@ CREATE POLICY "platform_plans_service_role_all" ON platform_plans
 ALTER TABLE institution_plans ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "inst_plans_members_select" ON institution_plans
-  FOR SELECT USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR SELECT USING (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "inst_plans_members_insert" ON institution_plans
-  FOR INSERT WITH CHECK (institution_id = ANY(auth.user_institution_ids()));
+  FOR INSERT WITH CHECK (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "inst_plans_members_update" ON institution_plans
-  FOR UPDATE USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR UPDATE USING (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "inst_plans_members_delete" ON institution_plans
-  FOR DELETE USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR DELETE USING (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "inst_plans_service_role_all" ON institution_plans
   FOR ALL USING (auth.role() = 'service_role');
@@ -241,7 +265,7 @@ CREATE POLICY "plan_rules_members_select" ON plan_access_rules
     EXISTS (
       SELECT 1 FROM institution_plans ip
       WHERE ip.id = plan_access_rules.plan_id
-        AND ip.institution_id = ANY(auth.user_institution_ids())
+        AND ip.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -250,7 +274,7 @@ CREATE POLICY "plan_rules_members_insert" ON plan_access_rules
     EXISTS (
       SELECT 1 FROM institution_plans ip
       WHERE ip.id = plan_access_rules.plan_id
-        AND ip.institution_id = ANY(auth.user_institution_ids())
+        AND ip.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -259,7 +283,7 @@ CREATE POLICY "plan_rules_members_update" ON plan_access_rules
     EXISTS (
       SELECT 1 FROM institution_plans ip
       WHERE ip.id = plan_access_rules.plan_id
-        AND ip.institution_id = ANY(auth.user_institution_ids())
+        AND ip.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -268,7 +292,7 @@ CREATE POLICY "plan_rules_members_delete" ON plan_access_rules
     EXISTS (
       SELECT 1 FROM institution_plans ip
       WHERE ip.id = plan_access_rules.plan_id
-        AND ip.institution_id = ANY(auth.user_institution_ids())
+        AND ip.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -280,16 +304,16 @@ CREATE POLICY "plan_rules_service_role_all" ON plan_access_rules
 ALTER TABLE institution_subscriptions ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "inst_subs_members_select" ON institution_subscriptions
-  FOR SELECT USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR SELECT USING (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "inst_subs_members_insert" ON institution_subscriptions
-  FOR INSERT WITH CHECK (institution_id = ANY(auth.user_institution_ids()));
+  FOR INSERT WITH CHECK (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "inst_subs_members_update" ON institution_subscriptions
-  FOR UPDATE USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR UPDATE USING (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "inst_subs_members_delete" ON institution_subscriptions
-  FOR DELETE USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR DELETE USING (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "inst_subs_service_role_all" ON institution_subscriptions
   FOR ALL USING (auth.role() = 'service_role');

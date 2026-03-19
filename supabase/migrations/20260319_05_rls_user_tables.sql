@@ -342,7 +342,7 @@ CREATE POLICY "student_xp_own_select" ON student_xp
 
 -- Leaderboard: institution members can see each other's XP
 CREATE POLICY "student_xp_institution_select" ON student_xp
-  FOR SELECT USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR SELECT USING (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "student_xp_service_role_all" ON student_xp
   FOR ALL USING (auth.role() = 'service_role');

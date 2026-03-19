@@ -12,7 +12,7 @@
 -- to prevent search_path injection attacks.
 -- ============================================================================
 
-CREATE OR REPLACE FUNCTION auth.user_institution_ids()
+CREATE OR REPLACE FUNCTION public.user_institution_ids()
 RETURNS UUID[]
 LANGUAGE sql
 STABLE
@@ -28,14 +28,14 @@ AS $$
     AND is_active = true;
 $$;
 
-COMMENT ON FUNCTION auth.user_institution_ids IS
+COMMENT ON FUNCTION public.user_institution_ids IS
   'S11/D3: Returns institution UUIDs where the calling user has an active membership. Used by RLS policies. SECURITY DEFINER, search_path locked.';
 
 -- Grant to authenticated role so RLS policies can call it
-GRANT EXECUTE ON FUNCTION auth.user_institution_ids() TO authenticated;
+GRANT EXECUTE ON FUNCTION public.user_institution_ids() TO authenticated;
 
 -- Verification
 DO $$
 BEGIN
-  RAISE NOTICE 'auth.user_institution_ids() created successfully';
+  RAISE NOTICE 'public.user_institution_ids() created successfully';
 END; $$;

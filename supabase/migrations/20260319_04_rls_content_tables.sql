@@ -28,16 +28,16 @@
 ALTER TABLE courses ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "courses_members_select" ON courses
-  FOR SELECT USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR SELECT USING (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "courses_members_insert" ON courses
-  FOR INSERT WITH CHECK (institution_id = ANY(auth.user_institution_ids()));
+  FOR INSERT WITH CHECK (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "courses_members_update" ON courses
-  FOR UPDATE USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR UPDATE USING (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "courses_members_delete" ON courses
-  FOR DELETE USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR DELETE USING (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "courses_service_role_all" ON courses
   FOR ALL USING (auth.role() = 'service_role');
@@ -54,7 +54,7 @@ CREATE POLICY "semesters_members_select" ON semesters
     EXISTS (
       SELECT 1 FROM courses c
       WHERE c.id = semesters.course_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -63,7 +63,7 @@ CREATE POLICY "semesters_members_insert" ON semesters
     EXISTS (
       SELECT 1 FROM courses c
       WHERE c.id = semesters.course_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -72,7 +72,7 @@ CREATE POLICY "semesters_members_update" ON semesters
     EXISTS (
       SELECT 1 FROM courses c
       WHERE c.id = semesters.course_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -81,7 +81,7 @@ CREATE POLICY "semesters_members_delete" ON semesters
     EXISTS (
       SELECT 1 FROM courses c
       WHERE c.id = semesters.course_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -101,7 +101,7 @@ CREATE POLICY "sections_members_select" ON sections
       SELECT 1 FROM semesters s
       JOIN courses c ON c.id = s.course_id
       WHERE s.id = sections.semester_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -111,7 +111,7 @@ CREATE POLICY "sections_members_insert" ON sections
       SELECT 1 FROM semesters s
       JOIN courses c ON c.id = s.course_id
       WHERE s.id = sections.semester_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -121,7 +121,7 @@ CREATE POLICY "sections_members_update" ON sections
       SELECT 1 FROM semesters s
       JOIN courses c ON c.id = s.course_id
       WHERE s.id = sections.semester_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -131,7 +131,7 @@ CREATE POLICY "sections_members_delete" ON sections
       SELECT 1 FROM semesters s
       JOIN courses c ON c.id = s.course_id
       WHERE s.id = sections.semester_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -152,7 +152,7 @@ CREATE POLICY "topics_members_select" ON topics
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE sec.id = topics.section_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -163,7 +163,7 @@ CREATE POLICY "topics_members_insert" ON topics
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE sec.id = topics.section_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -174,7 +174,7 @@ CREATE POLICY "topics_members_update" ON topics
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE sec.id = topics.section_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -185,7 +185,7 @@ CREATE POLICY "topics_members_delete" ON topics
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE sec.id = topics.section_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -200,7 +200,7 @@ CREATE POLICY "topics_service_role_all" ON topics
 ALTER TABLE summaries ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "summaries_members_select" ON summaries
-  FOR SELECT USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR SELECT USING (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "summaries_members_insert" ON summaries
   FOR INSERT WITH CHECK (
@@ -210,15 +210,15 @@ CREATE POLICY "summaries_members_insert" ON summaries
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE t.id = summaries.topic_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
 CREATE POLICY "summaries_members_update" ON summaries
-  FOR UPDATE USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR UPDATE USING (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "summaries_members_delete" ON summaries
-  FOR DELETE USING (institution_id = ANY(auth.user_institution_ids()));
+  FOR DELETE USING (institution_id = ANY(public.user_institution_ids()));
 
 CREATE POLICY "summaries_service_role_all" ON summaries
   FOR ALL USING (auth.role() = 'service_role');
@@ -235,7 +235,7 @@ CREATE POLICY "chunks_members_select" ON chunks
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = chunks.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -244,7 +244,7 @@ CREATE POLICY "chunks_members_insert" ON chunks
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = chunks.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -253,7 +253,7 @@ CREATE POLICY "chunks_members_update" ON chunks
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = chunks.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -262,7 +262,7 @@ CREATE POLICY "chunks_members_delete" ON chunks
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = chunks.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -281,7 +281,7 @@ CREATE POLICY "keywords_members_select" ON keywords
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = keywords.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -290,7 +290,7 @@ CREATE POLICY "keywords_members_insert" ON keywords
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = keywords.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -299,7 +299,7 @@ CREATE POLICY "keywords_members_update" ON keywords
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = keywords.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -308,7 +308,7 @@ CREATE POLICY "keywords_members_delete" ON keywords
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = keywords.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -328,7 +328,7 @@ CREATE POLICY "subtopics_members_select" ON subtopics
       SELECT 1 FROM keywords k
       JOIN summaries s ON s.id = k.summary_id
       WHERE k.id = subtopics.keyword_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -338,7 +338,7 @@ CREATE POLICY "subtopics_members_insert" ON subtopics
       SELECT 1 FROM keywords k
       JOIN summaries s ON s.id = k.summary_id
       WHERE k.id = subtopics.keyword_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -348,7 +348,7 @@ CREATE POLICY "subtopics_members_update" ON subtopics
       SELECT 1 FROM keywords k
       JOIN summaries s ON s.id = k.summary_id
       WHERE k.id = subtopics.keyword_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -358,7 +358,7 @@ CREATE POLICY "subtopics_members_delete" ON subtopics
       SELECT 1 FROM keywords k
       JOIN summaries s ON s.id = k.summary_id
       WHERE k.id = subtopics.keyword_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -378,7 +378,7 @@ CREATE POLICY "kw_conn_members_select" ON keyword_connections
       SELECT 1 FROM keywords k
       JOIN summaries s ON s.id = k.summary_id
       WHERE k.id = keyword_connections.keyword_a_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -388,7 +388,7 @@ CREATE POLICY "kw_conn_members_insert" ON keyword_connections
       SELECT 1 FROM keywords k
       JOIN summaries s ON s.id = k.summary_id
       WHERE k.id = keyword_connections.keyword_a_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -398,7 +398,7 @@ CREATE POLICY "kw_conn_members_update" ON keyword_connections
       SELECT 1 FROM keywords k
       JOIN summaries s ON s.id = k.summary_id
       WHERE k.id = keyword_connections.keyword_a_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -408,7 +408,7 @@ CREATE POLICY "kw_conn_members_delete" ON keyword_connections
       SELECT 1 FROM keywords k
       JOIN summaries s ON s.id = k.summary_id
       WHERE k.id = keyword_connections.keyword_a_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -428,7 +428,7 @@ CREATE POLICY "flashcards_members_select" ON flashcards
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = flashcards.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -437,7 +437,7 @@ CREATE POLICY "flashcards_members_insert" ON flashcards
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = flashcards.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -446,7 +446,7 @@ CREATE POLICY "flashcards_members_update" ON flashcards
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = flashcards.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -455,7 +455,7 @@ CREATE POLICY "flashcards_members_delete" ON flashcards
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = flashcards.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -474,7 +474,7 @@ CREATE POLICY "quizzes_members_select" ON quizzes
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = quizzes.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -483,7 +483,7 @@ CREATE POLICY "quizzes_members_insert" ON quizzes
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = quizzes.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -492,7 +492,7 @@ CREATE POLICY "quizzes_members_update" ON quizzes
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = quizzes.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -501,7 +501,7 @@ CREATE POLICY "quizzes_members_delete" ON quizzes
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = quizzes.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -520,7 +520,7 @@ CREATE POLICY "quiz_q_members_select" ON quiz_questions
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = quiz_questions.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -529,7 +529,7 @@ CREATE POLICY "quiz_q_members_insert" ON quiz_questions
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = quiz_questions.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -538,7 +538,7 @@ CREATE POLICY "quiz_q_members_update" ON quiz_questions
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = quiz_questions.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -547,7 +547,7 @@ CREATE POLICY "quiz_q_members_delete" ON quiz_questions
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = quiz_questions.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -566,7 +566,7 @@ CREATE POLICY "videos_members_select" ON videos
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = videos.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -575,7 +575,7 @@ CREATE POLICY "videos_members_insert" ON videos
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = videos.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -584,7 +584,7 @@ CREATE POLICY "videos_members_update" ON videos
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = videos.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -593,7 +593,7 @@ CREATE POLICY "videos_members_delete" ON videos
     EXISTS (
       SELECT 1 FROM summaries s
       WHERE s.id = videos.summary_id
-        AND s.institution_id = ANY(auth.user_institution_ids())
+        AND s.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -615,7 +615,7 @@ CREATE POLICY "models_3d_members_select" ON models_3d
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE t.id = models_3d.topic_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -627,7 +627,7 @@ CREATE POLICY "models_3d_members_insert" ON models_3d
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE t.id = models_3d.topic_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -639,7 +639,7 @@ CREATE POLICY "models_3d_members_update" ON models_3d
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE t.id = models_3d.topic_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -651,7 +651,7 @@ CREATE POLICY "models_3d_members_delete" ON models_3d
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE t.id = models_3d.topic_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -674,7 +674,7 @@ CREATE POLICY "model_pins_members_select" ON model_3d_pins
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE m.id = model_3d_pins.model_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -687,7 +687,7 @@ CREATE POLICY "model_pins_members_insert" ON model_3d_pins
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE m.id = model_3d_pins.model_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -700,7 +700,7 @@ CREATE POLICY "model_pins_members_update" ON model_3d_pins
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE m.id = model_3d_pins.model_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -713,7 +713,7 @@ CREATE POLICY "model_pins_members_delete" ON model_3d_pins
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE m.id = model_3d_pins.model_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -736,7 +736,7 @@ CREATE POLICY "model_layers_members_select" ON model_layers
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE m.id = model_layers.model_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -749,7 +749,7 @@ CREATE POLICY "model_layers_members_insert" ON model_layers
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE m.id = model_layers.model_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -762,7 +762,7 @@ CREATE POLICY "model_layers_members_update" ON model_layers
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE m.id = model_layers.model_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -775,7 +775,7 @@ CREATE POLICY "model_layers_members_delete" ON model_layers
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE m.id = model_layers.model_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -798,7 +798,7 @@ CREATE POLICY "model_parts_members_select" ON model_parts
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE m.id = model_parts.model_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -811,7 +811,7 @@ CREATE POLICY "model_parts_members_insert" ON model_parts
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE m.id = model_parts.model_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -824,7 +824,7 @@ CREATE POLICY "model_parts_members_update" ON model_parts
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE m.id = model_parts.model_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 
@@ -837,7 +837,7 @@ CREATE POLICY "model_parts_members_delete" ON model_parts
       JOIN semesters s ON s.id = sec.semester_id
       JOIN courses c ON c.id = s.course_id
       WHERE m.id = model_parts.model_id
-        AND c.institution_id = ANY(auth.user_institution_ids())
+        AND c.institution_id = ANY(public.user_institution_ids())
     )
   );
 

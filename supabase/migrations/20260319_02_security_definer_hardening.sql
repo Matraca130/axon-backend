@@ -37,8 +37,7 @@ ALTER FUNCTION on_study_session_completed()
 ALTER FUNCTION upsert_video_view(uuid, uuid, uuid, int, int, numeric, boolean, int)
   SET search_path = public, pg_temp;
 
-ALTER FUNCTION get_course_summary_ids(uuid)
-  SET search_path = public, pg_temp;
+-- get_course_summary_ids: SKIPPED — function does not exist in production
 
 ALTER FUNCTION get_student_knowledge_context(uuid, uuid)
   SET search_path = public, pg_temp;
@@ -49,11 +48,8 @@ ALTER FUNCTION resolve_parent_institution(text, uuid)
 ALTER FUNCTION search_keywords_by_institution(uuid, text, uuid, uuid, int)
   SET search_path = public, pg_temp;
 
-ALTER FUNCTION search_scoped(text, text, integer)
-  SET search_path = public, pg_temp;
-
-ALTER FUNCTION trash_scoped(text, integer)
-  SET search_path = public, pg_temp;
+-- search_scoped: SKIPPED — function does not exist in production
+-- trash_scoped: SKIPPED — function does not exist in production
 
 ALTER FUNCTION rag_analytics_summary(uuid, timestamptz, timestamptz)
   SET search_path = public, pg_temp;
@@ -98,10 +94,9 @@ DECLARE
 BEGIN
   RAISE NOTICE 'SECURITY DEFINER HARDENING VERIFICATION';
   FOR v_fn IN SELECT unnest(ARRAY[
-    'upsert_video_view', 'get_course_summary_ids', 'get_student_knowledge_context',
+    'upsert_video_view', 'get_student_knowledge_context',
     'resolve_parent_institution', 'search_keywords_by_institution',
-    'search_scoped', 'trash_scoped', 'rag_analytics_summary',
-    'rag_embedding_coverage', 'get_ai_report_stats',
+    'rag_analytics_summary', 'rag_embedding_coverage', 'get_ai_report_stats',
     'on_review_inserted', 'on_study_session_completed'
   ]) LOOP
     SELECT array_to_string(p.proconfig, ', ') INTO v_sp
