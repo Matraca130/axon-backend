@@ -139,7 +139,7 @@ authRoutes.get(`${PREFIX}/me`, async (c: Context) => {
   if (error) {
     // Profile row missing — auto-create from auth user metadata
     if (error.code === "PGRST116") {
-      console.log(`[Axon] Auto-creating missing profile for user ${user.id}`);
+      console.warn(`[Axon] Auto-creating missing profile for user ${user.id}`);
       const admin = getAdminClient();
 
       // N-6 FIX: Fetch full user record from Supabase Auth

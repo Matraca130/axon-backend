@@ -119,7 +119,7 @@ membershipRoutes.post(memBase, async (c: Context) => {
     );
   }
 
-  console.log(
+  console.warn(
     `[Axon Audit] Membership created by ${user.id} (${roleCheck.role}): ` +
     `target_user=${user_id}, institution=${institution_id}, assigned_role=${role}`,
   );

@@ -633,7 +633,7 @@ export async function executeToolCall(
           summaryId,
         );
 
-        console.log(
+        console.warn(
           `[TG-RAG] strategy=${strategy}, sources=${sources.length}, context=${context.length} chars`,
         );
 

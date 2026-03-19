@@ -384,7 +384,7 @@ export async function executeToolCall(
           summaryId,
         );
 
-        console.log(
+        console.warn(
           `[WA-RAG] strategy=${strategy}, sources=${sources.length}, ` +
           `context=${context.length} chars`,
         );

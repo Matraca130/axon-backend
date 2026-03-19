@@ -69,7 +69,7 @@ export async function enqueueJob(payload: TelegramJobPayload): Promise<boolean> 
       return false;
     }
 
-    console.log(`[TG-Queue] Job enqueued: ${payload.type} for user ${payload.user_id} (chat ${payload.chat_id})`);
+    console.warn(`[TG-Queue] Job enqueued: ${payload.type} for user ${payload.user_id} (chat ${payload.chat_id})`);
     return true;
   } catch (e) {
     console.error(`[TG-Queue] Enqueue error: ${(e as Error).message}`);
@@ -123,7 +123,7 @@ export async function processNextJob(): Promise<boolean> {
       .update({ status: "done", processed_at: new Date().toISOString() })
       .eq("id", job.id);
 
-    console.log(`[TG-Queue] Job ${job.id} completed: ${job.payload.type}`);
+    console.warn(`[TG-Queue] Job ${job.id} completed: ${job.payload.type}`);
     return true;
   } catch (e) {
     const errorMsg = (e as Error).message;
@@ -321,7 +321,7 @@ export async function processPendingJobs(maxJobs = 5): Promise<number> {
     processed++;
   }
   if (processed > 0) {
-    console.log(`[TG-Queue] Batch processed ${processed} jobs`);
+    console.warn(`[TG-Queue] Batch processed ${processed} jobs`);
   }
   return processed;
 }

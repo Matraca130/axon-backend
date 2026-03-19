@@ -47,7 +47,7 @@ async function ensureBucket(): Promise<void> {
       console.error(`[Storage] Failed to create bucket: ${error.message}`);
       throw error;
     }
-    console.log(`[Storage] Created bucket: ${BUCKET_NAME}`);
+    console.warn(`[Storage] Created bucket: ${BUCKET_NAME}`);
   }
   bucketReady = true;
 }
@@ -177,7 +177,7 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
     );
   }
 
-  console.log(`[Storage] Uploaded: ${storagePath} by user ${user.id}`);
+  console.warn(`[Storage] Uploaded: ${storagePath} by user ${user.id}`);
 
   return ok(
     c,
@@ -295,7 +295,7 @@ storageRoutes.delete(`${PREFIX}/storage/delete`, async (c: Context) => {
     return safeErr(c, "Storage delete", error);
   }
 
-  console.log(
+  console.warn(
     `[Storage] Deleted ${paths.length} file(s) by user ${user.id}`,
   );
   return ok(c, { deleted: paths });

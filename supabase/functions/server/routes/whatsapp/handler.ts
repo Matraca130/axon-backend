@@ -189,7 +189,7 @@ async function transcribeVoiceMessage(audioMediaId: string): Promise<string | nu
       return null;
     }
 
-    console.log(`[WA-Handler] Voice transcribed (${bytes.length} bytes): "${text.slice(0, 80)}..."`);
+    console.warn(`[WA-Handler] Voice transcribed (${bytes.length} bytes): "${text.slice(0, 80)}..."`);
     return text.trim();
   } catch (e) {
     console.error(`[WA-Handler] Voice transcription failed: ${(e as Error).message}`);
@@ -343,7 +343,7 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
         const toolName = toolUseBlock.name;
         const toolArgs = (toolUseBlock.input ?? {}) as Record<string, unknown>;
         toolsUsed.push(toolName);
-        console.log(`[WA-Handler] Tool #${iteration + 1}: ${toolName}(${JSON.stringify(toolArgs).slice(0, 100)})`);
+        console.warn(`[WA-Handler] Tool #${iteration + 1}: ${toolName}(${JSON.stringify(toolArgs).slice(0, 100)})`);
 
         // Add assistant message with tool_use to history
         history.push({
@@ -443,7 +443,7 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
     }
 
     updateLogRecord(messageId, toolsUsed, Date.now() - startMs);
-    console.log(`[WA-Handler] Done in ${Date.now() - startMs}ms. Tools: [${toolsUsed.join(", ")}]`);
+    console.warn(`[WA-Handler] Done in ${Date.now() - startMs}ms. Tools: [${toolsUsed.join(", ")}]`);
   } catch (e) {
     const errorMsg = (e as Error).message;
     console.error(`[WA-Handler] Fatal: ${errorMsg}`);

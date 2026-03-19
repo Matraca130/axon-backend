@@ -138,7 +138,7 @@ export async function enqueueJob(payload: JobPayload): Promise<boolean> {
       return false;
     }
 
-    console.log(`[WA-Queue] Job enqueued: ${payload.type} for user ${payload.user_id}`);
+    console.warn(`[WA-Queue] Job enqueued: ${payload.type} for user ${payload.user_id}`);
     return true;
   } catch (e) {
     console.error(`[WA-Queue] Enqueue error: ${(e as Error).message}`);
@@ -195,7 +195,7 @@ export async function processNextJob(): Promise<boolean> {
       .update({ status: "done", processed_at: new Date().toISOString() })
       .eq("id", job.id);
 
-    console.log(`[WA-Queue] Job ${job.id} completed: ${job.payload.type}`);
+    console.warn(`[WA-Queue] Job ${job.id} completed: ${job.payload.type}`);
     return true;
   } catch (e) {
     const errorMsg = (e as Error).message;
@@ -405,7 +405,7 @@ export async function processPendingJobs(maxJobs = 5): Promise<number> {
     processed++;
   }
   if (processed > 0) {
-    console.log(`[WA-Queue] Batch processed ${processed} jobs`);
+    console.warn(`[WA-Queue] Batch processed ${processed} jobs`);
   }
   return processed;
 }

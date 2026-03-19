@@ -167,7 +167,7 @@ export async function rateLimitMiddleware(
   if (now - lastCleanup > CLEANUP_INTERVAL_MS) {
     const cleaned = cleanupExpired(now);
     if (cleaned > 0) {
-      console.log(`[RateLimit] Cleaned ${cleaned} expired entries`);
+      console.warn(`[RateLimit] Cleaned ${cleaned} expired entries`);
     }
   }
 

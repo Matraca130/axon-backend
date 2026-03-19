@@ -212,7 +212,7 @@ async function lookupLinkedUser(
         .eq("phone_hash", link.phone_hash)
         .then(({ error }) => {
           if (error) console.warn(`[WA-Webhook] Backfill lookup hash failed: ${error.message}`);
-          else console.log(`[WA-Webhook] Backfilled phone_lookup_hash for user ${link.user_id}`);
+          else console.warn(`[WA-Webhook] Backfilled phone_lookup_hash for user ${link.user_id}`);
         });
 
       return { userId: link.user_id, phoneHash: link.phone_hash };
@@ -231,7 +231,7 @@ export async function handleVerification(c: Context): Promise<Response> {
   const expectedToken = Deno.env.get("WHATSAPP_VERIFY_TOKEN");
 
   if (mode === "subscribe" && token && token === expectedToken) {
-    console.log("[WA-Webhook] Verification challenge accepted");
+    console.warn("[WA-Webhook] Verification challenge accepted");
     return c.text(challenge ?? "", 200);
   }
 
@@ -283,7 +283,7 @@ export async function handleIncoming(c: Context): Promise<Response> {
   // ── Step 4: Dedup check ──
   try {
     if (await isDuplicate(waMessageId)) {
-      console.log(`[WA-Webhook] Duplicate ${waMessageId}, ignoring`);
+      console.warn(`[WA-Webhook] Duplicate ${waMessageId}, ignoring`);
       return c.text("OK", 200);
     }
   } catch (e) {
@@ -319,7 +319,7 @@ export async function handleIncoming(c: Context): Promise<Response> {
   }
 
   // P1 FIX: Mask phone number in logs to prevent PII exposure
-  console.log(
+  console.warn(
     `[WA-Webhook] ${contactName} (${maskPhone(from)}): type=${messageType}, ` +
     `text="${textContent.slice(0, 80)}"`,
   );
@@ -404,7 +404,7 @@ export async function handleIncoming(c: Context): Promise<Response> {
   }
 
   const latencyMs = Date.now() - startMs;
-  console.log(`[WA-Webhook] Completed in ${latencyMs}ms`);
+  console.warn(`[WA-Webhook] Completed in ${latencyMs}ms`);
 
   return c.text("OK", 200);
 }

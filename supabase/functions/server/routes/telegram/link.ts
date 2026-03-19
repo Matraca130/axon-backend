@@ -76,7 +76,7 @@ export async function generateLinkCode(c: Context): Promise<Response> {
     return err(c, "Error al generar código. Intentá de nuevo.", 500);
   }
 
-  console.log(`[TG-Link] Code ****${code.slice(-2)} generated for user ${user.id}`);
+  console.warn(`[TG-Link] Code ****${code.slice(-2)} generated for user ${user.id}`);
 
   return ok(c, {
     code,
@@ -158,7 +158,7 @@ export async function verifyLinkCode(
     .delete()
     .eq("chat_id", matchingSession.chat_id);
 
-  console.log(`[TG-Link] Telegram linked for user ${userId}. Chat: ${chatId}`);
+  console.warn(`[TG-Link] Telegram linked for user ${userId}. Chat: ${chatId}`);
 
   return { success: true, userId };
 }
