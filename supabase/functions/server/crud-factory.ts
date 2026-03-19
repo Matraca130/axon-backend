@@ -102,6 +102,12 @@ export interface CrudConfig {
   createFields: string[];
   updateFields: string[];
 
+  /** Task 7.5: Columns to SELECT on LIST instead of "*". Excludes heavy columns from list views. */
+  listFields?: string;
+
+  /** Task 9.1: Child tables to cascade soft-delete to. */
+  cascadeChildren?: { table: string; fk: string }[];
+
   /**
    * Optional lifecycle hook called after successful POST or PUT.
    *
@@ -259,7 +265,7 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     const { user, db } = auth;
 
     const countMode = parseCountMode(c);
-    let query = db.from(cfg.table).select("*", { count: countMode });
+    let query = db.from(cfg.table).select(cfg.listFields || "*", { count: countMode });
 
     let parentValue: string | undefined;
     if (cfg.parentKey) {
@@ -495,6 +501,23 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       const { data, error } = await query.select().single();
       if (error)
         return safeErr(c, `Soft-delete ${cfg.table}`, error);
+
+      // Task 9.1: Cascade soft-delete to child tables (fire-and-forget)
+      if (cfg.cascadeChildren && cfg.cascadeChildren.length > 0) {
+        const now = new Date().toISOString();
+        for (const child of cfg.cascadeChildren) {
+          db.from(child.table)
+            .update({ deleted_at: now, is_active: false, updated_at: now })
+            .eq(child.fk, id)
+            .is("deleted_at", null)
+            .then(({ error: cascadeErr }: { error: { message: string } | null }) => {
+              if (cascadeErr) {
+                console.warn(`[CRUD Cascade] ${cfg.table} → ${child.table}: ${cascadeErr.message}`);
+              }
+            });
+        }
+      }
+
       return ok(c, data);
     } else {
       let query = db.from(cfg.table).delete().eq("id", id);
