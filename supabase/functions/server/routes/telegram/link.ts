@@ -177,7 +177,7 @@ export async function getLinkStatus(c: Context): Promise<Response> {
 
   const { data: link, error } = await db
     .from("telegram_links")
-    .select("username, created_at")
+    .select("username, linked_at")
     .eq("user_id", user.id)
     .eq("is_active", true)
     .single();
@@ -188,7 +188,7 @@ export async function getLinkStatus(c: Context): Promise<Response> {
   }
 
   if (link) {
-    return ok(c, { is_linked: true, username: link.username, linked_at: link.created_at });
+    return ok(c, { is_linked: true, username: link.username, linked_at: link.linked_at });
   }
   return ok(c, { is_linked: false });
 }
