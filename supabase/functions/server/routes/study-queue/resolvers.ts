@@ -52,8 +52,42 @@ export async function resolveSummaryIdsForStudent(
   db: SupabaseClient,
   userId: string,
 ): Promise<Set<string> | null> {
-  const { data: memberships } = await db.from("memberships").select("institution_id").eq("user_id", userId).eq("is_active", true);
+  // Step 1: Get user's institution memberships (needed for both RPC and fallback)
+  const { data: memberships } = await db
+    .from("memberships")
+    .select("institution_id")
+    .eq("user_id", userId)
+    .eq("is_active", true);
   if (!memberships || memberships.length === 0) return null;
+
+  // Step 2: Try RPC per institution — single query replaces 6-query waterfall
+  const allIds = new Set<string>();
+  let rpcFailed = false;
+
+  for (const m of memberships) {
+    const { data: rpcData, error: rpcError } = await db.rpc(
+      "resolve_student_summary_ids",
+      { p_student_id: userId, p_institution_id: m.institution_id },
+    );
+
+    if (rpcError) {
+      console.warn(`[study-queue] resolve_student_summary_ids RPC failed, using fallback: ${rpcError.message}`);
+      rpcFailed = true;
+      break;
+    }
+
+    if (rpcData) {
+      for (const r of rpcData as { summary_id: string }[]) {
+        allIds.add(r.summary_id);
+      }
+    }
+  }
+
+  if (!rpcFailed) {
+    return allIds.size > 0 ? allIds : null;
+  }
+
+  // ── Fallback: 6-query waterfall ──────────────────────────────
   const institutionIds = memberships.map((m: { institution_id: string }) => m.institution_id);
 
   const { data: courses } = await db.from("courses").select("id").in("institution_id", institutionIds).eq("is_active", true);

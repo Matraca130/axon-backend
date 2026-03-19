@@ -29,6 +29,7 @@ registerCrud(contentCrudRoutes, {
   requiredFields: ["name"],
   createFields: ["name", "description", "order_index"],
   updateFields: ["name", "description", "order_index", "is_active"],
+  cascadeChildren: [{ table: "semesters", fk: "course_id" }],
 });
 
 // 2. Semesters — Course -> Semester
@@ -44,6 +45,7 @@ registerCrud(contentCrudRoutes, {
   requiredFields: ["name"],
   createFields: ["name", "order_index"],
   updateFields: ["name", "order_index", "is_active"],
+  cascadeChildren: [{ table: "sections", fk: "semester_id" }],
 });
 
 // 3. Sections — Semester -> Section
@@ -59,6 +61,7 @@ registerCrud(contentCrudRoutes, {
   requiredFields: ["name"],
   createFields: ["name", "order_index"],
   updateFields: ["name", "order_index", "is_active"],
+  cascadeChildren: [{ table: "topics", fk: "section_id" }],
 });
 
 // 4. Topics — Section -> Topic
@@ -74,6 +77,7 @@ registerCrud(contentCrudRoutes, {
   requiredFields: ["name"],
   createFields: ["name", "order_index"],
   updateFields: ["name", "order_index", "is_active"],
+  cascadeChildren: [{ table: "summaries", fk: "topic_id" }],
 });
 
 // 5. Summaries — Topic -> Summary (SACRED, soft-delete)
@@ -97,6 +101,7 @@ registerCrud(contentCrudRoutes, {
     "is_active",
     "estimated_study_minutes",
   ],
+  listFields: "id, title, topic_id, status, order_index, estimated_study_minutes, is_active, created_at, updated_at",
   afterWrite: onSummaryWrite,
 });
 
