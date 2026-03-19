@@ -9,15 +9,15 @@
  *   - getUserClient(jwt)  → ANON_KEY + user JWT, respects RLS. Per-request, zero background timers.
  *
  * Auth strategy:
- *   - authenticate() verifies the JWT cryptographically via jose (~0.3ms, zero network).
- *   - JWT signature is verified locally via jose HMAC-SHA256. PostgREST verifies again on DB queries (defense-in-depth).
+ *   - authenticate() verifies the JWT cryptographically via jose + JWKS (~0.3ms after cache warm).
+ *   - JWT signature is verified via jose ES256 (P-256 JWKS). PostgREST verifies again on DB queries (defense-in-depth).
  *   - For admin-only routes (signup, institution creation), use getAdminClient().auth.getUser(token).
  */
 
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js";
 import type { Context } from "npm:hono";
 import type { StatusCode } from "npm:hono/utils/http-status";
-import { jwtVerify, errors as joseErrors } from "https://deno.land/x/jose@v5.9.6/index.ts";
+import { jwtVerify, createRemoteJWKSet, errors as joseErrors } from "https://deno.land/x/jose@v5.9.6/index.ts";
 
 // ─── Environment Validation (fail fast on cold start) ─────────────────
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
@@ -33,15 +33,11 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !SUPABASE_SERVICE_ROLE_KEY) {
   throw new Error(`[Axon Fatal] Missing required env vars: ${missing}`);
 }
 
-// ── JWT Secret for jose verification (D2) ──────────────────
-const JWT_SECRET_RAW = Deno.env.get("SUPABASE_JWT_SECRET");
-let jwtSecret: Uint8Array | null = null;
-
-if (JWT_SECRET_RAW) {
-  jwtSecret = new TextEncoder().encode(JWT_SECRET_RAW);
-} else {
-  console.error("[Auth] CRITICAL: SUPABASE_JWT_SECRET not configured — all auth will fail with 503");
-}
+// ── JWKS for jose verification (D2 — ES256/P-256) ──────────────────
+// Supabase signs JWTs with ES256 (P-256). We verify using the public JWKS endpoint.
+// createRemoteJWKSet caches keys in-memory and auto-refreshes on key rotation.
+const JWKS_URL = new URL(`${SUPABASE_URL}/auth/v1/.well-known/jwks.json`);
+const JWKS = createRemoteJWKSet(JWKS_URL);
 
 // ─── Route Prefix ─────────────────────────────────────────────────────
 /**
@@ -118,16 +114,13 @@ interface VerifiedPayload {
 
 /**
  * Verify JWT cryptographically using jose (D2).
- * Checks: HMAC-SHA256 signature, expiration, audience = "authenticated".
+ * Checks: ES256 signature via JWKS, expiration, audience = "authenticated".
+ * JWKS keys are cached in-memory by jose (~0.3ms after first fetch).
  * Returns verified payload or structured error.
  */
 async function verifyJwt(token: string): Promise<VerifiedPayload | { error: string; status: 401 | 503 }> {
-  if (!jwtSecret) {
-    return { error: "jwt_env_misconfigured", status: 503 };
-  }
-
   try {
-    const { payload } = await jwtVerify(token, jwtSecret, {
+    const { payload } = await jwtVerify(token, JWKS, {
       audience: "authenticated",
     });
 
@@ -160,7 +153,7 @@ async function verifyJwt(token: string): Promise<VerifiedPayload | { error: stri
  * Returns an error Response if auth fails, so routes can early-return.
  *
  * Security model (D2 — jose verification):
- *   - JWT signature is cryptographically verified via HMAC-SHA256 (jose).
+ *   - JWT signature is cryptographically verified via ES256 JWKS (jose).
  *   - Audience "authenticated" is enforced, preventing cross-project JWT abuse.
  *   - Expiration is verified by jose (no manual check needed).
  *   - PostgREST still verifies independently on every DB query (defense-in-depth).
