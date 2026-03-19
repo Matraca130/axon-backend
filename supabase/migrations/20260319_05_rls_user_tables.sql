@@ -10,7 +10,7 @@
 --   model_3d_notes, daily_activities
 --
 -- Gamification tables (writes via getAdminClient, reads via db):
---   student_xp, xp_transactions, badge_definitions, badge_awards
+--   student_xp, xp_transactions, badge_definitions, student_badges
 --
 -- Policy patterns:
 --   user-scoped: own_select/own_insert/own_update/own_delete + service_role_all
@@ -18,44 +18,64 @@
 -- ============================================================================
 
 -- ══════════════════════════════════════════════════════════════════════════════
--- 1. REVIEWS — user_id scoped (user client for reads/writes in batch-review)
+-- 1. REVIEWS — scoped via study_sessions.student_id (reviews has no user_id column)
 -- ══════════════════════════════════════════════════════════════════════════════
 
 ALTER TABLE reviews ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "reviews_own_select" ON reviews
-  FOR SELECT USING (user_id = auth.uid());
+  FOR SELECT USING (
+    EXISTS (
+      SELECT 1 FROM study_sessions ss
+      WHERE ss.id = reviews.session_id AND ss.student_id = auth.uid()
+    )
+  );
 
 CREATE POLICY "reviews_own_insert" ON reviews
-  FOR INSERT WITH CHECK (user_id = auth.uid());
+  FOR INSERT WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM study_sessions ss
+      WHERE ss.id = reviews.session_id AND ss.student_id = auth.uid()
+    )
+  );
 
 CREATE POLICY "reviews_own_update" ON reviews
-  FOR UPDATE USING (user_id = auth.uid());
+  FOR UPDATE USING (
+    EXISTS (
+      SELECT 1 FROM study_sessions ss
+      WHERE ss.id = reviews.session_id AND ss.student_id = auth.uid()
+    )
+  );
 
 CREATE POLICY "reviews_own_delete" ON reviews
-  FOR DELETE USING (user_id = auth.uid());
+  FOR DELETE USING (
+    EXISTS (
+      SELECT 1 FROM study_sessions ss
+      WHERE ss.id = reviews.session_id AND ss.student_id = auth.uid()
+    )
+  );
 
 CREATE POLICY "reviews_service_role_all" ON reviews
   FOR ALL USING (auth.role() = 'service_role');
 
 
 -- ══════════════════════════════════════════════════════════════════════════════
--- 2. QUIZ_ATTEMPTS — user_id scoped
+-- 2. QUIZ_ATTEMPTS — student_id scoped
 -- ══════════════════════════════════════════════════════════════════════════════
 
 ALTER TABLE quiz_attempts ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "quiz_att_own_select" ON quiz_attempts
-  FOR SELECT USING (user_id = auth.uid());
+  FOR SELECT USING (student_id = auth.uid());
 
 CREATE POLICY "quiz_att_own_insert" ON quiz_attempts
-  FOR INSERT WITH CHECK (user_id = auth.uid());
+  FOR INSERT WITH CHECK (student_id = auth.uid());
 
 CREATE POLICY "quiz_att_own_update" ON quiz_attempts
-  FOR UPDATE USING (user_id = auth.uid());
+  FOR UPDATE USING (student_id = auth.uid());
 
 CREATE POLICY "quiz_att_own_delete" ON quiz_attempts
-  FOR DELETE USING (user_id = auth.uid());
+  FOR DELETE USING (student_id = auth.uid());
 
 CREATE POLICY "quiz_att_service_role_all" ON quiz_attempts
   FOR ALL USING (auth.role() = 'service_role');
@@ -358,12 +378,12 @@ CREATE POLICY "badge_def_service_role_all" ON badge_definitions
 -- 16. BADGE_AWARDS — student_id scoped (writes via adminDb only)
 -- ══════════════════════════════════════════════════════════════════════════════
 
-ALTER TABLE badge_awards ENABLE ROW LEVEL SECURITY;
+ALTER TABLE student_badges ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "badge_awards_own_select" ON badge_awards
+CREATE POLICY "student_badges_own_select" ON student_badges
   FOR SELECT USING (student_id = auth.uid());
 
-CREATE POLICY "badge_awards_service_role_all" ON badge_awards
+CREATE POLICY "student_badges_service_role_all" ON student_badges
   FOR ALL USING (auth.role() = 'service_role');
 
 
@@ -378,7 +398,7 @@ DECLARE
     'study_plan_tasks', 'fsrs_states', 'bkt_states',
     'kw_student_notes', 'text_annotations', 'video_notes',
     'model_3d_notes', 'daily_activities',
-    'student_xp', 'xp_transactions', 'badge_definitions', 'badge_awards'
+    'student_xp', 'xp_transactions', 'badge_definitions', 'student_badges'
   ];
   v_table TEXT;
   v_rls BOOLEAN;
