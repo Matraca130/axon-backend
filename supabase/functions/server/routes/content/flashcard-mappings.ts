@@ -31,6 +31,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import type { Context } from "npm:hono";
 
 export const flashcardMappingRoutes = new Hono();
@@ -69,7 +70,7 @@ flashcardMappingRoutes.get(
         .eq("is_active", true);
 
       if (memErr) {
-        return err(c, `Failed to resolve memberships: ${memErr.message}`, 500);
+        return safeErr(c, "Resolve memberships", memErr);
       }
 
       // No active memberships → no flashcards accessible
@@ -108,7 +109,7 @@ flashcardMappingRoutes.get(
       const { data, count, error: queryErr } = await query;
 
       if (queryErr) {
-        return err(c, `Failed to fetch flashcard mappings: ${queryErr.message}`, 500);
+        return safeErr(c, "Fetch flashcard mappings", queryErr);
       }
 
       // Strip the joined summaries object from each row —

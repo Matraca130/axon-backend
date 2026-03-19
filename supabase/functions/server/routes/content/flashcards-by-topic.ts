@@ -44,6 +44,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import type { Context } from "npm:hono";
 
@@ -93,7 +94,7 @@ flashcardsByTopicRoutes.get(
         .is("deleted_at", null);
 
       if (sumErr) {
-        return err(c, `Failed to fetch summaries: ${sumErr.message}`, 500);
+        return safeErr(c, "Fetch summaries", sumErr);
       }
 
       if (!summaries || summaries.length === 0) {
@@ -120,7 +121,7 @@ flashcardsByTopicRoutes.get(
         .range(offset, offset + limit - 1);
 
       if (fcErr) {
-        return err(c, `Failed to fetch flashcards: ${fcErr.message}`, 500);
+        return safeErr(c, "Fetch flashcards", fcErr);
       }
 
       return ok(c, {

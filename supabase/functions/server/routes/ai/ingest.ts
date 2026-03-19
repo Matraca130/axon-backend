@@ -34,6 +34,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, getAdminClient, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import {
   requireInstitutionRole,
@@ -174,7 +175,7 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
 
     const { data: fallbackChunks, error: fallbackErr } = await fallbackQuery;
     if (fallbackErr)
-      return err(c, `Fetch chunks failed: ${fallbackErr.message}`, 500);
+      return safeErr(c, "Fetch chunks", fallbackErr);
     chunksToProcess = fallbackChunks;
   }
 
@@ -275,7 +276,7 @@ async function ingestSummaryEmbeddings(
     .limit(batchSize);
 
   if (fetchErr) {
-    return err(c, `Failed to fetch summaries: ${fetchErr.message}`, 500);
+    return safeErr(c, "Fetch summaries", fetchErr);
   }
 
   if (!summaries || summaries.length === 0) {

@@ -9,6 +9,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -92,6 +93,6 @@ contentTreeRoutes.get(`${PREFIX}/content-tree`, async (c: Context) => {
       referencedTable: "semesters.sections.topics",
     });
 
-  if (error) return err(c, `Content tree failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Content tree", error);
   return ok(c, filterActiveTree(data ?? []));
 });

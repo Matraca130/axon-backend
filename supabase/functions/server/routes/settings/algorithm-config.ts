@@ -10,6 +10,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 
 export const algorithmConfigRoutes = new Hono();
@@ -39,7 +40,7 @@ algorithmConfigRoutes.get(
           .maybeSingle();
 
         if (error) {
-          return err(c, `Failed to fetch config: ${error.message}`, 500);
+          return safeErr(c, "Fetch algorithm config", error);
         }
 
         if (data) {
@@ -55,7 +56,7 @@ algorithmConfigRoutes.get(
         .maybeSingle();
 
       if (globalError) {
-        return err(c, `Failed to fetch global config: ${globalError.message}`, 500);
+        return safeErr(c, "Fetch global algorithm config", globalError);
       }
 
       if (globalData) {
@@ -79,7 +80,7 @@ algorithmConfigRoutes.get(
         source: "hardcoded",
       });
     } catch (e) {
-      return err(c, `Unexpected error: ${(e as Error).message}`, 500);
+      return safeErr(c, "Algorithm config", e instanceof Error ? e : null);
     }
   },
 );
@@ -195,12 +196,12 @@ algorithmConfigRoutes.put(
         .single();
 
       if (error) {
-        return err(c, `Failed to update config: ${error.message}`, 500);
+        return safeErr(c, "Update algorithm config", error);
       }
 
       return ok(c, { config: data });
     } catch (e) {
-      return err(c, `Unexpected error: ${(e as Error).message}`, 500);
+      return safeErr(c, "Algorithm config", e instanceof Error ? e : null);
     }
   },
 );

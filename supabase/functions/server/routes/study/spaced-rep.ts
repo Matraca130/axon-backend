@@ -12,6 +12,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import {
   isUuid,
   isNum,
@@ -68,7 +69,7 @@ spacedRepRoutes.get(`${PREFIX}/fsrs-states`, async (c: Context) => {
   query = query.range(offset, offset + limit - 1);
 
   const { data, error } = await query;
-  if (error) return err(c, `List fsrs_states failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "List fsrs_states", error);
   return ok(c, data);
 });
 
@@ -95,7 +96,7 @@ spacedRepRoutes.post(`${PREFIX}/fsrs-states`, async (c: Context) => {
 
   const row = { student_id: user.id, flashcard_id: body.flashcard_id, ...fields };
   const { data, error } = await atomicUpsert(db, "fsrs_states", "student_id,flashcard_id", row);
-  if (error) return err(c, `Upsert fsrs_state failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Upsert fsrs_state", error);
   return ok(c, data);
 });
 
@@ -156,7 +157,7 @@ spacedRepRoutes.get(`${PREFIX}/bkt-states`, async (c: Context) => {
   query = query.range(offset, offset + limit - 1);
 
   const { data, error } = await query;
-  if (error) return err(c, `List bkt_states failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "List bkt_states", error);
   return ok(c, data);
 });
 
@@ -216,6 +217,6 @@ spacedRepRoutes.post(`${PREFIX}/bkt-states`, async (c: Context) => {
 
   const row = { student_id: user.id, subtopic_id: body.subtopic_id, ...fields };
   const { data, error } = await atomicUpsert(db, "bkt_states", "student_id,subtopic_id", row);
-  if (error) return err(c, `Upsert bkt_state failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Upsert bkt_state", error);
   return ok(c, data);
 });

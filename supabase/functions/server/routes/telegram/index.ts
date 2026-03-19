@@ -12,6 +12,7 @@ import { Hono } from "npm:hono";
 import type { Context, Next } from "npm:hono";
 import { PREFIX, err, ok } from "../../db.ts";
 import { timingSafeEqual } from "../../timing-safe.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { handleIncomingUpdate } from "./webhook.ts";
 import { generateLinkCode, unlinkTelegram } from "./link.ts";
 import { setWebhook, deleteWebhook, getMe } from "./tg-client.ts";
@@ -74,7 +75,7 @@ telegramRoutes.post(`${PREFIX}/telegram/setup-webhook`, async (c: Context) => {
     }
     return err(c, "Failed to set webhook", 500);
   } catch (e) {
-    return err(c, `Setup failed: ${(e as Error).message}`, 500);
+    return safeErr(c, "Telegram setup", e instanceof Error ? e : null);
   }
 });
 

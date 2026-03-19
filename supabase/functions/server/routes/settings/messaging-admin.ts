@@ -14,6 +14,7 @@
 
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, getAdminClient } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -108,7 +109,7 @@ export async function getMessagingSettings(c: Context): Promise<Response> {
     .single();
 
   if (error && error.code !== "PGRST116") {
-    return err(c, `Error: ${error.message}`, 500);
+    return safeErr(c, "Fetch messaging settings", error);
   }
 
   if (!data) {
@@ -207,7 +208,7 @@ export async function updateMessagingSettings(c: Context): Promise<Response> {
     );
 
   if (error) {
-    return err(c, `Error: ${error.message}`, 500);
+    return safeErr(c, "Update messaging settings", error);
   }
 
   console.log(`[Messaging-Admin] ${channel} settings updated by ${user.id} for institution ${institutionId}`);

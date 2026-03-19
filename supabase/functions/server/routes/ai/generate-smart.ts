@@ -48,6 +48,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { isUuid, isOneOf, isNonNegInt } from "../../validate.ts";
 import {
@@ -263,7 +264,7 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
 
     if (quizCreateErr) {
       console.error("[GenerateSmart] Auto-create quiz failed:", quizCreateErr.message);
-      return err(c, `Auto-create quiz failed: ${quizCreateErr.message}`, 500);
+      return safeErr(c, "Auto-create quiz", quizCreateErr);
     }
 
     quizId = newQuiz!.id as string;
@@ -283,8 +284,7 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
   );
 
   if (rpcError) {
-    console.error("[GenerateSmart] RPC error:", rpcError.message);
-    return err(c, `Smart target selection failed: ${rpcError.message}`, 500);
+    return safeErr(c, "Smart target selection", rpcError);
   }
 
   if (!targets || targets.length === 0) {
@@ -425,7 +425,7 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
       );
     } catch (e) {
       console.error("[GenerateSmart] Claude error:", e);
-      return err(c, `AI generation failed: ${(e as Error).message}`, 500);
+      return safeErr(c, "AI generation", e instanceof Error ? e : null);
     }
   }
 

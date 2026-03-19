@@ -37,6 +37,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import { requireInstitutionRole, isDenied, ALL_ROLES } from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
@@ -109,7 +110,7 @@ subtopicsBatchRoutes.get(
       .order("order_index", { ascending: true });
 
     if (error) {
-      return err(c, `Batch subtopics failed: ${error.message}`, 500);
+      return safeErr(c, "Batch subtopics", error);
     }
 
     return ok(c, data ?? []);

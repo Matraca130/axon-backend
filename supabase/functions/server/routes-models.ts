@@ -16,6 +16,7 @@
 import { Hono } from "npm:hono";
 import { registerCrud } from "./crud-factory.ts";
 import { authenticate, ok, err, PREFIX, getAdminClient } from "./db.ts";
+import { safeErr } from "./lib/safe-error.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -85,7 +86,7 @@ modelRoutes.get(`${PREFIX}/models-3d/batch`, async (c: Context) => {
     .order("order_index", { ascending: true });
 
   if (dbErr) {
-    return err(c, `Database error: ${dbErr.message}`, 500);
+    return safeErr(c, "Model upload", dbErr);
   }
 
   const grouped: Record<string, typeof models> = {};
@@ -273,7 +274,7 @@ modelRoutes.post(`${PREFIX}/upload-model-3d`, async (c: Context) => {
   try {
     formData = await c.req.formData();
   } catch (e) {
-    return err(c, `Failed to parse form data: ${(e as Error).message}`, 400);
+    return safeErr(c, "Parse form data", e instanceof Error ? e : null, 400);
   }
 
   const file = formData.get("file") as File | null;
@@ -314,7 +315,7 @@ modelRoutes.post(`${PREFIX}/upload-model-3d`, async (c: Context) => {
   try {
     await ensureModelBucket();
   } catch (e) {
-    return err(c, `Storage initialization failed: ${(e as Error).message}`, 500);
+    return safeErr(c, "Storage initialization", e instanceof Error ? e : null);
   }
 
   const timestamp = Date.now();
@@ -336,7 +337,7 @@ modelRoutes.post(`${PREFIX}/upload-model-3d`, async (c: Context) => {
     });
 
   if (uploadError) {
-    return err(c, `Upload failed: ${uploadError.message}`, 500);
+    return safeErr(c, "Model upload", uploadError);
   }
 
   const { data: urlData } = admin.storage

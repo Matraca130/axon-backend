@@ -32,6 +32,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid, isOneOf } from "../../validate.ts";
 import {
   requireInstitutionRole,
@@ -268,7 +269,7 @@ Responde en JSON con este schema exacto:
         .single();
 
       if (insertErr)
-        return err(c, `Insert quiz_question failed: ${insertErr.message}`, 500);
+        return safeErr(c, "Insert quiz_question", insertErr);
 
       return ok(c, {
         ...inserted,
@@ -296,7 +297,7 @@ Responde en JSON con este schema exacto:
         .single();
 
       if (insertErr)
-        return err(c, `Insert flashcard failed: ${insertErr.message}`, 500);
+        return safeErr(c, "Insert flashcard", insertErr);
 
       return ok(c, {
         ...inserted,
@@ -309,6 +310,6 @@ Responde en JSON con este schema exacto:
     }
   } catch (e) {
     console.error("[AI Generate] Claude error:", e);
-    return err(c, `AI generation failed: ${(e as Error).message}`, 500);
+    return safeErr(c, "AI generation", e instanceof Error ? e : null);
   }
 });

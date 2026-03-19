@@ -10,6 +10,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -65,7 +66,7 @@ profNotesRoutes.get(profNotesBase, async (c: Context) => {
     .order("created_at", { ascending: true });
 
   if (error)
-    return err(c, `List kw_prof_notes failed: ${error.message}`, 500);
+    return safeErr(c, "List kw_prof_notes", error);
   return ok(c, data);
 });
 
@@ -89,7 +90,7 @@ profNotesRoutes.get(`${profNotesBase}/:id`, async (c: Context) => {
     .eq("id", id)
     .single();
   if (error)
-    return err(c, `Get kw_prof_note ${id} failed: ${error.message}`, 404);
+    return safeErr(c, "Get kw_prof_note", error, 404);
   return ok(c, data);
 });
 
@@ -130,7 +131,7 @@ profNotesRoutes.post(profNotesBase, async (c: Context) => {
     .single();
 
   if (error)
-    return err(c, `Upsert kw_prof_note failed: ${error.message}`, 500);
+    return safeErr(c, "Upsert kw_prof_note", error);
   return ok(c, data, 201);
 });
 
@@ -149,11 +150,6 @@ profNotesRoutes.delete(`${profNotesBase}/:id`, async (c: Context) => {
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   const { error } = await db.from("kw_prof_notes").delete().eq("id", id);
-  if (error)
-    return err(
-      c,
-      `Delete kw_prof_note ${id} failed: ${error.message}`,
-      500,
-    );
+  if (error) return safeErr(c, "Delete kw_prof_note", error);
   return ok(c, { deleted: id });
 });

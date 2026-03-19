@@ -9,6 +9,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX, getAdminClient } from "./db.ts";
+import { safeErr } from "./lib/safe-error.ts";
 import type { Context } from "npm:hono";
 
 const storageRoutes = new Hono();
@@ -61,7 +62,7 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
   try {
     await ensureBucket();
   } catch (e) {
-    return err(c, `Storage initialization failed: ${(e as Error).message}`, 500);
+    return safeErr(c, "Storage initialization", e instanceof Error ? e : null);
   }
 
   const contentType = c.req.header("Content-Type") || "";
@@ -161,7 +162,7 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
     });
 
   if (uploadError) {
-    return err(c, `Upload failed: ${uploadError.message}`, 500);
+    return safeErr(c, "File upload", uploadError);
   }
 
   const { data: signedData, error: signedError } = await admin.storage
@@ -213,7 +214,7 @@ storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
       .createSignedUrls(body.paths, SIGNED_URL_EXPIRY);
 
     if (error) {
-      return err(c, `Batch signed URL failed: ${error.message}`, 500);
+      return safeErr(c, "Batch signed URL", error);
     }
 
     return ok(c, { signedUrls: data, expiresIn: SIGNED_URL_EXPIRY });
@@ -228,7 +229,7 @@ storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
     .createSignedUrl(body.path as string, SIGNED_URL_EXPIRY);
 
   if (error) {
-    return err(c, `Signed URL failed: ${error.message}`, 500);
+    return safeErr(c, "Signed URL", error);
   }
 
   return ok(c, {
@@ -269,7 +270,7 @@ storageRoutes.delete(`${PREFIX}/storage/delete`, async (c: Context) => {
   const { error } = await admin.storage.from(BUCKET_NAME).remove(paths);
 
   if (error) {
-    return err(c, `Delete failed: ${error.message}`, 500);
+    return safeErr(c, "Storage delete", error);
   }
 
   console.log(

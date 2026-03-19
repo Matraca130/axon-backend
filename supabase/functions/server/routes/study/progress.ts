@@ -19,6 +19,7 @@
 import { Hono } from "npm:hono";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import {
   isUuid,
   isNonNeg,
@@ -94,7 +95,7 @@ progressRoutes.get(`${PREFIX}/topic-progress`, async (c: Context) => {
       .order("order_index", { ascending: true });
 
     if (sumErr) {
-      return err(c, `Failed to fetch summaries: ${sumErr.message}`, 500);
+      return safeErr(c, "Fetch summaries", sumErr);
     }
 
     if (!summaries || summaries.length === 0) {
@@ -142,7 +143,7 @@ progressRoutes.get(`${PREFIX}/topic-progress`, async (c: Context) => {
       flashcard_counts: flashcardCountsMap,
     });
   } catch (e: any) {
-    return err(c, `topic-progress failed: ${e.message}`, 500);
+    return safeErr(c, "Topic progress", e);
   }
 });
 
@@ -205,7 +206,7 @@ progressRoutes.get(`${PREFIX}/topics-overview`, async (c: Context) => {
       .order("order_index", { ascending: true });
 
     if (sumErr) {
-      return err(c, `Failed to fetch summaries: ${sumErr.message}`, 500);
+      return safeErr(c, "Fetch summaries", sumErr);
     }
 
     // Group summaries by topic_id
@@ -264,7 +265,7 @@ progressRoutes.get(`${PREFIX}/topics-overview`, async (c: Context) => {
       keyword_counts_by_topic: keywordCountsByTopic,
     });
   } catch (e: any) {
-    return err(c, `topics-overview failed: ${e.message}`, 500);
+    return safeErr(c, "Topics overview", e);
   }
 });
 
@@ -285,7 +286,7 @@ progressRoutes.get(`${PREFIX}/reading-states`, async (c: Context) => {
     .eq("summary_id", summaryId)
     .maybeSingle();
 
-  if (error) return err(c, `Get reading_state failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Get reading_state", error);
   return ok(c, data);
 });
 
@@ -309,7 +310,7 @@ progressRoutes.post(`${PREFIX}/reading-states`, async (c: Context) => {
 
   const row = { student_id: user.id, summary_id: body.summary_id, ...fields };
   const { data, error } = await atomicUpsert(db, "reading_states", "student_id,summary_id", row);
-  if (error) return err(c, `Upsert reading_state failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Upsert reading_state", error);
 
   // Sprint 1: Fire-and-forget XP hook when reading is marked complete (contract §4.3)
   // Only triggers when completed=true is in the request body.
@@ -359,7 +360,7 @@ progressRoutes.get(`${PREFIX}/daily-activities`, async (c: Context) => {
   query = query.range(offset, offset + limit - 1);
 
   const { data, error } = await query;
-  if (error) return err(c, `List daily_activities failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "List daily_activities", error);
   return ok(c, data);
 });
 
@@ -383,7 +384,7 @@ progressRoutes.post(`${PREFIX}/daily-activities`, async (c: Context) => {
 
   const row = { student_id: user.id, activity_date: body.activity_date, ...fields };
   const { data, error } = await atomicUpsert(db, "daily_activities", "student_id,activity_date", row);
-  if (error) return err(c, `Upsert daily_activity failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Upsert daily_activity", error);
   return ok(c, data);
 });
 
@@ -396,7 +397,7 @@ progressRoutes.get(`${PREFIX}/student-stats`, async (c: Context) => {
 
   const { data, error } = await db.from("student_stats").select("*")
     .eq("student_id", user.id).maybeSingle();
-  if (error) return err(c, `Get student_stats failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Get student_stats", error);
   return ok(c, data);
 });
 
@@ -420,6 +421,6 @@ progressRoutes.post(`${PREFIX}/student-stats`, async (c: Context) => {
 
   const row = { student_id: user.id, ...fields };
   const { data, error } = await atomicUpsert(db, "student_stats", "student_id", row);
-  if (error) return err(c, `Upsert student_stats failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Upsert student_stats", error);
   return ok(c, data);
 });
