@@ -3,7 +3,7 @@
  *
  * Sub-modules:
  *   webhook.ts    — POST /webhooks/telegram
- *   link.ts       — POST /telegram/link-code, /telegram/unlink
+ *   link.ts       — POST /telegram/link-code, /telegram/unlink, GET /telegram/link-status
  *
  * Feature flag: TELEGRAM_ENABLED env var.
  */
@@ -14,7 +14,7 @@ import { PREFIX, err, ok } from "../../db.ts";
 import { timingSafeEqual } from "../../timing-safe.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { handleIncomingUpdate } from "./webhook.ts";
-import { generateLinkCode, unlinkTelegram } from "./link.ts";
+import { generateLinkCode, getLinkStatus, unlinkTelegram } from "./link.ts";
 import { setWebhook, deleteWebhook, getMe } from "./tg-client.ts";
 import { processPendingJobs } from "./async-queue.ts";
 
@@ -47,6 +47,7 @@ telegramRoutes.post(`${PREFIX}/webhooks/telegram`, handleIncomingUpdate);
 
 telegramRoutes.post(`${PREFIX}/telegram/link-code`, generateLinkCode);
 telegramRoutes.post(`${PREFIX}/telegram/unlink`, unlinkTelegram);
+telegramRoutes.get(`${PREFIX}/telegram/link-status`, getLinkStatus);
 
 // ─── Admin: Webhook Setup ────────────────────────────────
 // POST /telegram/setup-webhook — Sets the Telegram webhook URL

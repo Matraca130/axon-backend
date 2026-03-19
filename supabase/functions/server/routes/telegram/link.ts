@@ -167,6 +167,27 @@ export function isLinkingCode(text: string): boolean {
   return /^\d{6}$/.test(text.trim());
 }
 
+// ─── Link Status ────────────────────────────────────────
+
+export async function getLinkStatus(c: Context): Promise<Response> {
+  const auth = await authenticate(c);
+  if (auth instanceof Response) return auth;
+  const { user } = auth;
+  const db = getAdminClient();
+
+  const { data: link } = await db
+    .from("telegram_links")
+    .select("username, created_at")
+    .eq("user_id", user.id)
+    .eq("is_active", true)
+    .single();
+
+  if (link) {
+    return ok(c, { is_linked: true, username: link.username, linked_at: link.created_at });
+  }
+  return ok(c, { is_linked: false });
+}
+
 // ─── Unlink Telegram ─────────────────────────────────────
 
 export async function unlinkTelegram(c: Context): Promise<Response> {
