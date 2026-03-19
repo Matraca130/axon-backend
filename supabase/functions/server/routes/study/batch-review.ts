@@ -288,6 +288,36 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   // Track successfully created reviews for XP hook
   const successfulReviews: Array<{ item_id: string; grade: number; instrument_type: string }> = [];
 
+  // ── 2.4: Batch pre-load FSRS and BKT states ──────────────────
+  const allFlashcardIds = validatedItems
+    .filter(i => !i.fsrs_update && i.item_id)
+    .map(i => i.item_id);
+  const allSubtopicIds = validatedItems
+    .filter(i => !i.bkt_update && i.subtopic_id)
+    .map(i => i.subtopic_id as string);
+
+  // Also collect subtopic_ids used for FSRS recovery cross-signal
+  const crossSignalSubtopicIds = validatedItems
+    .filter(i => !i.fsrs_update && (i.subtopic_id || i.bkt_update?.subtopic_id))
+    .map(i => (i.subtopic_id || i.bkt_update?.subtopic_id) as string);
+  const allBktSubtopicIds = [...new Set([...allSubtopicIds, ...crossSignalSubtopicIds])];
+
+  const { data: allFsrs } = allFlashcardIds.length > 0
+    ? await db.from("fsrs_states")
+        .select("flashcard_id, stability, difficulty, reps, lapses, state, last_review_at, consecutive_lapses, is_leech")
+        .in("flashcard_id", allFlashcardIds)
+        .eq("student_id", user.id)
+    : { data: [] };
+  const { data: allBkt } = allBktSubtopicIds.length > 0
+    ? await db.from("bkt_states")
+        .select("subtopic_id, p_know, max_p_know, total_attempts, correct_attempts, p_transit, p_slip, p_guess")
+        .in("subtopic_id", allBktSubtopicIds)
+        .eq("student_id", user.id)
+    : { data: [] };
+
+  const fsrsMap = new Map(allFsrs?.map(s => [s.flashcard_id, s]) ?? []);
+  const bktMap = new Map(allBkt?.map(s => [s.subtopic_id, s]) ?? []);
+
   for (let i = 0; i < validatedItems.length; i++) {
     const item = validatedItems[i];
     const now = new Date();
@@ -357,24 +387,14 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     } else {
       // ════════ PATH B (server-side FSRS v4 Petrick) ════════
       try {
-        // 1. Read current FSRS state
-        const { data: existingFsrs } = await db
-          .from("fsrs_states")
-          .select("stability, difficulty, reps, lapses, state, last_review_at, consecutive_lapses, is_leech")
-          .eq("student_id", user.id)
-          .eq("flashcard_id", item.item_id)
-          .maybeSingle();
+        // 1. Read current FSRS state (from pre-loaded map)
+        const existingFsrs = fsrsMap.get(item.item_id) ?? null;
 
-        // 2. Read BKT for recovery cross-signal
+        // 2. Read BKT for recovery cross-signal (from pre-loaded map)
         let isRecovering = false;
         const resolvedSubtopicId = item.subtopic_id || item.bkt_update?.subtopic_id;
         if (resolvedSubtopicId) {
-          const { data: existingBkt } = await db
-            .from("bkt_states")
-            .select("p_know, max_p_know")
-            .eq("student_id", user.id)
-            .eq("subtopic_id", resolvedSubtopicId)
-            .maybeSingle();
+          const existingBkt = bktMap.get(resolvedSubtopicId) ?? null;
 
           if (existingBkt) {
             const maxPKnow = existingBkt.max_p_know ?? 0;
@@ -514,12 +534,8 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         const instrumentType =
           item.instrument_type === "quiz" ? "quiz" as const : "flashcard" as const;
 
-        const { data: existingBkt } = await db
-          .from("bkt_states")
-          .select("p_know, max_p_know, total_attempts, correct_attempts, p_transit, p_slip, p_guess")
-          .eq("student_id", user.id)
-          .eq("subtopic_id", item.subtopic_id)
-          .maybeSingle();
+        // Read from pre-loaded map (may contain updated values from earlier items — fix 2.7)
+        const existingBkt = bktMap.get(item.subtopic_id) ?? null;
 
         const currentMastery = existingBkt?.p_know ?? 0;
         const maxReachedMastery = existingBkt?.max_p_know ?? 0;
@@ -558,6 +574,21 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           errors.push({ index: i, step: "bkt_pathb", message: bktErr.message });
         } else {
           bktUpdated++;
+
+          // 2.7: Update bktMap so next item with same subtopic reads fresh state
+          if (item.subtopic_id) {
+            bktMap.set(item.subtopic_id, {
+              ...(existingBkt ?? {}),
+              subtopic_id: item.subtopic_id,
+              p_know: bktResult.p_know,
+              max_p_know: bktResult.max_p_know,
+              p_transit: existingBkt?.p_transit ?? 0.18,
+              p_slip: existingBkt?.p_slip ?? 0.10,
+              p_guess: existingBkt?.p_guess ?? 0.25,
+              total_attempts: finalTotalAttempts,
+              correct_attempts: finalCorrectAttempts,
+            });
+          }
 
           // §4.2: Fire-and-forget keyword BKT propagation (PATH B)
           propagateKeywordBkt(
