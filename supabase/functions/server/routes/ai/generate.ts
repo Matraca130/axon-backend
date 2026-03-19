@@ -44,6 +44,7 @@ import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers
 import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
 import { truncateForPrompt } from "./generate-smart-helpers.ts";
 import { validateQuizQuestion, validateFlashcard } from "../../lib/validate-llm-output.ts";
+import { checkPlanLimit } from "../plans/access.ts";
 
 export const aiGenerateRoutes = new Hono();
 
@@ -85,6 +86,12 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
   );
   if (isDenied(roleCheck))
     return err(c, roleCheck.message, roleCheck.status);
+
+  // ── Plan limit enforcement ──────────────────────────────
+  const planCheck = await checkPlanLimit(db, user.id, instId as string);
+  if (!planCheck.allowed) {
+    return err(c, `Daily AI generation limit reached (${planCheck.limit}). Upgrade your plan.`, 429);
+  }
 
   // ── Fetch summary ──────────────────────────────────────
   const { data: summary } = await db

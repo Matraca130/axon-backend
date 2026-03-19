@@ -60,6 +60,7 @@ import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.t
 import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
 import { sanitizeForPrompt } from "../../prompt-sanitize.ts";
 import { validateQuizQuestion, validateFlashcard } from "../../lib/validate-llm-output.ts";
+import { checkPlanLimit } from "../plans/access.ts";
 
 // PR #103: Extracted modules
 import type { SmartTarget, BulkGeneratedItem, BulkErrorItem } from "./generate-smart-helpers.ts";
@@ -367,6 +368,12 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
     if (isDenied(roleCheck))
       return err(c, roleCheck.message, roleCheck.status);
 
+    // ── Plan limit enforcement ──────────────────────────────
+    const planCheck = await checkPlanLimit(db, user.id, resolvedInstId as string);
+    if (!planCheck.allowed) {
+      return err(c, `Daily AI generation limit reached (${planCheck.limit}). Upgrade your plan.`, 429);
+    }
+
     // Fetch context
     const { data: summary } = await db
       .from("summaries")
@@ -473,6 +480,15 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
     summaryContentCache.set(
       sid, truncateForPrompt(summaryData?.content_markdown || "", 1500),
     );
+  }
+
+  // ── Plan limit enforcement (bulk path) ──────────────────
+  const firstInstIdForLimit = institutionIdCache.values().next().value;
+  if (firstInstIdForLimit) {
+    const planCheck = await checkPlanLimit(db, user.id, firstInstIdForLimit as string);
+    if (!planCheck.allowed) {
+      return err(c, `Daily AI generation limit reached (${planCheck.limit}). Upgrade your plan.`, 429);
+    }
   }
 
   let sharedProfileContext = "";
