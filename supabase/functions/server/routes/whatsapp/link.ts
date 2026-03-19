@@ -8,6 +8,7 @@
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, getAdminClient } from "../../db.ts";
 import { hashPhone, generateSalt, sendText } from "./wa-client.ts";
+import { computeLookupHash } from "./webhook.ts";
 
 // ─── Constants ───────────────────────────────────────────
 
@@ -117,6 +118,7 @@ export async function verifyLinkCode(
 
   const salt = generateSalt();
   const phoneHash = await hashPhone(phoneNumber, salt);
+  const phoneLookupHash = await computeLookupHash(phoneNumber);
 
   const { error: linkError } = await db
     .from("whatsapp_links")
@@ -124,6 +126,7 @@ export async function verifyLinkCode(
       user_id: userId,
       phone_hash: phoneHash,
       phone_salt: salt,
+      phone_lookup_hash: phoneLookupHash,
       is_active: true,
     });
 

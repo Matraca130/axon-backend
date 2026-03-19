@@ -16,6 +16,7 @@ import { safeErr } from "../../lib/safe-error.ts";
 import { handleIncomingUpdate } from "./webhook.ts";
 import { generateLinkCode, unlinkTelegram } from "./link.ts";
 import { setWebhook, deleteWebhook, getMe } from "./tg-client.ts";
+import { processPendingJobs } from "./async-queue.ts";
 
 const telegramRoutes = new Hono();
 
@@ -91,6 +92,29 @@ telegramRoutes.post(`${PREFIX}/telegram/delete-webhook`, async (c: Context) => {
 
   const success = await deleteWebhook();
   return ok(c, { success });
+});
+
+// ─── Queue Processing ────────────────────────────────────
+// Called by pg_cron every minute. Also called fire-and-forget from handler.ts.
+// Validates service_role_key to prevent public abuse.
+
+telegramRoutes.post(`${PREFIX}/telegram/process-queue`, async (c: Context) => {
+  const authHeader = c.req.header("Authorization") ?? "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+
+  if (!token || !serviceRoleKey || !timingSafeEqual(token, serviceRoleKey)) {
+    console.warn("[TG-Queue] Unauthorized process-queue attempt");
+    return err(c, "Unauthorized", 401);
+  }
+
+  try {
+    const processed = await processPendingJobs(5);
+    return ok(c, { processed });
+  } catch (e) {
+    console.error(`[TG-Queue] Process queue failed: ${(e as Error).message}`);
+    return err(c, "Queue processing failed", 500);
+  }
 });
 
 export { telegramRoutes };

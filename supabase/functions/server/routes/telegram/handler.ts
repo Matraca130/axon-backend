@@ -33,6 +33,7 @@ import {
   type FlashcardItem,
 } from "./review-flow.ts";
 import { formatFlashcardSummary } from "./formatter.ts";
+import { enqueueJob, processNextJob } from "./async-queue.ts";
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -351,10 +352,28 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
 
         const toolResult = await executeToolCall(toolName, toolArgs, userId, session.current_context);
 
-        // Handle async tools
+        // Handle async tools — enqueue for background processing
         if (toolResult.isAsync) {
           const asyncResult = toolResult.result as Record<string, unknown>;
           await sendTextPlain(chatId, (asyncResult?.message as string) ?? "Procesando... \u23f3");
+
+          // Enqueue the job for background execution
+          const enqueued = await enqueueJob({
+            type: toolName as "generate_content" | "generate_weekly_report",
+            channel: "telegram",
+            user_id: userId,
+            chat_id: chatId,
+            action: (asyncResult?.action as "flashcard" | "quiz") ?? undefined,
+            summary_id: (asyncResult?.summary_id as string) ?? undefined,
+          });
+
+          if (enqueued) {
+            // Fire-and-forget: attempt immediate processing
+            processNextJob().catch((e) =>
+              console.warn(`[TG-Handler] Fire-and-forget queue failed: ${(e as Error).message}`)
+            );
+          }
+
           history.push({
             role: "user",
             content: [{ type: "tool_result", tool_use_id: toolUseBlock.id, content: JSON.stringify(toolResult.result) }],

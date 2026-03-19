@@ -163,6 +163,7 @@ export async function processNextJob(): Promise<boolean> {
     .from("whatsapp_jobs")
     .select("*")
     .eq("status", "pending")
+    .eq("channel", "whatsapp")
     .order("created_at", { ascending: true })
     .limit(1);
 
