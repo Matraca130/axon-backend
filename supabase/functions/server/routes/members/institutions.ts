@@ -91,7 +91,7 @@ institutionRoutes.get(instBase, async (c: Context) => {
     .select(`
       id, role, is_active, created_at,
       institution:institutions (
-        id, name, slug, logo_url, owner_id, is_active, settings, created_at, updated_at
+        id, name, slug, logo_url, owner_id, is_active, settings, ai_model, created_at, updated_at
       )
     `)
     .eq("user_id", user.id)
@@ -146,8 +146,8 @@ institutionRoutes.put(`${instBase}/:id`, async (c: Context) => {
   if (!body) return err(c, "Invalid or missing JSON body", 400);
 
   // H-2 FIX: Owner-only fields — admins cannot change slug or deactivate
-  const ownerOnlyFields = ["slug", "is_active"];
-  const allowedFields = ["name", "slug", "logo_url", "settings", "is_active"];
+  const ownerOnlyFields = ["slug", "is_active", "ai_model"];
+  const allowedFields = ["name", "slug", "logo_url", "settings", "is_active", "ai_model"];
   const patch: Record<string, unknown> = {};
 
   for (const f of allowedFields) {
@@ -162,6 +162,10 @@ institutionRoutes.put(`${instBase}/:id`, async (c: Context) => {
 
   if (typeof patch.slug === "string" && !/^[a-z0-9][a-z0-9-]{1,48}[a-z0-9]$/.test(patch.slug as string)) {
     return err(c, "Invalid slug format", 400);
+  }
+
+  if (patch.ai_model !== undefined && !["sonnet", "opus"].includes(patch.ai_model as string)) {
+    return err(c, "ai_model must be 'sonnet' or 'opus'", 400);
   }
 
   patch.updated_at = new Date().toISOString();
