@@ -70,6 +70,8 @@ import {
 import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.ts";
 import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
 import { truncateForPrompt } from "./generate-smart-helpers.ts";
+import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
+import { validateQuizQuestion, validateFlashcard } from "../../lib/validate-llm-output.ts";
 
 export const aiPreGenerateRoutes = new Hono();
 
@@ -266,9 +268,8 @@ aiPreGenerateRoutes.post(
           .limit(3);
 
         if (profNotes && profNotes.length > 0) {
-          profNotesContext =
-            "\nNotas del profesor: " +
-            profNotes.map((n: { note: string }) => n.note).join("; ");
+          const notesJoined = profNotes.map((n: { note: string }) => n.note).join("; ");
+          profNotesContext = sanitizeForPrompt(notesJoined, 1000);
         }
 
         // 7b. Build prompt (D17: no student profile, generic content)
@@ -276,10 +277,10 @@ aiPreGenerateRoutes.post(
 
         if (action === "quiz_question") {
           userPrompt = `Genera UNA pregunta de quiz sobre:
-Tema: ${summary.title}
-Keyword: ${kw.name}${kw.definition ? ` \u2014 ${kw.definition}` : ""}
-${profNotesContext}
-Contenido relevante: ${contentSnippet}
+Tema: ${sanitizeForPrompt(summary.title, 200)}
+Keyword: ${sanitizeForPrompt(kw.name, 200)}${kw.definition ? ` \u2014 ${sanitizeForPrompt(kw.definition, 500)}` : ""}
+${profNotesContext ? wrapXml('professor_notes', sanitizeForPrompt(profNotesContext, 1000)) : ""}
+${wrapXml('course_content', sanitizeForPrompt(contentSnippet, 2000))}
 
 Genera una pregunta de dificultad media, clara y educativa.
 
@@ -295,12 +296,12 @@ Responde en JSON con este schema exacto:
 Nota: question_type debe ser "mcq", "true_false", "fill_blank" o "open".
 Nota: difficulty debe ser un entero: 1 (facil), 2 (medio), 3 (dificil).`;
         } else {
-          userPrompt = `Genera una flashcard sobre el keyword "${kw.name}".
+          userPrompt = `Genera una flashcard sobre el keyword "${sanitizeForPrompt(kw.name, 200)}".
 
-Tema: ${summary.title}
-Keyword: ${kw.name}${kw.definition ? ` \u2014 ${kw.definition}` : ""}
-${profNotesContext}
-Contenido relevante: ${contentSnippet}
+Tema: ${sanitizeForPrompt(summary.title, 200)}
+Keyword: ${sanitizeForPrompt(kw.name, 200)}${kw.definition ? ` \u2014 ${sanitizeForPrompt(kw.definition, 500)}` : ""}
+${profNotesContext ? wrapXml('professor_notes', sanitizeForPrompt(profNotesContext, 1000)) : ""}
+${wrapXml('course_content', sanitizeForPrompt(contentSnippet, 2000))}
 
 Genera una flashcard clara y educativa.
 
@@ -328,17 +329,19 @@ Responde en JSON con este schema exacto:
 
         // 7d. Insert into DB (BUG-1: created_by = user.id)
         // NORM-1 FIX: Use shared normalizers for type safety
+        // AI-001 FIX: Validate + sanitize LLM output before insert
         if (action === "quiz_question") {
+          const validated = validateQuizQuestion(g);
           const { data: inserted, error: insertErr } = await db
             .from("quiz_questions")
             .insert({
               summary_id: summaryId,
               keyword_id: kw.id,
               question_type: normalizeQuestionType(g.question_type),
-              question: g.question,
-              options: g.options || null,
-              correct_answer: g.correct_answer,
-              explanation: g.explanation || null,
+              question: validated.question,
+              options: validated.options,
+              correct_answer: validated.correct_answer,
+              explanation: validated.explanation,
               difficulty: normalizeDifficulty(g.difficulty),
               source: "ai",
               created_by: user.id,
@@ -362,13 +365,14 @@ Responde en JSON con este schema exacto:
             keyword_name: kw.name as string,
           });
         } else {
+          const validated = validateFlashcard(g);  // AI-001 FIX: sanitize LLM output
           const { data: inserted, error: insertErr } = await db
             .from("flashcards")
             .insert({
               summary_id: summaryId,
               keyword_id: kw.id,
-              front: g.front,
-              back: g.back,
+              front: validated.front,
+              back: validated.back,
               source: "ai",
               created_by: user.id,
             })

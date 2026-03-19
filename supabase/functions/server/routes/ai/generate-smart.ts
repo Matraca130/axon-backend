@@ -57,6 +57,8 @@ import {
 } from "../../auth-helpers.ts";
 import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.ts";
 import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
+import { sanitizeForPrompt } from "../../prompt-sanitize.ts";
+import { validateQuizQuestion, validateFlashcard } from "../../lib/validate-llm-output.ts";
 
 // PR #103: Extracted modules
 import type { SmartTarget, BulkGeneratedItem, BulkErrorItem } from "./generate-smart-helpers.ts";
@@ -90,9 +92,8 @@ async function fetchTargetContext(
     .limit(3);
 
   if (profNotes && profNotes.length > 0) {
-    profNotesContext =
-      "\nNotas del profesor: " +
-      profNotes.map((n: { note: string }) => n.note).join("; ");
+    const notesJoined = profNotes.map((n: { note: string }) => n.note).join("; ");
+    profNotesContext = sanitizeForPrompt(notesJoined, 1000);
   }
 
   let bktContext = "";
@@ -159,6 +160,7 @@ async function generateAndInsert(
   const generated = parseClaudeJson(result.text) as Record<string, unknown>;
 
   if (action === "quiz_question") {
+    const validated = validateQuizQuestion(generated);  // AI-001 FIX: sanitize LLM output
     const { data: inserted, error: insertErr } = await db
       .from("quiz_questions")
       .insert({
@@ -166,10 +168,10 @@ async function generateAndInsert(
         keyword_id: target.keyword_id,
         subtopic_id: target.subtopic_id,
         question_type: normalizeQuestionType(generated.question_type),
-        question: generated.question,
-        options: generated.options || null,
-        correct_answer: generated.correct_answer,
-        explanation: generated.explanation || null,
+        question: validated.question,
+        options: validated.options,
+        correct_answer: validated.correct_answer,
+        explanation: validated.explanation,
         difficulty: normalizeDifficulty(generated.difficulty),
         source: "ai",
         created_by: userId,
@@ -181,14 +183,15 @@ async function generateAndInsert(
     if (insertErr) throw new Error(`Insert quiz_question failed: ${insertErr.message}`);
     return { data: inserted, tokensUsed: result.tokensUsed };
   } else {
+    const validated = validateFlashcard(generated);  // AI-001 FIX: sanitize LLM output
     const { data: inserted, error: insertErr } = await db
       .from("flashcards")
       .insert({
         summary_id: target.summary_id,
         keyword_id: target.keyword_id,
         subtopic_id: target.subtopic_id,
-        front: generated.front,
-        back: generated.back,
+        front: validated.front,
+        back: validated.back,
         source: "ai",
         created_by: userId,
       })
