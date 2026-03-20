@@ -172,7 +172,8 @@ aiAnalyzeGraphRoutes.post(
     const { data: subtopics, error: stErr } = await db
       .from("subtopics")
       .select("id, keyword_id")
-      .in("keyword_id", keywordIds);
+      .in("keyword_id", keywordIds)
+      .is("deleted_at", null);
 
     if (stErr)
       return err(c, `Failed to fetch subtopics: ${stErr.message}`, 500);
@@ -332,7 +333,12 @@ aiAnalyzeGraphRoutes.post(
     // Filter out AI-hallucinated keyword_ids not in our actual keyword set
     parsed.weak_areas = (parsed.weak_areas || []).filter((wa) => kwNameMap.has(wa.keyword_id));
     parsed.strong_areas = (parsed.strong_areas || []).filter((sa) => kwNameMap.has(sa.keyword_id));
-    parsed.study_path = (parsed.study_path || []).filter((s) => kwNameMap.has(s.keyword_id));
+
+    // Validate study_path actions and keyword_ids
+    const VALID_ACTIONS = new Set(["review", "quiz", "flashcard"]);
+    parsed.study_path = (parsed.study_path || []).filter(
+      (s) => kwNameMap.has(s.keyword_id) && VALID_ACTIONS.has(s.action),
+    );
 
     // missing_connections: Claude returns keyword *names* (not IDs), so check
     // against a name set. Also accept IDs for robustness.

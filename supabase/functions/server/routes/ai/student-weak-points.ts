@@ -103,7 +103,8 @@ aiWeakPointsRoutes.get(
     const { data: subtopics, error: stErr } = await db
       .from("subtopics")
       .select("id, keyword_id")
-      .in("keyword_id", keywordIds);
+      .in("keyword_id", keywordIds)
+      .is("deleted_at", null);
 
     if (stErr)
       return err(c, `Failed to fetch subtopics: ${stErr.message}`, 500);

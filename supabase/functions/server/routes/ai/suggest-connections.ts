@@ -99,8 +99,9 @@ aiSuggestConnectionsRoutes.post(
         return err(c, `Invalid UUID in existing_node_ids: ${nid}`, 400);
     }
 
-    if (!Array.isArray(existing_edge_ids))
-      return err(c, "existing_edge_ids must be an array of strings", 400);
+    // existing_edge_ids is accepted for backward compatibility but unused —
+    // the endpoint fetches existing connections from the DB directly.
+    // No validation needed since it's optional and unused.
 
     // ── 3. Resolve institution from topic ─────────────────────
     const { data: instId, error: instErr } = await db.rpc(
