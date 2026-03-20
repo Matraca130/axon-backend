@@ -146,12 +146,26 @@ Deno.test("guard: xpHookForPlanTaskComplete ignores update without status field"
 // 3. Fire-and-forget — hooks don't throw synchronously
 // ═══════════════════════════════════════════════════════════════
 
-Deno.test("fire-and-forget: xpHookForBatchReviews doesn't throw", () => {
-  // Will fail internally (no DB) but should NOT throw synchronously
-  hooks.xpHookForBatchReviews("user-1", "session-1", [
-    { item_id: "card-1", grade: 4, instrument_type: "flashcard" },
-    { item_id: "card-2", grade: 1, instrument_type: "flashcard" },
-  ]);
+Deno.test({
+  name: "fire-and-forget: xpHookForBatchReviews doesn't throw",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    // Will fail internally (no DB) but should NOT throw synchronously
+    const origWarn = console.warn;
+    const origLog = console.log;
+    console.warn = () => {};
+    console.log = () => {};
+    try {
+      hooks.xpHookForBatchReviews("user-1", "session-1", [
+        { item_id: "card-1", grade: 4, instrument_type: "flashcard" },
+        { item_id: "card-2", grade: 1, instrument_type: "flashcard" },
+      ]);
+    } finally {
+      console.warn = origWarn;
+      console.log = origLog;
+    }
+  },
 });
 
 Deno.test("fire-and-forget: xpHookForVideoComplete doesn't throw", () => {

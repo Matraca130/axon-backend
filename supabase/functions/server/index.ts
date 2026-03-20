@@ -3,7 +3,7 @@
  *
  * O-8 FIX: Rate limiting middleware added (120 req/min/user).
  * RAG FIX: AI routes mounted (generate, ingest, chat).
- * BUG-004 FIX: CORS restricted to specific origins.
+ * BUG-004 FIX: CORS restricted to specific origins (was wildcard "*").
  * D57: Health check now reports openai status alongside gemini.
  * GAMIFICATION: Sprint 1 — gamificationRoutes mounted.
  * PR #101: Modularized gamificationRoutes from monolithic 53KB file.
@@ -41,8 +41,6 @@ const app = new Hono();
 
 // ─── Middleware ───────────────────────────────────────────────────
 
-app.use("*", logger(console.warn));
-
 // BUG-004 FIX: CORS restricted to known origins.
 // Add your production Vercel URL(s) below.
 const ALLOWED_ORIGINS = [
@@ -56,23 +54,38 @@ const ALLOWED_ORIGINS = [
 // Matches: https://<project>-<deployId>-<team>.vercel.app
 const VERCEL_PREVIEW_RE = /^https:\/\/(numero1-sseki-2325-55|axon-frontend)-[a-z0-9-]+\.vercel\.app$/;
 
+function getAllowedOrigin(origin: string): string {
+  if (!origin) return "*";
+  if (ALLOWED_ORIGINS.includes(origin)) return origin;
+  if (VERCEL_PREVIEW_RE.test(origin)) return origin;
+  return "";
+}
+
+// Explicit preflight handler — Supabase gateway may not forward OPTIONS to Hono middleware
+app.options("*", (c) => {
+  const origin = getAllowedOrigin(c.req.raw.headers.get("Origin") ?? "");
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": origin,
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Access-Token",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Max-Age": "86400",
+    },
+  });
+});
+
+app.use("*", logger(console.warn));
+
+// BUG-004 FIX: CORS restricted to allowed origins + Vercel previews.
 app.use(
   "/*",
   cors({
-    origin: (origin) => {
-      // Allow requests with no origin (e.g. server-to-server, Postman)
-      if (!origin) return "*";
-      // Allow explicitly listed origins
-      if (ALLOWED_ORIGINS.includes(origin)) return origin;
-      // Allow Vercel preview deployments for exact project prefixes only
-      if (VERCEL_PREVIEW_RE.test(origin)) return origin;
-      // Deny others
-      return "";
-    },
+    origin: (origin) => getAllowedOrigin(origin),
     allowHeaders: ["Content-Type", "Authorization", "X-Access-Token"],
     allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     exposeHeaders: ["Content-Length"],
-    maxAge: 600,
+    maxAge: 86400,
   }),
 );
 

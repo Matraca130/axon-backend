@@ -406,9 +406,9 @@ export async function executeToolCall(
             ? `Contexto del curso (encontrado por busqueda semantica):\n${finalContext}\n\n---\nPregunta: ${question}`
             : `Pregunta academica (sin contexto disponible del curso): ${question}`,
           systemPrompt:
-            "Eres un tutor universitario experto. Responde de forma clara y concisa en espanol. " +
-            "Maximo 800 caracteres (es para WhatsApp). Si tenes contexto del curso, basate en el. " +
-            "Si no tenes suficiente informacion, decilo honestamente. " +
+            "Eres un tutor universitario experto. Respondé de forma clara y concisa en español. " +
+            "Máximo 800 caracteres (es para WhatsApp). Si tenés contexto del curso, basate en él. " +
+            "Si no tenés suficiente información, decilo honestamente. " +
             (sources.length > 0
               ? `Fuentes encontradas: ${sources.join(", ")}.`
               : ""),

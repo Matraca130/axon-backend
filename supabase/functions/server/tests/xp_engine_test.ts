@@ -28,7 +28,7 @@ Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "fake-service-role-key-for-testing");
 
 // Dynamic import after env vars are set
 const { awardXP, XP_TABLE } = await import("../xp-engine.ts");
-type { AwardXPParams, AwardResult } from "../xp-engine.ts";
+import type { AwardXPParams, AwardResult } from "../xp-engine.ts";
 
 // ═══════════════════════════════════════════════════════════════
 // Mock Supabase Client Factory
@@ -369,62 +369,46 @@ Deno.test("awardXP: returns null on total failure (RPC + fallback both fail)", a
   }
 });
 
-Deno.test("awardXP: handles zero xpBase gracefully", async () => {
-  const db = mockDb({
-    rpcResult: {
-      data: {
-        xp_awarded: 0,
-        xp_base: 0,
-        multiplier: 1.0,
-        bonus_type: null,
-        daily_used: 0,
-        daily_cap: 500,
-        total_xp: 100,
-        level: 2,
-      },
-      error: null,
-    },
-  });
+Deno.test("awardXP: returns null for zero xpBase (G-005 validation)", async () => {
+  const db = mockDb({ rpcResult: { data: null, error: null } });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "badge_earned",
-    xpBase: 0,
-  });
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "badge_earned",
+      xpBase: 0,
+    });
 
-  assertExists(result);
-  assertEquals(result!.xp_awarded, 0);
+    // G-005: xpBase <= 0 is rejected early, returns null
+    assertEquals(result, null);
+  } finally {
+    console.warn = origWarn;
+  }
 });
 
-Deno.test("awardXP: handles negative xpBase for deductions", async () => {
-  const db = mockDb({
-    rpcResult: {
-      data: {
-        xp_awarded: -200,
-        xp_base: -200,
-        multiplier: 1.0,
-        bonus_type: null,
-        daily_used: 0,
-        daily_cap: 500,
-        total_xp: 300,
-        level: 3,
-      },
-      error: null,
-    },
-  });
+Deno.test("awardXP: returns null for negative xpBase (G-005 validation)", async () => {
+  const db = mockDb({ rpcResult: { data: null, error: null } });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "streak_freeze_purchase",
-    xpBase: -200,
-  });
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "streak_freeze_purchase",
+      xpBase: -200,
+    });
 
-  assertExists(result);
-  assertEquals(result!.xp_awarded, -200);
+    // G-005: xpBase <= 0 is rejected early, returns null
+    assertEquals(result, null);
+  } finally {
+    console.warn = origWarn;
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════

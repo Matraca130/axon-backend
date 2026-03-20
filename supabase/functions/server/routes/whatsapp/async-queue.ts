@@ -216,7 +216,7 @@ export async function processNextJob(): Promise<boolean> {
         const phone = await resolvePhone(job.payload);
         await sendText(
           phone,
-          "No pude completar tu solicitud después de varios intentos. Intentá de nuevo más tarde. \uD83D\uDE14",
+          "No pude completar tu solicitud después de varios intentos. Intenta de nuevo más tarde. \uD83D\uDE14",
         );
       } catch { /* best-effort */ }
 

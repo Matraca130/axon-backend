@@ -151,7 +151,7 @@ async function handleCommand(
         "Para empezar, vinculá tu cuenta:\n" +
         "1\ufe0f\u20e3 Abrí axon.app/settings\n" +
         "2\ufe0f\u20e3 Tocá \"Vincular Telegram\"\n" +
-        "3\ufe0f\u20e3 Enviáme el código de 6 dígitos acá\n\n" +
+        "3\ufe0f\u20e3 Envíame el código de 6 dígitos acá\n\n" +
         "Una vez vinculado, podés:\n" +
         "\u2022 Preguntar qué estudiar hoy\n" +
         "\u2022 Ver tu agenda y actualizarla\n" +
@@ -370,7 +370,7 @@ export async function handleIncomingUpdate(c: Context): Promise<Response> {
           "Para empezar, vinculá tu cuenta:\n" +
           "1\ufe0f\u20e3 Abrí axon.app/settings\n" +
           "2\ufe0f\u20e3 Tocá \"Vincular Telegram\"\n" +
-          "3\ufe0f\u20e3 Enviáme el código de 6 dígitos acá\n\n" +
+          "3\ufe0f\u20e3 Envíame el código de 6 dígitos acá\n\n" +
           "¡Listo! Después podés preguntarme cualquier cosa.",
         );
       }
@@ -378,7 +378,7 @@ export async function handleIncomingUpdate(c: Context): Promise<Response> {
   } catch (e) {
     console.error(`[TG-Webhook] Processing error: ${(e as Error).message}`);
     try {
-      await sendTextPlain(chatId, "Algo salió mal. Intentá de nuevo. \ud83d\ude14");
+      await sendTextPlain(chatId, "Algo salió mal. Intenta de nuevo. \ud83d\ude14");
     } catch { /* can't send error message */ }
   }
 

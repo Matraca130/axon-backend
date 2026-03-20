@@ -448,7 +448,7 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
     const errorMsg = (e as Error).message;
     console.error(`[WA-Handler] Fatal: ${errorMsg}`);
     try {
-      await sendText(phone, "Ups, algo salio mal. Intenta de nuevo en unos segundos. \uD83D\uDE14");
+      await sendText(phone, "Ups, algo salió mal. Intenta de nuevo en unos segundos. \uD83D\uDE14");
     } catch { /* */ }
 
     const db = getAdminClient();

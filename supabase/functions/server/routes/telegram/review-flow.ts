@@ -77,7 +77,7 @@ export async function enterReviewMode(
 
   const validCards = validateCards(cards as unknown[]);
   if (!validCards || validCards.length === 0) {
-    await sendTextPlain(chatId, "\ud83c\udf89 No tenés flashcards pendientes. ¡Estás al día!");
+    await sendTextPlain(chatId, "\ud83c\udf89 No tienes flashcards pendientes. ¡Estás al día!");
     return false;
   }
 
@@ -92,7 +92,7 @@ export async function enterReviewMode(
 
   if (sessionErr || !ghostSession) {
     console.error(`[TG-ReviewFlow] Ghost session creation failed: ${sessionErr?.message}`);
-    await sendTextPlain(chatId, "Error al iniciar la sesión. Intentá de nuevo. \ud83d\ude14");
+    await sendTextPlain(chatId, "Error al iniciar la sesión. Intenta de nuevo. \ud83d\ude14");
     return false;
   }
 
@@ -118,7 +118,7 @@ export async function enterReviewMode(
 
   if (updateErr) {
     console.error(`[TG-ReviewFlow] Session update failed: ${updateErr.message}`);
-    await sendTextPlain(chatId, "Error al iniciar. Intentá de nuevo. \ud83d\ude14");
+    await sendTextPlain(chatId, "Error al iniciar. Intenta de nuevo. \ud83d\ude14");
     return false;
   }
 

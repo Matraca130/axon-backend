@@ -82,7 +82,7 @@ export async function enterReviewMode(
   const validCards = validateCards(cards as unknown[]);
 
   if (!validCards || validCards.length === 0) {
-    await sendText(phone, "No tenés flashcards pendientes. \ud83c\udf89 ¡Estás al día!");
+    await sendText(phone, "No tienes flashcards pendientes. \ud83c\udf89 ¡Estás al día!");
     return false;
   }
 
@@ -97,7 +97,7 @@ export async function enterReviewMode(
 
   if (sessionErr || !ghostSession) {
     console.error(`[WA-ReviewFlow] Ghost session creation failed: ${sessionErr?.message}`);
-    await sendText(phone, "Error al iniciar la sesión. Intentá de nuevo. \ud83d\ude14");
+    await sendText(phone, "Error al iniciar la sesión. Intenta de nuevo. \ud83d\ude14");
     return false;
   }
 
@@ -123,7 +123,7 @@ export async function enterReviewMode(
 
   if (updateErr) {
     console.error(`[WA-ReviewFlow] Session update failed: ${updateErr.message}`);
-    await sendText(phone, "Error al iniciar. Intentá de nuevo. \ud83d\ude14");
+    await sendText(phone, "Error al iniciar. Intenta de nuevo. \ud83d\ude14");
     return false;
   }
 
