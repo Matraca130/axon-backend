@@ -19,6 +19,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { PREFIX, authenticate, safeJson, ok, err } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import {
   requireInstitutionRole,
@@ -81,7 +82,7 @@ muxApiRoutes.post(`${PREFIX}/mux/create-upload`, async (c: Context) => {
     status: "uploading", mux_upload_id: muxUploadId,
   }).select("id").single();
 
-  if (dbErr) return err(c, `Insert video failed: ${dbErr.message}`, 500);
+  if (dbErr) return safeErr(c, "Insert video", dbErr);
   return ok(c, { video_id: video.id, upload_url: uploadUrl }, 201);
 });
 
@@ -124,7 +125,7 @@ muxApiRoutes.get(`${PREFIX}/mux/playback-token`, async (c: Context) => {
     ]);
     return ok(c, { token, thumbnail_token: thumbnailToken, storyboard_token: storyboardToken, playback_id: video.mux_playback_id });
   } catch (e) {
-    return err(c, `Failed to build playback token: ${(e as Error).message}`, 500);
+    return safeErr(c, "Build playback token", e instanceof Error ? e : null);
   }
 });
 
@@ -161,7 +162,7 @@ muxApiRoutes.get(`${PREFIX}/mux/video-stats`, async (c: Context) => {
     .select("watch_time_seconds, total_watch_time_seconds, completion_percentage, completed, view_count")
     .eq("video_id", videoId);
 
-  if (dbErr) return err(c, `Fetch video stats failed: ${dbErr.message}`, 500);
+  if (dbErr) return safeErr(c, "Fetch video stats", dbErr);
 
   const totalViewers   = views?.length ?? 0;
   const completedCount = views?.filter((v: any) => v.completed).length ?? 0;
@@ -216,6 +217,6 @@ muxApiRoutes.delete(`${PREFIX}/mux/asset/:video_id`, async (c: Context) => {
     deleted_at: new Date().toISOString(), is_active: false, updated_at: new Date().toISOString(),
   }).eq("id", videoId);
 
-  if (dbErr) return err(c, `Soft-delete video failed: ${dbErr.message}`, 500);
+  if (dbErr) return safeErr(c, "Soft-delete video", dbErr);
   return ok(c, { deleted: videoId });
 });

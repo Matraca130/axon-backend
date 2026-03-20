@@ -26,7 +26,7 @@
  *
  * SECURITY:
  *   - Authenticated (same as all Axon endpoints)
- *   - RLS on subtopics table handles institution scoping
+ *   - Institution scoping handled by requireInstitutionRole (ACCESS-005 fix)
  *   - Filters: deleted_at IS NULL (soft-delete aware)
  *   - Max 50 keyword_ids per request (prevents abuse)
  *
@@ -37,7 +37,9 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
+import { requireInstitutionRole, isDenied, ALL_ROLES } from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
 
 export const subtopicsBatchRoutes = new Hono();
@@ -53,7 +55,7 @@ subtopicsBatchRoutes.get(
   async (c: Context) => {
     const auth = await authenticate(c);
     if (auth instanceof Response) return auth;
-    const { db } = auth;
+    const { user, db } = auth;
 
     // ── Validate keyword_ids ──
     const raw = c.req.query("keyword_ids");
@@ -78,6 +80,24 @@ subtopicsBatchRoutes.get(
       }
     }
 
+    // ACCESS-005 FIX: Verify institution membership via first keyword
+    const { data: institutionId, error: resolveErr } = await db.rpc(
+      "resolve_parent_institution",
+      { p_table: "keywords", p_id: ids[0] },
+    );
+
+    if (resolveErr || !institutionId) {
+      return err(c, "Keyword not found or not accessible", 404);
+    }
+
+    const roleCheck = await requireInstitutionRole(
+      db,
+      user.id,
+      institutionId as string,
+      ALL_ROLES,
+    );
+    if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
     // ── Query subtopics for all keyword_ids at once ──
     // Uses .in() → single SQL WHERE keyword_id IN (...) clause.
     // PostgreSQL optimizes this into an index scan on keyword_id.
@@ -90,7 +110,7 @@ subtopicsBatchRoutes.get(
       .order("order_index", { ascending: true });
 
     if (error) {
-      return err(c, `Batch subtopics failed: ${error.message}`, 500);
+      return safeErr(c, "Batch subtopics", error);
     }
 
     return ok(c, data ?? []);

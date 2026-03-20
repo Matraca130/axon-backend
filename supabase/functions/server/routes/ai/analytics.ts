@@ -21,6 +21,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import {
   requireInstitutionRole,
@@ -79,7 +80,7 @@ aiAnalyticsRoutes.get(`${PREFIX}/ai/rag-analytics`, async (c: Context) => {
   const { data, error } = await db.rpc("rag_analytics_summary", rpcParams);
 
   if (error)
-    return err(c, `Analytics query failed: ${error.message}`, 500);
+    return safeErr(c, "Analytics query", error);
 
   // RPC returns a single row as an array; extract it
   const result = Array.isArray(data) ? data[0] : data;
@@ -125,7 +126,7 @@ aiAnalyticsRoutes.get(`${PREFIX}/ai/embedding-coverage`, async (c: Context) => {
   });
 
   if (error)
-    return err(c, `Coverage query failed: ${error.message}`, 500);
+    return safeErr(c, "Coverage query", error);
 
   const result = Array.isArray(data) ? data[0] : data;
   return ok(c, result || {

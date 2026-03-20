@@ -17,7 +17,7 @@
  *   PF-05 FIX: Security comment about DB query before Gemini call
  *
  * Live-audit fixes applied:
- *   LA-07 FIX: truncateAtWord() respects word boundaries
+ *   LA-07 FIX: truncateForPrompt() respects word boundaries
  *
  * Deploy fixes:
  *   D-18 FIX: Use GENERATE_MODEL constant in _meta (was hardcoded as gemini-2.0-flash)
@@ -32,6 +32,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid, isOneOf } from "../../validate.ts";
 import {
   requireInstitutionRole,
@@ -40,21 +41,14 @@ import {
 } from "../../auth-helpers.ts";
 import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.ts";
 import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
+import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
+import { truncateForPrompt } from "./generate-smart-helpers.ts";
+import { validateQuizQuestion, validateFlashcard } from "../../lib/validate-llm-output.ts";
+import { checkPlanLimit } from "../plans/access.ts";
 
 export const aiGenerateRoutes = new Hono();
 
 const ACTIONS = ["quiz_question", "flashcard"] as const;
-
-// ── LA-07 FIX: Truncate respecting word boundaries ────────────
-function truncateAtWord(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  const truncated = text.substring(0, maxLen);
-  const lastSpace = truncated.lastIndexOf(" ");
-  // Only break at word boundary if it's not too far back (> 80% of maxLen)
-  return lastSpace > maxLen * 0.8
-    ? truncated.substring(0, lastSpace) + "..."
-    : truncated + "...";
-}
 
 aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -92,6 +86,12 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
   );
   if (isDenied(roleCheck))
     return err(c, roleCheck.message, roleCheck.status);
+
+  // ── Plan limit enforcement ──────────────────────────────
+  const planCheck = await checkPlanLimit(db, user.id, instId as string);
+  if (!planCheck.allowed) {
+    return err(c, `Daily AI generation limit reached (${planCheck.limit}). Upgrade your plan.`, 429);
+  }
 
   // ── Fetch summary ──────────────────────────────────────
   const { data: summary } = await db
@@ -141,7 +141,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
       .eq("id", blockId)
       .single();
     if (block) {
-      blockContext = `\nBloque especifico: "${block.heading_text || ""}": ${block.content?.substring(0, 500)}`;
+      blockContext = `\n${wrapXml('block_context', sanitizeForPrompt(`${block.heading_text || ""}: ${block.content || ""}`, 500))}`;
     }
   }
 
@@ -155,8 +155,8 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
     .limit(3);
 
   if (profNotes && profNotes.length > 0) {
-    blockContext += "\nNotas del profesor: " +
-      profNotes.map((n: { note: string }) => n.note).join("; ");
+    const notesJoined = profNotes.map((n: { note: string }) => n.note).join("; ");
+    blockContext += `\n${wrapXml('professor_notes', sanitizeForPrompt(notesJoined, 1000))}`;
   }
 
   // ── Fetch student profile ────────────────────────────────
@@ -185,7 +185,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
 
   // ── Build prompt ───────────────────────────────────────
   // LA-07 FIX: Use truncateAtWord instead of raw substring
-  const contentSnippet = truncateAtWord(
+  const contentSnippet = truncateForPrompt(
     summary.content_markdown || "",
     1500,
   );
@@ -197,15 +197,15 @@ Responde SOLO con JSON valido, sin explicaciones adicionales.`;
 
   if (action === "quiz_question") {
     const wrongCtx = wrongAnswer
-      ? `\nEl alumno respondio incorrectamente: "${wrongAnswer}". Genera una pregunta que aborde este error especifico, reformulando el concepto de otra manera.`
+      ? `\nEl alumno respondio incorrectamente: ${wrapXml("student_answer", sanitizeForPrompt(wrongAnswer, 300))}. Genera una pregunta que aborde este error especifico, reformulando el concepto de otra manera.`
       : "";
 
     userPrompt = `Genera UNA pregunta de quiz sobre:
 Tema: ${summary.title}
-Keyword: ${keyword?.name || "general"} \u2014 ${keyword?.definition || ""}
+Keyword: ${sanitizeForPrompt(keyword?.name || "general", 200)} \u2014 ${keyword?.definition ? sanitizeForPrompt(keyword.definition, 500) : ""}
 ${subtopicName ? `Subtema: ${subtopicName}` : ""}
 ${blockContext}
-Contenido relevante: ${contentSnippet}
+${wrapXml("course_content", contentSnippet)}
 ${profileContext}
 ${bktContext}
 ${wrongCtx}
@@ -224,14 +224,14 @@ Nota: difficulty debe ser un entero: 1 (facil), 2 (medio), 3 (dificil).`;
   } else {
     // flashcard
     const scope = related
-      ? `Genera una flashcard RELACIONADA al keyword "${keyword?.name}".`
+      ? `Genera una flashcard RELACIONADA al keyword "${sanitizeForPrompt(keyword?.name || "general", 200)}".`
       : `Genera una flashcard GENERAL del resumen "${summary.title}".`;
 
     userPrompt = `${scope}
-Keyword: ${keyword?.name || "general"} \u2014 ${keyword?.definition || ""}
+Keyword: ${sanitizeForPrompt(keyword?.name || "general", 200)} \u2014 ${keyword?.definition ? sanitizeForPrompt(keyword.definition, 500) : ""}
 ${subtopicName ? `Subtema: ${subtopicName}` : ""}
 ${blockContext}
-Contenido relevante: ${contentSnippet}
+${wrapXml("course_content", contentSnippet)}
 ${profileContext}
 
 Responde en JSON con este schema exacto:
@@ -256,6 +256,7 @@ Responde en JSON con este schema exacto:
     // ── Insert into DB ───────────────────────────────────
     if (action === "quiz_question") {
       const g = generated as Record<string, unknown>;
+      const validated = validateQuizQuestion(g);  // AI-001 FIX: sanitize LLM output
       const { data: inserted, error: insertErr } = await db
         .from("quiz_questions")
         .insert({
@@ -263,10 +264,10 @@ Responde en JSON con este schema exacto:
           keyword_id: keywordId,
           subtopic_id: subtopicId,
           question_type: normalizeQuestionType(g.question_type),
-          question: g.question,
-          options: g.options || null,
-          correct_answer: g.correct_answer,
-          explanation: g.explanation || null,
+          question: validated.question,
+          options: validated.options,
+          correct_answer: validated.correct_answer,
+          explanation: validated.explanation,
           difficulty: normalizeDifficulty(g.difficulty),
           source: "ai",
           created_by: user.id,  // BUG-1 FIX
@@ -275,7 +276,7 @@ Responde en JSON con este schema exacto:
         .single();
 
       if (insertErr)
-        return err(c, `Insert quiz_question failed: ${insertErr.message}`, 500);
+        return safeErr(c, "Insert quiz_question", insertErr);
 
       return ok(c, {
         ...inserted,
@@ -287,14 +288,15 @@ Responde en JSON con este schema exacto:
       }, 201);
     } else {
       const g = generated as Record<string, unknown>;
+      const validated = validateFlashcard(g);  // AI-001 FIX: sanitize LLM output
       const { data: inserted, error: insertErr } = await db
         .from("flashcards")
         .insert({
           summary_id: summaryId,
           keyword_id: keywordId,
           subtopic_id: subtopicId,
-          front: g.front,
-          back: g.back,
+          front: validated.front,
+          back: validated.back,
           source: "ai",
           created_by: user.id,  // BUG-1 FIX
         })
@@ -302,7 +304,7 @@ Responde en JSON con este schema exacto:
         .single();
 
       if (insertErr)
-        return err(c, `Insert flashcard failed: ${insertErr.message}`, 500);
+        return safeErr(c, "Insert flashcard", insertErr);
 
       return ok(c, {
         ...inserted,
@@ -315,6 +317,6 @@ Responde en JSON con este schema exacto:
     }
   } catch (e) {
     console.error("[AI Generate] Claude error:", e);
-    return err(c, `AI generation failed: ${(e as Error).message}`, 500);
+    return safeErr(c, "AI generation", e instanceof Error ? e : null);
   }
 });

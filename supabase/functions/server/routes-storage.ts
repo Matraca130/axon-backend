@@ -9,6 +9,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX, getAdminClient } from "./db.ts";
+import { safeErr } from "./lib/safe-error.ts";
 import type { Context } from "npm:hono";
 
 const storageRoutes = new Hono();
@@ -46,7 +47,7 @@ async function ensureBucket(): Promise<void> {
       console.error(`[Storage] Failed to create bucket: ${error.message}`);
       throw error;
     }
-    console.log(`[Storage] Created bucket: ${BUCKET_NAME}`);
+    console.warn(`[Storage] Created bucket: ${BUCKET_NAME}`);
   }
   bucketReady = true;
 }
@@ -61,7 +62,7 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
   try {
     await ensureBucket();
   } catch (e) {
-    return err(c, `Storage initialization failed: ${(e as Error).message}`, 500);
+    return safeErr(c, "Storage initialization", e instanceof Error ? e : null);
   }
 
   const contentType = c.req.header("Content-Type") || "";
@@ -161,7 +162,7 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
     });
 
   if (uploadError) {
-    return err(c, `Upload failed: ${uploadError.message}`, 500);
+    return safeErr(c, "File upload", uploadError);
   }
 
   const { data: signedData, error: signedError } = await admin.storage
@@ -176,7 +177,7 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
     );
   }
 
-  console.log(`[Storage] Uploaded: ${storagePath} by user ${user.id}`);
+  console.warn(`[Storage] Uploaded: ${storagePath} by user ${user.id}`);
 
   return ok(
     c,
@@ -194,6 +195,7 @@ storageRoutes.post(`${PREFIX}/storage/upload`, async (c: Context) => {
 storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
+  const { user } = auth;
 
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
@@ -208,12 +210,24 @@ storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
       return err(c, `Maximum ${MAX_BATCH_PATHS} paths per batch request`, 400);
     }
 
+    // Ownership check: every path must belong to the requesting user
+    const unauthorized = (body.paths as string[]).filter(
+      (p: string) => !p.includes(`/${user.id}/`),
+    );
+    if (unauthorized.length > 0) {
+      return err(
+        c,
+        `Cannot generate signed URLs for files owned by another user. Unauthorized paths: ${unauthorized.join(", ")}`,
+        403,
+      );
+    }
+
     const { data, error } = await admin.storage
       .from(BUCKET_NAME)
       .createSignedUrls(body.paths, SIGNED_URL_EXPIRY);
 
     if (error) {
-      return err(c, `Batch signed URL failed: ${error.message}`, 500);
+      return safeErr(c, "Batch signed URL", error);
     }
 
     return ok(c, { signedUrls: data, expiresIn: SIGNED_URL_EXPIRY });
@@ -223,12 +237,21 @@ storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
     return err(c, "Missing 'path' or 'paths' in request body", 400);
   }
 
+  // Ownership check: path must belong to the requesting user
+  if (!(body.path as string).includes(`/${user.id}/`)) {
+    return err(
+      c,
+      "Cannot generate signed URL for a file owned by another user",
+      403,
+    );
+  }
+
   const { data, error } = await admin.storage
     .from(BUCKET_NAME)
     .createSignedUrl(body.path as string, SIGNED_URL_EXPIRY);
 
   if (error) {
-    return err(c, `Signed URL failed: ${error.message}`, 500);
+    return safeErr(c, "Signed URL", error);
   }
 
   return ok(c, {
@@ -269,10 +292,10 @@ storageRoutes.delete(`${PREFIX}/storage/delete`, async (c: Context) => {
   const { error } = await admin.storage.from(BUCKET_NAME).remove(paths);
 
   if (error) {
-    return err(c, `Delete failed: ${error.message}`, 500);
+    return safeErr(c, "Storage delete", error);
   }
 
-  console.log(
+  console.warn(
     `[Storage] Deleted ${paths.length} file(s) by user ${user.id}`,
   );
   return ok(c, { deleted: paths });

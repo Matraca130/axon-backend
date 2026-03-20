@@ -33,8 +33,8 @@ import {
   type ChunkOptions,
   type ChunkResult,
 } from "./chunker.ts";
-import { chunkSemantic } from "./semantic-chunker.ts";
-import { generateEmbedding } from "./openai-embeddings.ts";
+import { chunkSemantic, type SemanticChunkResult } from "./semantic-chunker.ts";
+import { generateEmbedding, generateEmbeddings } from "./openai-embeddings.ts";
 import { getAdminClient } from "./db.ts";
 
 // ─── Public Types ───────────────────────────────────────────────────
@@ -86,6 +86,21 @@ export async function embedSummaryContent(
   }
 }
 
+// ─── Advisory Lock ──────────────────────────────────────────────────
+
+/**
+ * Compute a stable advisory lock key from a UUID string.
+ * pg_try_advisory_lock uses bigint; we hash the summaryId to get a
+ * deterministic 32-bit integer (safe for advisory lock).
+ */
+function advisoryLockKey(summaryId: string): number {
+  let hash = 0;
+  for (let i = 0; i < summaryId.length; i++) {
+    hash = ((hash << 5) - hash + summaryId.charCodeAt(i)) | 0;
+  }
+  return hash;
+}
+
 // ─── Entry Point ────────────────────────────────────────────────────
 
 export async function autoChunkAndEmbed(
@@ -96,7 +111,29 @@ export async function autoChunkAndEmbed(
 ): Promise<AutoIngestResult> {
   const t0 = Date.now();
   const adminDb = getAdminClient();
+  const lockKey = advisoryLockKey(summaryId);
 
+  // Acquire advisory lock to prevent concurrent ingest of the same summary
+  const { data: lockAcquired } = await adminDb.rpc("try_advisory_lock", {
+    lock_key: lockKey,
+  });
+
+  if (!lockAcquired) {
+    console.info(
+      `[Auto-Ingest] Skipping summary ${summaryId} — advisory lock not acquired`,
+    );
+    return {
+      summary_id: summaryId,
+      chunks_created: 0,
+      embeddings_generated: 0,
+      embeddings_failed: 0,
+      strategy_used: "skipped_locked",
+      summary_embedded: false,
+      elapsed_ms: Date.now() - t0,
+    };
+  }
+
+  try {
   console.info(
     `[Auto-Ingest] Processing summary ${summaryId} (institution: ${institutionId})`,
   );
@@ -144,11 +181,15 @@ export async function autoChunkAndEmbed(
 
   // Step 3b: Execute chosen strategy
   let chunks: ChunkResult[];
+  // Paragraph embeddings from semantic chunker — reused to skip re-embedding
+  let paragraphEmbeddings: Map<string, number[]> = new Map();
 
   if (selectedStrategy === "semantic") {
     // D57: embedFn no longer needs taskType
     const embedFn = (text: string) => generateEmbedding(text);
-    chunks = await chunkSemantic(fullText, embedFn, options);
+    const semanticResult: SemanticChunkResult = await chunkSemantic(fullText, embedFn, options);
+    chunks = semanticResult.chunks;
+    paragraphEmbeddings = semanticResult.paragraphEmbeddings;
   } else {
     chunks = chunkMarkdown(fullText, options);
   }
@@ -210,18 +251,57 @@ export async function autoChunkAndEmbed(
     );
   }
 
-  // Step 7: Generate chunk embeddings
+  // Step 7: Generate chunk embeddings (batch, with sequential fallback)
   let generated = 0;
   let failed = 0;
 
-  for (let i = 0; i < inserted.length; i++) {
-    try {
-      // D57: No taskType needed for OpenAI embeddings
-      const embedding = await generateEmbedding(chunks[i].content);
+  try {
+    // Task 4.8: Reuse semantic chunker embeddings where chunk matches a paragraph
+    const reusedEmbeddings: (number[] | null)[] = chunks.map((chunk) => {
+      if (paragraphEmbeddings.size > 0) {
+        const cached = paragraphEmbeddings.get(chunk.content);
+        if (cached) return cached;
+      }
+      return null;
+    });
 
+    // Only call OpenAI for chunks that don't have a reusable embedding
+    const textsToEmbed: string[] = [];
+    const embedIndices: number[] = [];
+    for (let i = 0; i < chunks.length; i++) {
+      if (!reusedEmbeddings[i]) {
+        textsToEmbed.push(chunks[i].content);
+        embedIndices.push(i);
+      }
+    }
+
+    let newEmbeddings: number[][] = [];
+    if (textsToEmbed.length > 0) {
+      newEmbeddings = await generateEmbeddings(textsToEmbed);
+    }
+
+    // Merge reused and newly generated embeddings
+    const allEmbeddings: number[][] = new Array(chunks.length);
+    let newIdx = 0;
+    for (let i = 0; i < chunks.length; i++) {
+      if (reusedEmbeddings[i]) {
+        allEmbeddings[i] = reusedEmbeddings[i]!;
+      } else {
+        allEmbeddings[i] = newEmbeddings[newIdx++];
+      }
+    }
+
+    const reusedCount = chunks.length - textsToEmbed.length;
+    if (reusedCount > 0) {
+      console.info(
+        `[Auto-Ingest] Reused ${reusedCount}/${chunks.length} embeddings from semantic chunker`,
+      );
+    }
+
+    for (let i = 0; i < inserted.length; i++) {
       const { error: embedErr } = await adminDb
         .from("chunks")
-        .update({ embedding: JSON.stringify(embedding) })
+        .update({ embedding: JSON.stringify(allEmbeddings[i]) })
         .eq("id", inserted[i].id);
 
       if (embedErr) {
@@ -233,16 +313,42 @@ export async function autoChunkAndEmbed(
       } else {
         generated++;
       }
+    }
+  } catch (batchErr) {
+    // Fallback: sequential embedding on batch failure
+    console.warn(
+      `[Auto-Ingest] Batch embedding failed, falling back to sequential: ${(batchErr as Error).message}`,
+    );
 
-      if (generated > 0 && generated % 10 === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+    for (let i = 0; i < inserted.length; i++) {
+      try {
+        const embedding = await generateEmbedding(chunks[i].content);
+
+        const { error: embedErr } = await adminDb
+          .from("chunks")
+          .update({ embedding: JSON.stringify(embedding) })
+          .eq("id", inserted[i].id);
+
+        if (embedErr) {
+          failed++;
+          console.warn(
+            `[Auto-Ingest] Embedding UPDATE failed for chunk ${inserted[i].id}: ` +
+              embedErr.message,
+          );
+        } else {
+          generated++;
+        }
+
+        if (generated > 0 && generated % 10 === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      } catch (e) {
+        failed++;
+        console.warn(
+          `[Auto-Ingest] Embedding generation failed for chunk ${inserted[i].id}: ` +
+            (e as Error).message,
+        );
       }
-    } catch (e) {
-      failed++;
-      console.warn(
-        `[Auto-Ingest] Embedding generation failed for chunk ${inserted[i].id}: ` +
-          (e as Error).message,
-      );
     }
   }
 
@@ -277,4 +383,11 @@ export async function autoChunkAndEmbed(
     summary_embedded: summaryEmbedded,
     elapsed_ms: elapsed,
   };
+
+  } finally {
+    // Release advisory lock
+    await adminDb.rpc("advisory_unlock", { lock_key: lockKey }).catch((e: Error) => {
+      console.warn(`[Auto-Ingest] Failed to release advisory lock for ${summaryId}:`, e.message);
+    });
+  }
 }

@@ -16,6 +16,7 @@ import { sendTextPlain, answerCallbackQuery } from "./tg-client.ts";
 import { handleMessage } from "./handler.ts";
 import { verifyLinkCode, isLinkingCode } from "./link.ts";
 import { checkTelegramRateLimit, sendRateLimitMessage } from "./tg-rate-limit.ts";
+import { timingSafeEqual } from "../../timing-safe.ts";
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -120,12 +121,13 @@ async function lookupLinkedUser(
 function verifyWebhookSecret(c: Context): boolean {
   const secret = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
   if (!secret) {
-    // No secret configured — allow all (for development)
-    return true;
+    console.error("[TG-Webhook] CRITICAL: TELEGRAM_WEBHOOK_SECRET not configured — rejecting all webhooks");
+    return false;
   }
 
   const headerSecret = c.req.header("X-Telegram-Bot-Api-Secret-Token");
-  return headerSecret === secret;
+  if (!headerSecret) return false;
+  return timingSafeEqual(headerSecret, secret);
 }
 
 // ─── Command Handler ─────────────────────────────────────
@@ -268,7 +270,7 @@ export async function handleIncomingUpdate(c: Context): Promise<Response> {
   // ── Dedup check ──
   try {
     if (await isDuplicate(chatId, tgMessageId)) {
-      console.log(`[TG-Webhook] Duplicate ${tgMessageId}, ignoring`);
+      console.warn(`[TG-Webhook] Duplicate ${tgMessageId}, ignoring`);
       return c.text("OK", 200);
     }
   } catch (e) {
@@ -287,7 +289,7 @@ export async function handleIncomingUpdate(c: Context): Promise<Response> {
     messageType = "command";
   }
 
-  console.log(
+  console.warn(
     `[TG-Webhook] ${fromUser?.first_name ?? "?"} (@${username ?? "?"}): ` +
     `type=${messageType}, text="${textContent.slice(0, 80)}"`,
   );
@@ -381,7 +383,7 @@ export async function handleIncomingUpdate(c: Context): Promise<Response> {
   }
 
   const latencyMs = Date.now() - startMs;
-  console.log(`[TG-Webhook] Completed in ${latencyMs}ms`);
+  console.warn(`[TG-Webhook] Completed in ${latencyMs}ms`);
 
   return c.text("OK", 200);
 }

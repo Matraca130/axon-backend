@@ -76,7 +76,7 @@ export async function generateLinkCode(c: Context): Promise<Response> {
     return err(c, "Error al generar código. Intenta de nuevo.", 500);
   }
 
-  console.log(`[TG-Link] Code ****${code.slice(-2)} generated for user ${user.id}`);
+  console.warn(`[TG-Link] Code ****${code.slice(-2)} generated for user ${user.id}`);
 
   return ok(c, {
     code,
@@ -158,13 +158,39 @@ export async function verifyLinkCode(
     .delete()
     .eq("chat_id", matchingSession.chat_id);
 
-  console.log(`[TG-Link] Telegram linked for user ${userId}. Chat: ${chatId}`);
+  console.warn(`[TG-Link] Telegram linked for user ${userId}. Chat: ${chatId}`);
 
   return { success: true, userId };
 }
 
 export function isLinkingCode(text: string): boolean {
   return /^\d{6}$/.test(text.trim());
+}
+
+// ─── Link Status ────────────────────────────────────────
+
+export async function getLinkStatus(c: Context): Promise<Response> {
+  const auth = await authenticate(c);
+  if (auth instanceof Response) return auth;
+  const { user } = auth;
+  const db = getAdminClient();
+
+  const { data: link, error } = await db
+    .from("telegram_links")
+    .select("username, linked_at")
+    .eq("user_id", user.id)
+    .eq("is_active", true)
+    .single();
+
+  // PGRST116 = no rows found (not an error, just unlinked)
+  if (error && error.code !== "PGRST116") {
+    return err(c, "Error checking Telegram link status", 500);
+  }
+
+  if (link) {
+    return ok(c, { is_linked: true, username: link.username, linked_at: link.linked_at });
+  }
+  return ok(c, { is_linked: false });
 }
 
 // ─── Unlink Telegram ─────────────────────────────────────

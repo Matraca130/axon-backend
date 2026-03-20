@@ -21,6 +21,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 
 export const aiFeedbackRoutes = new Hono();
@@ -56,7 +57,7 @@ aiFeedbackRoutes.patch(`${PREFIX}/ai/rag-feedback`, async (c: Context) => {
     if (error.code === "PGRST116") {
       return err(c, "Log entry not found or not owned by you", 404);
     }
-    return err(c, `Failed to update feedback: ${error.message}`, 500);
+    return safeErr(c, "Update feedback", error);
   }
 
   return ok(c, { updated: data });

@@ -11,6 +11,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX, getAdminClient } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import { computeStreakStatus, performDailyCheckIn } from "../../streak-engine.ts";
 import { awardXP, XP_TABLE } from "../../xp-engine.ts";
@@ -34,7 +35,7 @@ streakRoutes.get(`${PREFIX}/gamification/streak-status`, async (c: Context) => {
     const status = await computeStreakStatus(db, user.id, institutionId);
     return ok(c, status);
   } catch (e) {
-    return err(c, `Streak status failed: ${(e as Error).message}`, 500);
+    return safeErr(c, "Streak status", e instanceof Error ? e : null);
   }
 });
 
@@ -80,11 +81,13 @@ streakRoutes.post(`${PREFIX}/gamification/daily-check-in`, async (c: Context) =>
 
     return ok(c, result);
   } catch (e) {
-    return err(c, `Daily check-in failed: ${(e as Error).message}`, 500);
+    return safeErr(c, "Daily check-in", e instanceof Error ? e : null);
   }
 });
 
 // --- POST /gamification/streak-freeze/buy ---
+// Primary: atomic SQL RPC (buy_streak_freeze) — prevents race condition double-spend.
+// Fallback: original read-then-write JS pattern if RPC not yet deployed.
 
 streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -98,6 +101,49 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
 
   const adminDb = getAdminClient();
 
+  // --- Primary path: atomic SQL RPC ---
+  try {
+    const { data, error: rpcErr } = await adminDb.rpc("buy_streak_freeze", {
+      p_student_id: user.id,
+      p_institution_id: institutionId,
+      p_cost: FREEZE_COST_XP,
+    });
+
+    if (!rpcErr && data) {
+      const result = data as Record<string, unknown>;
+
+      if (result.error === "max_freezes_reached") {
+        return err(
+          c,
+          `Ya tienes el maximo de ${result.max_freezes} streak freezes. Usa uno antes de comprar mas.`,
+          400,
+        );
+      }
+      if (result.error === "insufficient_xp") {
+        return err(
+          c,
+          `No tienes suficiente XP. Necesitas ${FREEZE_COST_XP} XP, tienes ${result.balance}.`,
+          400,
+        );
+      }
+
+      return ok(c, {
+        freeze: { id: result.freeze_id },
+        xp_spent: result.xp_spent,
+        remaining_xp: result.remaining_xp,
+        freezes_owned: result.freezes_owned,
+      });
+    }
+
+    // RPC failed — fall through to JS fallback
+    if (rpcErr) {
+      console.warn("[Streak Freeze] RPC failed, falling back to JS:", rpcErr.message);
+    }
+  } catch (e) {
+    console.warn("[Streak Freeze] RPC exception, falling back to JS:", (e as Error).message);
+  }
+
+  // --- Fallback path: original read-then-write pattern ---
   const { count: currentFreezes, error: countErr } = await adminDb
     .from("streak_freezes")
     .select("id", { count: "exact", head: true })
@@ -106,7 +152,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
     .is("used_on", null);
 
   if (countErr) {
-    return err(c, `Freeze count check failed: ${countErr.message}`, 500);
+    return safeErr(c, "Freeze count check", countErr);
   }
 
   if ((currentFreezes ?? 0) >= MAX_FREEZES) {
@@ -125,7 +171,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
     .maybeSingle();
 
   if (xpErr) {
-    return err(c, `XP check failed: ${xpErr.message}`, 500);
+    return safeErr(c, "XP check", xpErr);
   }
 
   const totalXp = xpData?.total_xp ?? 0;
@@ -148,7 +194,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
     .eq("institution_id", institutionId);
 
   if (deductErr) {
-    return err(c, `XP deduction failed: ${deductErr.message}`, 500);
+    return safeErr(c, "XP deduction", deductErr);
   }
 
   // G-001 FIX: Include freeze_type and xp_cost in INSERT
@@ -173,7 +219,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
       .eq("student_id", user.id)
       .eq("institution_id", institutionId);
 
-    return err(c, `Freeze creation failed: ${freezeErr.message}`, 500);
+    return safeErr(c, "Freeze creation", freezeErr);
   }
 
   await adminDb.from("xp_transactions").insert({
@@ -231,7 +277,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
     .maybeSingle();
 
   if (xpErr) {
-    return err(c, `XP check failed: ${xpErr.message}`, 500);
+    return safeErr(c, "XP check", xpErr);
   }
 
   const totalXp = xpData?.total_xp ?? 0;
@@ -253,7 +299,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
     .eq("institution_id", institutionId);
 
   if (deductErr) {
-    return err(c, `XP deduction failed: ${deductErr.message}`, 500);
+    return safeErr(c, "XP deduction", deductErr);
   }
 
   const today = new Date().toISOString().split("T")[0];
@@ -273,7 +319,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
       .eq("student_id", user.id)
       .eq("institution_id", institutionId);
 
-    return err(c, `Streak restore failed: ${statsErr.message}`, 500);
+    return safeErr(c, "Streak restore", statsErr);
   }
 
   // A-004 FIX: Include institution_id and repair_date in INSERT

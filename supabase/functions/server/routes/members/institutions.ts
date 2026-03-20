@@ -17,6 +17,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, getAdminClient, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -61,7 +62,8 @@ institutionRoutes.post(instBase, async (c: Context) => {
     .from("institutions").insert(instRow).select().single();
 
   if (instError) {
-    return err(c, `Create institution failed: ${instError.message}`, instError.message.includes("duplicate") ? 409 : 500);
+    const status = instError.message?.includes("duplicate") ? 409 : 500;
+    return safeErr(c, "Create institution", instError, status);
   }
 
   const { error: memError } = await admin.from("memberships").insert({
@@ -71,7 +73,7 @@ institutionRoutes.post(instBase, async (c: Context) => {
   if (memError) {
     console.error(`[Axon] Owner membership failed for institution ${institution.id}, rolling back: ${memError.message}`);
     await admin.from("institutions").delete().eq("id", institution.id);
-    return err(c, `Owner membership creation failed (institution rolled back): ${memError.message}`, 500);
+    return safeErr(c, "Owner membership creation", memError);
   }
 
   return ok(c, institution, 201);
@@ -89,14 +91,14 @@ institutionRoutes.get(instBase, async (c: Context) => {
     .select(`
       id, role, is_active, created_at,
       institution:institutions (
-        id, name, slug, logo_url, owner_id, is_active, settings, created_at, updated_at
+        id, name, slug, logo_url, owner_id, is_active, settings, ai_model, created_at, updated_at
       )
     `)
     .eq("user_id", user.id)
     .eq("is_active", true)
     .order("created_at", { ascending: true });
 
-  if (error) return err(c, `List institutions failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "List institutions", error);
 
   const institutions = (data ?? [])
     .filter((m: Record<string, unknown>) => m.institution && (m.institution as Record<string, unknown>).is_active !== false)
@@ -123,7 +125,7 @@ institutionRoutes.get(`${instBase}/:id`, async (c: Context) => {
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   const { data, error } = await db.from("institutions").select("*").eq("id", id).single();
-  if (error) return err(c, `Get institution ${id} failed: ${error.message}`, 404);
+  if (error) return safeErr(c, "Get institution", error, 404);
   return ok(c, data);
 });
 
@@ -144,8 +146,8 @@ institutionRoutes.put(`${instBase}/:id`, async (c: Context) => {
   if (!body) return err(c, "Invalid or missing JSON body", 400);
 
   // H-2 FIX: Owner-only fields — admins cannot change slug or deactivate
-  const ownerOnlyFields = ["slug", "is_active"];
-  const allowedFields = ["name", "slug", "logo_url", "settings", "is_active"];
+  const ownerOnlyFields = ["slug", "is_active", "ai_model"];
+  const allowedFields = ["name", "slug", "logo_url", "settings", "is_active", "ai_model"];
   const patch: Record<string, unknown> = {};
 
   for (const f of allowedFields) {
@@ -162,9 +164,13 @@ institutionRoutes.put(`${instBase}/:id`, async (c: Context) => {
     return err(c, "Invalid slug format", 400);
   }
 
+  if (patch.ai_model !== undefined && !["sonnet", "opus"].includes(patch.ai_model as string)) {
+    return err(c, "ai_model must be 'sonnet' or 'opus'", 400);
+  }
+
   patch.updated_at = new Date().toISOString();
   const { data, error } = await db.from("institutions").update(patch).eq("id", id).select().single();
-  if (error) return err(c, `Update institution ${id} failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Update institution", error);
   return ok(c, data);
 });
 
@@ -186,6 +192,6 @@ institutionRoutes.delete(`${instBase}/:id`, async (c: Context) => {
     .update({ is_active: false, updated_at: new Date().toISOString() })
     .eq("id", id).eq("is_active", true).select().single();
 
-  if (error) return err(c, `Deactivate institution ${id} failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Deactivate institution", error);
   return ok(c, data);
 });

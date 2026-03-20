@@ -31,6 +31,7 @@
 // D57: Embeddings from OpenAI, text generation from Claude
 import { generateEmbedding } from "./openai-embeddings.ts";
 import { generateText, parseClaudeJson } from "./claude-ai.ts";
+import { sanitizeForPrompt, wrapXml } from "./prompt-sanitize.ts";
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -85,7 +86,8 @@ export function selectStrategy(
 
   // R1 FIX: Deep conversation history has highest priority (after scoped)
   // Multi-turn dialog → reformulations catch context from prior messages
-  if (historyLength > 2) return "multi_query";
+  // Task 4.4: Raise threshold from > 2 to > 4 — avoid multi_query overhead for short conversations
+  if (historyLength > 4) return "multi_query";
 
   const wordCount = message.trim().split(/\s+/).length;
 
@@ -117,7 +119,7 @@ export async function generateMultiQueries(
 Cada reformulación debe usar sinónimos o enfocar un aspecto diferente del tema.
 No repitas la pregunta original.
 
-Pregunta original: "${originalQuery}"
+${wrapXml('original_query', sanitizeForPrompt(originalQuery, 500))}
 
 Responde SOLO con JSON: { "queries": ["reformulacion1", "reformulacion2"] }`,
       systemPrompt:
@@ -159,7 +161,7 @@ export async function generateHypotheticalDocument(
     const result = await generateText({
       prompt: `Escribe un párrafo corto (2-3 oraciones) que responda directamente esta pregunta de estudio, como si fuera un fragmento de un libro de texto universitario.
 
-Pregunta: "${query}"
+${wrapXml('query', sanitizeForPrompt(query, 500))}
 
 Responde SOLO con el párrafo, sin explicaciones adicionales ni prefijos.`,
       systemPrompt:
@@ -203,16 +205,14 @@ export async function rerankWithClaude(
     const chunkList = chunks
       .map(
         (c, i) =>
-          `[${i}] (de "${c.summary_title}"): ${c.content.slice(0, 300)}${
-            c.content.length > 300 ? "..." : ""
-          }`,
+          `[${i}] (de "${sanitizeForPrompt(c.summary_title, 100)}"): ${sanitizeForPrompt(c.content, 300)}`,
       )
       .join("\n");
 
     const result = await generateText({
       prompt: `Evalúa la relevancia de cada fragmento para responder esta pregunta de estudio.
 
-Pregunta: "${query}"
+${wrapXml('query', sanitizeForPrompt(query, 500))}
 
 Fragmentos:
 ${chunkList}
@@ -225,6 +225,7 @@ Para cada fragmento, asigna un score de 0 a 10 donde:
 Responde SOLO con JSON: { "scores": [score0, score1, ...] }`,
       systemPrompt:
         "Eres un evaluador de relevancia semántica para contenido educativo. Responde SOLO con JSON válido.",
+      model: "haiku",
       jsonMode: true,
       temperature: 0.0,
       maxTokens: 128,

@@ -17,16 +17,8 @@
  * v4.2 ADDITIONS:
  *   - Leech detection: tracks consecutive_lapses on fsrs_states
  *   - is_leech flag when consecutive_lapses >= leech_threshold
- *   - leech_threshold read from algorithm_config (default 8)
- *   - PATH B response includes consecutive_lapses + is_leech
  *
- * BACKWARD COMPATIBILITY:
- *   Old frontends that send fsrs_update/bkt_update continue working
- *   exactly as before. New frontends that send only grade get server-side
- *   computation. Both can coexist in the same batch.
- *
- * PERF M1: Eliminates the 3-POST-per-card pattern.
- *   New pattern: 1 HTTP request per session.
+ * PR #104: Extracted validators/types to batch-review-validators.ts
  *
  * GAMIFICATION (PR #99): xpHookForBatchReviews awards per-review XP
  *   fire-and-forget after successful batch processing.
@@ -35,38 +27,31 @@
 import { Hono } from "npm:hono";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
-import {
-  isUuid,
-  isNum,
-  isNonNeg,
-  isNonNegInt,
-  isIsoTs,
-  isProbability,
-  inRange,
-  isOneOf,
-  isNonEmpty,
-} from "../../validate.ts";
+import { isUuid } from "../../validate.ts";
 import { atomicUpsert } from "./progress.ts";
 import type { Context } from "npm:hono";
 
 // ── PATH B imports: server-side FSRS + BKT compute ──────────
 import { computeFsrsV4Update } from "../../lib/fsrs-v4.ts";
 import { computeBktV4Update } from "../../lib/bkt-v4.ts";
-import { THRESHOLDS } from "../../lib/types.ts";
-import type { FsrsGrade, FsrsCardState } from "../../lib/types.ts";
+import { THRESHOLDS, BKT_WEIGHTS } from "../../lib/types.ts";
+import type { FsrsCardState } from "../../lib/types.ts";
 
 // ── Gamification: batch XP hook ──────────────────────────────
 import { xpHookForBatchReviews } from "../../xp-hooks.ts";
 
+// ── PR #104: Extracted validators ─────────────────────────
+import type { ReviewItem, ComputedResult } from "./batch-review-validators.ts";
+import {
+  MAX_BATCH_SIZE,
+  DEFAULT_LEECH_THRESHOLD,
+  mapToFsrsGrade,
+  validateReviewItem,
+} from "./batch-review-validators.ts";
+
 export const batchReviewRoutes = new Hono();
 
-// ─── Constants ────────────────────────────────────────────────────
-
-const MAX_BATCH_SIZE = 100;
-const FSRS_STATES = ["new", "learning", "review", "relearning"] as const;
-const DEFAULT_LEECH_THRESHOLD = 8;
-
-// ─── Session Ownership (same logic as reviews.ts) ─────────────────
+// ─── Session Ownership (same logic as reviews.ts) ───────────────
 
 async function verifySessionOwnership(
   db: SupabaseClient,
@@ -82,25 +67,16 @@ async function verifySessionOwnership(
 
   if (sessionErr) return `Session lookup failed: ${sessionErr.message}`;
   if (!session) return "Session not found or does not belong to you";
-  return null; // OK
+  return null;
 }
 
-// ─── Leech Threshold Loader ───────────────────────────────────────
+// ─── Leech Threshold Loader ─────────────────────────────────
 
 async function loadLeechThreshold(
   db: SupabaseClient,
-  userId: string,
+  _userId: string,
 ): Promise<number> {
   try {
-    const { data } = await db
-      .from("algorithm_config")
-      .select("leech_threshold")
-      .in("institution_id", [
-        // Try institution-specific first via subquery workaround
-      ])
-      .maybeSingle();
-
-    // Simpler approach: global default
     const { data: globalData } = await db
       .from("algorithm_config")
       .select("leech_threshold")
@@ -113,171 +89,148 @@ async function loadLeechThreshold(
   }
 }
 
-// ─── Grade Mapping (PATH B) ───────────────────────────────────────
+// ─── Keyword BKT Propagation (spec §4.2) ─────────────────────
+// After a flashcard/quiz review updates its subtopic's BKT state,
+// propagate a weighted BKT update to ALL sibling subtopics under
+// the same keyword. Fire-and-forget: errors are logged, not thrown.
 
-function mapToFsrsGrade(grade: number): FsrsGrade {
-  if (grade <= 1) return 1; // Again
-  if (grade === 2) return 2; // Hard
-  if (grade === 3) return 3; // Good
-  if (grade === 4) return 4; // Easy
-  return 4; // Easy (SM-2 grade 5 legacy)
-}
+async function propagateKeywordBkt(
+  db: SupabaseClient,
+  userId: string,
+  itemId: string,
+  instrumentType: string,
+  isCorrect: boolean,
+  sourceSubtopicId: string | undefined,
+): Promise<string | undefined> {
+  try {
+    // Input validation
+    if (!["quiz", "flashcard"].includes(instrumentType)) {
+      console.warn(`[KW-BKT] Invalid instrumentType: ${instrumentType}`);
+      return `Invalid instrumentType: ${instrumentType}`;
+    }
 
-// ─── Item Validators ──────────────────────────────────────────────
+    // 1. Determine the source table based on instrument type
+    const table = instrumentType === "quiz" ? "quiz_questions" : "flashcards";
 
-interface ReviewItem {
-  item_id: string;
-  instrument_type: string;
-  grade: number;
-  response_time_ms?: number;
-  subtopic_id?: string;
-  fsrs_update?: {
-    stability: number;
-    difficulty: number;
-    due_at: string;
-    last_review_at: string;
-    reps: number;
-    lapses: number;
-    state: string;
-  };
-  bkt_update?: {
-    subtopic_id: string;
-    p_know: number;
-    p_transit: number;
-    p_slip: number;
-    p_guess: number;
-    delta: number;
-    total_attempts: number;
-    correct_attempts: number;
-    last_attempt_at: string;
-  };
-}
+    // 2. Look up the item's keyword_id
+    const { data: item, error: itemErr } = await db
+      .from(table)
+      .select("keyword_id")
+      .eq("id", itemId)
+      .maybeSingle();
 
-// ─── PATH B computed result type (returned in response) ───────────
+    if (itemErr || !item?.keyword_id) {
+      if (itemErr) {
+        console.warn(`[KW-BKT] Failed to look up ${table} keyword_id:`, itemErr.message);
+        return `Failed to look up keyword: ${itemErr.message}`;
+      }
+      return; // No keyword linked — nothing to propagate (not an error)
+    }
 
-interface ComputedResult {
-  item_id: string;
-  fsrs?: {
-    stability: number;
-    difficulty: number;
-    due_at: string;
-    state: string;
-    reps: number;
-    lapses: number;
-    consecutive_lapses: number;
-    is_leech: boolean;
-  };
-  bkt?: {
-    subtopic_id: string;
-    p_know: number;
-    max_p_know: number;
-    delta: number;
-  };
-}
+    const keywordId = item.keyword_id as string;
 
-function validateReviewItem(
-  item: Record<string, unknown>,
-  index: number,
-): { valid: ReviewItem; error: null } | { valid: null; error: string } {
-  const prefix = `reviews[${index}]`;
+    // 3. Find all subtopics under this keyword
+    const { data: subtopics, error: subErr } = await db
+      .from("subtopics")
+      .select("id")
+      .eq("keyword_id", keywordId)
+      .is("deleted_at", null);
 
-  if (!isUuid(item.item_id))
-    return { valid: null, error: `${prefix}.item_id must be a valid UUID` };
-  if (!isNonEmpty(item.instrument_type))
-    return { valid: null, error: `${prefix}.instrument_type must be a non-empty string` };
-  if (!inRange(item.grade, 0, 5))
-    return { valid: null, error: `${prefix}.grade must be in [0, 5]` };
-  if (item.response_time_ms !== undefined && !isNonNegInt(item.response_time_ms))
-    return { valid: null, error: `${prefix}.response_time_ms must be a non-negative integer` };
+    if (subErr || !subtopics || subtopics.length === 0) {
+      if (subErr) {
+        console.warn("[KW-BKT] Failed to look up subtopics:", subErr.message);
+        return `Failed to look up subtopics: ${subErr.message}`;
+      }
+      return; // No subtopics — nothing to propagate
+    }
 
-  let subtopicId: string | undefined = undefined;
-  if (item.subtopic_id !== undefined) {
-    if (!isUuid(item.subtopic_id))
-      return { valid: null, error: `${prefix}.subtopic_id must be a valid UUID` };
-    subtopicId = item.subtopic_id as string;
+    // 4. Determine the weight for this instrument type
+    const weight = instrumentType === "quiz"
+      ? BKT_WEIGHTS.quiz
+      : BKT_WEIGHTS.flashcard;
+
+    const nowIso = new Date().toISOString();
+
+    // 5. Filter out source subtopic and collect IDs for batch fetch
+    const targetSubtopics = subtopics.filter(s => s.id !== sourceSubtopicId);
+    if (targetSubtopics.length === 0) return;
+
+    const targetIds = targetSubtopics.map(s => s.id);
+
+    // 6. BATCH fetch all existing BKT states in ONE query (fixes N+1)
+    const { data: allBktStates, error: batchErr } = await db
+      .from("bkt_states")
+      .select("subtopic_id, p_know, max_p_know, total_attempts, correct_attempts, p_transit, p_slip, p_guess")
+      .eq("student_id", userId)
+      .in("subtopic_id", targetIds);
+
+    if (batchErr) {
+      console.warn("[KW-BKT] Batch fetch failed:", batchErr.message);
+      return `Batch fetch failed: ${batchErr.message}`;
+    }
+
+    // Create lookup map for O(1) access
+    const bktMap = new Map(
+      (allBktStates ?? []).map(s => [s.subtopic_id, s])
+    );
+
+    // 7. Compute weighted updates and build upsert batch
+    const upsertRows = [];
+    for (const sub of targetSubtopics) {
+      const existing = bktMap.get(sub.id);
+      const currentMastery = existing?.p_know ?? 0;
+      const maxReachedMastery = existing?.max_p_know ?? 0;
+
+      // Compute BKT update using the engine
+      const bktResult = computeBktV4Update({
+        currentMastery,
+        maxReachedMastery,
+        isCorrect,
+        instrumentType: instrumentType === "quiz" ? "quiz" : "flashcard",
+      });
+
+      // Apply weight to the delta
+      const weightedDelta = bktResult.delta * weight;
+      const weightedPKnow = Math.max(0, Math.min(1, currentMastery + weightedDelta));
+      const weightedMaxPKnow = Math.max(maxReachedMastery, weightedPKnow);
+
+      upsertRows.push({
+        student_id: userId,
+        subtopic_id: sub.id,
+        p_know: Math.round(weightedPKnow * 10000) / 10000,
+        max_p_know: Math.round(weightedMaxPKnow * 10000) / 10000,
+        p_transit: existing?.p_transit ?? 0.18,
+        p_slip: existing?.p_slip ?? 0.10,
+        p_guess: existing?.p_guess ?? 0.25,
+        delta: Math.round(weightedDelta * 10000) / 10000,
+        total_attempts: (existing?.total_attempts ?? 0) + 1,
+        correct_attempts: (existing?.correct_attempts ?? 0) + (isCorrect ? 1 : 0),
+        last_attempt_at: nowIso,
+      });
+    }
+
+    // 8. BATCH upsert all rows in ONE query (fixes N+1 writes)
+    if (upsertRows.length > 0) {
+      const { error: upsertErr } = await db
+        .from("bkt_states")
+        .upsert(upsertRows, { onConflict: "student_id,subtopic_id" });
+
+      if (upsertErr) {
+        console.warn(`[KW-BKT] Batch upsert failed (${upsertRows.length} rows):`, upsertErr.message);
+        return `Batch upsert failed: ${upsertErr.message}`;
+      }
+    }
+
+    // Success — no error to report
+    return;
+  } catch (e) {
+    const msg = (e as Error).message;
+    console.warn("[KW-BKT] Keyword propagation failed:", msg);
+    return `Propagation error: ${msg}`;
   }
-
-  // Validate fsrs_update if present (PATH A)
-  let fsrsUpdate: ReviewItem["fsrs_update"] = undefined;
-  if (item.fsrs_update && typeof item.fsrs_update === "object") {
-    const f = item.fsrs_update as Record<string, unknown>;
-    if (!isNum(f.stability) || (f.stability as number) <= 0)
-      return { valid: null, error: `${prefix}.fsrs_update.stability must be a positive number` };
-    if (!inRange(f.difficulty, 0, 10))
-      return { valid: null, error: `${prefix}.fsrs_update.difficulty must be in [0, 10]` };
-    if (!isIsoTs(f.due_at))
-      return { valid: null, error: `${prefix}.fsrs_update.due_at must be an ISO timestamp` };
-    if (!isIsoTs(f.last_review_at))
-      return { valid: null, error: `${prefix}.fsrs_update.last_review_at must be an ISO timestamp` };
-    if (!isNonNegInt(f.reps))
-      return { valid: null, error: `${prefix}.fsrs_update.reps must be a non-negative integer` };
-    if (!isNonNegInt(f.lapses))
-      return { valid: null, error: `${prefix}.fsrs_update.lapses must be a non-negative integer` };
-    if (!isOneOf(f.state, FSRS_STATES))
-      return { valid: null, error: `${prefix}.fsrs_update.state must be one of: ${FSRS_STATES.join(", ")}` };
-
-    fsrsUpdate = {
-      stability: f.stability as number,
-      difficulty: f.difficulty as number,
-      due_at: f.due_at as string,
-      last_review_at: f.last_review_at as string,
-      reps: f.reps as number,
-      lapses: f.lapses as number,
-      state: f.state as string,
-    };
-  }
-
-  // Validate bkt_update if present (PATH A)
-  let bktUpdate: ReviewItem["bkt_update"] = undefined;
-  if (item.bkt_update && typeof item.bkt_update === "object") {
-    const b = item.bkt_update as Record<string, unknown>;
-    if (!isUuid(b.subtopic_id))
-      return { valid: null, error: `${prefix}.bkt_update.subtopic_id must be a valid UUID` };
-    if (!isProbability(b.p_know))
-      return { valid: null, error: `${prefix}.bkt_update.p_know must be in [0, 1]` };
-    if (!isProbability(b.p_transit))
-      return { valid: null, error: `${prefix}.bkt_update.p_transit must be in [0, 1]` };
-    if (!isProbability(b.p_slip))
-      return { valid: null, error: `${prefix}.bkt_update.p_slip must be in [0, 1]` };
-    if (!isProbability(b.p_guess))
-      return { valid: null, error: `${prefix}.bkt_update.p_guess must be in [0, 1]` };
-    if (!isNum(b.delta))
-      return { valid: null, error: `${prefix}.bkt_update.delta must be a finite number` };
-    if (!isNonNegInt(b.total_attempts))
-      return { valid: null, error: `${prefix}.bkt_update.total_attempts must be a non-negative integer` };
-    if (!isNonNegInt(b.correct_attempts))
-      return { valid: null, error: `${prefix}.bkt_update.correct_attempts must be a non-negative integer` };
-    if (!isIsoTs(b.last_attempt_at))
-      return { valid: null, error: `${prefix}.bkt_update.last_attempt_at must be an ISO timestamp` };
-
-    bktUpdate = {
-      subtopic_id: b.subtopic_id as string,
-      p_know: b.p_know as number,
-      p_transit: b.p_transit as number,
-      p_slip: b.p_slip as number,
-      p_guess: b.p_guess as number,
-      delta: b.delta as number,
-      total_attempts: b.total_attempts as number,
-      correct_attempts: b.correct_attempts as number,
-      last_attempt_at: b.last_attempt_at as string,
-    };
-  }
-
-  return {
-    valid: {
-      item_id: item.item_id as string,
-      instrument_type: item.instrument_type as string,
-      grade: item.grade as number,
-      response_time_ms: item.response_time_ms as number | undefined,
-      subtopic_id: subtopicId,
-      fsrs_update: fsrsUpdate,
-      bkt_update: bktUpdate,
-    },
-    error: null,
-  };
 }
 
-// ─── POST /review-batch ───────────────────────────────────────────
+// ─── POST /review-batch ───────────────────────────────────────
 
 batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   const auth = await authenticate(c);
@@ -329,8 +282,41 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   const errors: { index: number; step: string; message: string }[] = [];
   const computedResults: ComputedResult[] = [];
 
+  // Stats accumulator for fire-and-forget keyword propagation diagnostics
+  const stats: Record<string, string> = {};
+
   // Track successfully created reviews for XP hook
   const successfulReviews: Array<{ item_id: string; grade: number; instrument_type: string }> = [];
+
+  // ── 2.4: Batch pre-load FSRS and BKT states ──────────────────
+  const allFlashcardIds = validatedItems
+    .filter(i => !i.fsrs_update && i.item_id)
+    .map(i => i.item_id);
+  const allSubtopicIds = validatedItems
+    .filter(i => !i.bkt_update && i.subtopic_id)
+    .map(i => i.subtopic_id as string);
+
+  // Also collect subtopic_ids used for FSRS recovery cross-signal
+  const crossSignalSubtopicIds = validatedItems
+    .filter(i => !i.fsrs_update && (i.subtopic_id || i.bkt_update?.subtopic_id))
+    .map(i => (i.subtopic_id || i.bkt_update?.subtopic_id) as string);
+  const allBktSubtopicIds = [...new Set([...allSubtopicIds, ...crossSignalSubtopicIds])];
+
+  const { data: allFsrs } = allFlashcardIds.length > 0
+    ? await db.from("fsrs_states")
+        .select("flashcard_id, stability, difficulty, reps, lapses, state, last_review_at, consecutive_lapses, is_leech")
+        .in("flashcard_id", allFlashcardIds)
+        .eq("student_id", user.id)
+    : { data: [] };
+  const { data: allBkt } = allBktSubtopicIds.length > 0
+    ? await db.from("bkt_states")
+        .select("subtopic_id, p_know, max_p_know, total_attempts, correct_attempts, p_transit, p_slip, p_guess")
+        .in("subtopic_id", allBktSubtopicIds)
+        .eq("student_id", user.id)
+    : { data: [] };
+
+  const fsrsMap = new Map(allFsrs?.map(s => [s.flashcard_id, s]) ?? []);
+  const bktMap = new Map(allBkt?.map(s => [s.subtopic_id, s]) ?? []);
 
   for (let i = 0; i < validatedItems.length; i++) {
     const item = validatedItems[i];
@@ -401,24 +387,14 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     } else {
       // ════════ PATH B (server-side FSRS v4 Petrick) ════════
       try {
-        // 1. Read current FSRS state
-        const { data: existingFsrs } = await db
-          .from("fsrs_states")
-          .select("stability, difficulty, reps, lapses, state, last_review_at, consecutive_lapses, is_leech")
-          .eq("student_id", user.id)
-          .eq("flashcard_id", item.item_id)
-          .maybeSingle();
+        // 1. Read current FSRS state (from pre-loaded map)
+        const existingFsrs = fsrsMap.get(item.item_id) ?? null;
 
-        // 2. Read BKT for recovery cross-signal
+        // 2. Read BKT for recovery cross-signal (from pre-loaded map)
         let isRecovering = false;
         const resolvedSubtopicId = item.subtopic_id || item.bkt_update?.subtopic_id;
         if (resolvedSubtopicId) {
-          const { data: existingBkt } = await db
-            .from("bkt_states")
-            .select("p_know, max_p_know")
-            .eq("student_id", user.id)
-            .eq("subtopic_id", resolvedSubtopicId)
-            .maybeSingle();
+          const existingBkt = bktMap.get(resolvedSubtopicId) ?? null;
 
           if (existingBkt) {
             const maxPKnow = existingBkt.max_p_know ?? 0;
@@ -537,6 +513,15 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           errors.push({ index: i, step: "bkt", message: bktErr.message });
         } else {
           bktUpdated++;
+
+          // §4.2: Fire-and-forget keyword BKT propagation (PATH A)
+          const pathAGrade = mapToFsrsGrade(item.grade);
+          const pathAIsCorrect = pathAGrade >= THRESHOLDS.BKT_CORRECT_MIN_GRADE;
+          propagateKeywordBkt(
+            db, user.id, item.item_id, item.instrument_type,
+            pathAIsCorrect, bkt.subtopic_id,
+          ).then(err => { if (err) stats.keyword_propagation_error = err; })
+           .catch((e) => { stats.keyword_propagation_error = (e as Error).message; });
         }
       } catch (e) {
         errors.push({ index: i, step: "bkt", message: (e as Error).message });
@@ -549,12 +534,8 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         const instrumentType =
           item.instrument_type === "quiz" ? "quiz" as const : "flashcard" as const;
 
-        const { data: existingBkt } = await db
-          .from("bkt_states")
-          .select("p_know, max_p_know, total_attempts, correct_attempts, p_transit, p_slip, p_guess")
-          .eq("student_id", user.id)
-          .eq("subtopic_id", item.subtopic_id)
-          .maybeSingle();
+        // Read from pre-loaded map (may contain updated values from earlier items — fix 2.7)
+        const existingBkt = bktMap.get(item.subtopic_id) ?? null;
 
         const currentMastery = existingBkt?.p_know ?? 0;
         const maxReachedMastery = existingBkt?.max_p_know ?? 0;
@@ -593,6 +574,28 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           errors.push({ index: i, step: "bkt_pathb", message: bktErr.message });
         } else {
           bktUpdated++;
+
+          // 2.7: Update bktMap so next item with same subtopic reads fresh state
+          if (item.subtopic_id) {
+            bktMap.set(item.subtopic_id, {
+              ...(existingBkt ?? {}),
+              subtopic_id: item.subtopic_id,
+              p_know: bktResult.p_know,
+              max_p_know: bktResult.max_p_know,
+              p_transit: existingBkt?.p_transit ?? 0.18,
+              p_slip: existingBkt?.p_slip ?? 0.10,
+              p_guess: existingBkt?.p_guess ?? 0.25,
+              total_attempts: finalTotalAttempts,
+              correct_attempts: finalCorrectAttempts,
+            });
+          }
+
+          // §4.2: Fire-and-forget keyword BKT propagation (PATH B)
+          propagateKeywordBkt(
+            db, user.id, item.item_id, item.instrument_type,
+            isCorrect, item.subtopic_id,
+          ).then(err => { if (err) stats.keyword_propagation_error = err; })
+           .catch((e) => { stats.keyword_propagation_error = (e as Error).message; });
 
           const lastResult = computedResults[computedResults.length - 1];
           if (lastResult && lastResult.item_id === item.item_id) {

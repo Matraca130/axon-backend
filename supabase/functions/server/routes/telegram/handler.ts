@@ -33,6 +33,7 @@ import {
   type FlashcardItem,
 } from "./review-flow.ts";
 import { formatFlashcardSummary } from "./formatter.ts";
+import { enqueueJob, processNextJob } from "./async-queue.ts";
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -185,7 +186,7 @@ async function transcribeVoiceMessage(voiceFileId: string): Promise<string | nul
       return null;
     }
 
-    console.log(`[TG-Handler] Voice transcribed (${bytes.length} bytes): "${text.slice(0, 80)}..."`);
+    console.warn(`[TG-Handler] Voice transcribed (${bytes.length} bytes): "${text.slice(0, 80)}..."`);
     return text.trim();
   } catch (e) {
     console.error(`[TG-Handler] Voice transcription failed: ${(e as Error).message}`);
@@ -341,7 +342,7 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
         const toolName = toolUseBlock.name;
         const toolArgs = (toolUseBlock.input ?? {}) as Record<string, unknown>;
         toolsUsed.push(toolName);
-        console.log(`[TG-Handler] Tool #${iteration + 1}: ${toolName}(${JSON.stringify(toolArgs).slice(0, 100)})`);
+        console.warn(`[TG-Handler] Tool #${iteration + 1}: ${toolName}(${JSON.stringify(toolArgs).slice(0, 100)})`);
 
         // Add assistant message with tool_use to history
         history.push({
@@ -351,10 +352,28 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
 
         const toolResult = await executeToolCall(toolName, toolArgs, userId, session.current_context);
 
-        // Handle async tools
+        // Handle async tools — enqueue for background processing
         if (toolResult.isAsync) {
           const asyncResult = toolResult.result as Record<string, unknown>;
           await sendTextPlain(chatId, (asyncResult?.message as string) ?? "Procesando... \u23f3");
+
+          // Enqueue the job for background execution
+          const enqueued = await enqueueJob({
+            type: toolName as "generate_content" | "generate_weekly_report",
+            channel: "telegram",
+            user_id: userId,
+            chat_id: chatId,
+            action: (asyncResult?.action as "flashcard" | "quiz") ?? undefined,
+            summary_id: (asyncResult?.summary_id as string) ?? undefined,
+          });
+
+          if (enqueued) {
+            // Fire-and-forget: attempt immediate processing
+            processNextJob().catch((e) =>
+              console.warn(`[TG-Handler] Fire-and-forget queue failed: ${(e as Error).message}`)
+            );
+          }
+
           history.push({
             role: "user",
             content: [{ type: "tool_result", tool_use_id: toolUseBlock.id, content: JSON.stringify(toolResult.result) }],
@@ -429,7 +448,7 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
     }
 
     updateLogRecord(chatId, messageId, toolsUsed, Date.now() - startMs);
-    console.log(`[TG-Handler] Done in ${Date.now() - startMs}ms. Tools: [${toolsUsed.join(", ")}]`);
+    console.warn(`[TG-Handler] Done in ${Date.now() - startMs}ms. Tools: [${toolsUsed.join(", ")}]`);
   } catch (e) {
     const errorMsg = (e as Error).message;
     console.error(`[TG-Handler] Fatal: ${errorMsg}`);

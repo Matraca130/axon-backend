@@ -19,6 +19,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX, getAdminClient } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import {
   evaluateSimpleCondition,
@@ -57,7 +58,7 @@ badgeRoutes.get(`${PREFIX}/gamification/badges`, async (c: Context) => {
   ]);
 
   if (defsResult.error) {
-    return err(c, `Badges fetch failed: ${defsResult.error.message}`, 500);
+    return safeErr(c, "Badges fetch", defsResult.error);
   }
 
   const earnedMap = new Map<string, string>();
@@ -99,7 +100,7 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
     .eq("is_active", true);
 
   if (badgeErr) {
-    return err(c, `Badge definitions fetch failed: ${badgeErr.message}`, 500);
+    return safeErr(c, "Badge definitions fetch", badgeErr);
   }
 
   const { data: earnedBadges } = await db

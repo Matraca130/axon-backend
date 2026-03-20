@@ -6,6 +6,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid, isNonEmpty, isObj, validateFields } from "../../validate.ts";
 import type { Context } from "npm:hono";
 
@@ -29,7 +30,7 @@ diagnosticRoutes.get(diagBase, async (c: Context) => {
   if (diagType) query = query.eq("diagnostic_type", diagType);
 
   const { data, error } = await query;
-  if (error) return err(c, `List summary_diagnostics failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "List summary_diagnostics", error);
   return ok(c, data);
 });
 
@@ -59,6 +60,6 @@ diagnosticRoutes.post(diagBase, async (c: Context) => {
   Object.assign(row, fields);
 
   const { data, error } = await db.from("summary_diagnostics").insert(row).select().single();
-  if (error) return err(c, `Create summary_diagnostic failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Create summary_diagnostic", error);
   return ok(c, data, 201);
 });

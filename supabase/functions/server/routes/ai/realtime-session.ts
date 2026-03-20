@@ -32,6 +32,7 @@ import {
   isDenied,
   ALL_ROLES,
 } from "../../auth-helpers.ts";
+import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
 
 export const aiRealtimeRoutes = new Hono();
 
@@ -110,34 +111,34 @@ function buildSystemPrompt(ctx: StudentContext): string {
 
     if (Array.isArray(kp.weak) && kp.weak.length > 0) {
       const weakList = kp.weak
-        .map((w: Record<string, unknown>) => `${w.sub} (dominio: ${w.p})`)
+        .map((w: Record<string, unknown>) => `${sanitizeForPrompt(String(w.sub), 100)} (dominio: ${w.p})`)
         .join(", ");
       sections.push(`Áreas débiles: ${weakList}`);
     }
 
     if (Array.isArray(kp.strong) && kp.strong.length > 0) {
       const strongList = kp.strong
-        .map((s: Record<string, unknown>) => `${s.sub} (dominio: ${s.p})`)
+        .map((s: Record<string, unknown>) => `${sanitizeForPrompt(String(s.sub), 100)} (dominio: ${s.p})`)
         .join(", ");
       sections.push(`Fortalezas: ${strongList}`);
     }
 
     if (Array.isArray(kp.lapsing) && kp.lapsing.length > 0) {
       const lapsingList = kp.lapsing
-        .map((l: Record<string, unknown>) => `"${l.card}" (${l.lapses} fallos)`)
+        .map((l: Record<string, unknown>) => `"${sanitizeForPrompt(String(l.card), 100)}" (${l.lapses} fallos)`)
         .join(", ");
       sections.push(`Flashcards problemáticas: ${lapsingList}`);
     }
 
     if (Array.isArray(kp.quiz_fail) && kp.quiz_fail.length > 0) {
       const failList = kp.quiz_fail
-        .map((q: Record<string, unknown>) => `"${q.q}"`)
+        .map((q: Record<string, unknown>) => `"${sanitizeForPrompt(String(q.q), 100)}"`)
         .join(", ");
       sections.push(`Quiz fallidos recientes: ${failList}`);
     }
 
     if (sections.length > 0) {
-      parts.push(`\nPERFIL ACADÉMICO DEL ALUMNO:\n- ${sections.join("\n- ")}`);
+      parts.push(`\n${wrapXml("student_profile", `PERFIL ACADÉMICO DEL ALUMNO:\n- ${sections.join("\n- ")}`)}`);
     }
   }
 
@@ -279,9 +280,12 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
   }
 
   let sessionResponse: Response;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
     sessionResponse = await fetch("https://api.openai.com/v1/realtime/sessions", {
       method: "POST",
+      signal: controller.signal,
       headers: {
         "Authorization": `Bearer ${openaiKey}`,
         "Content-Type": "application/json",
@@ -303,6 +307,8 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
   } catch (fetchErr) {
     console.error("[Realtime] OpenAI session request failed:", (fetchErr as Error).message);
     return err(c, "Error al crear sesión de voz", 502);
+  } finally {
+    clearTimeout(timeout);
   }
 
   if (!sessionResponse.ok) {

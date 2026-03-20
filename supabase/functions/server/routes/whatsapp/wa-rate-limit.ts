@@ -112,7 +112,7 @@ function cleanupExpired(now: number): void {
   }
   lastCleanup = now;
   if (cleaned > 0) {
-    console.log(`[WA-RateLimit] Cleaned ${cleaned} expired entries`);
+    console.warn(`[WA-RateLimit] Cleaned ${cleaned} expired entries`);
   }
 }
 

@@ -17,6 +17,7 @@ import {
   PREFIX,
 } from "../../db.ts";
 import { isUuid } from "../../validate.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -24,7 +25,7 @@ import {
 } from "../../auth-helpers.ts";
 import { extractTextFromPdf } from "../../gemini.ts";
 import { autoChunkAndEmbed } from "../../auto-ingest.ts";
-import { encodeBase64 } from "https://deno.land/std@0.208.0/encoding/base64.ts";
+import { encodeBase64 } from "https://deno.land/std@0.224.0/encoding/base64.ts";
 
 export const aiIngestPdfRoutes = new Hono();
 
@@ -171,7 +172,7 @@ aiIngestPdfRoutes.post(`${PREFIX}/ai/ingest-pdf`, async (c: Context) => {
     .single();
 
   if (insertErr || !newSummary) {
-    return err(c, `Failed to create summary: ${insertErr?.message ?? "no data returned"}`, 500);
+    return safeErr(c, "Create summary", insertErr);
   }
 
   const summaryId = newSummary.id as string;

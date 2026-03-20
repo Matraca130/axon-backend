@@ -140,10 +140,12 @@ export async function sendChatAction(
 }
 
 export async function setWebhook(url: string): Promise<boolean> {
+  const secret = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
   const result = await callTelegramApi("setWebhook", {
     url,
     allowed_updates: ["message", "callback_query"],
     max_connections: 40,
+    ...(secret ? { secret_token: secret } : {}),
   });
   return !!result;
 }

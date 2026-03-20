@@ -22,14 +22,21 @@ export async function muxFetch(
   path: string,
   options: RequestInit = {},
 ): Promise<Response> {
-  return fetch(`${MUX_BASE}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: muxAuth,
-      ...(options.headers ?? {}),
-    },
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  try {
+    return await fetch(`${MUX_BASE}${path}`, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: muxAuth,
+        ...(options.headers ?? {}),
+      },
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function verifyMuxWebhook(

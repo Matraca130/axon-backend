@@ -23,6 +23,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, getAdminClient, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import {
   requireInstitutionRole,
   resolveMembershipInstitution,
@@ -68,7 +69,7 @@ membershipRoutes.get(memBase, async (c: Context) => {
     .order("created_at", { ascending: true })
     .range(offset, offset + limit - 1);
 
-  if (error) return err(c, `List memberships failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "List memberships", error);
   return ok(c, { items: data, total: count, limit, offset });
 });
 
@@ -87,7 +88,7 @@ membershipRoutes.get(`${memBase}/:id`, async (c: Context) => {
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   const { data, error } = await db.from("memberships").select("*").eq("id", id).single();
-  if (error) return err(c, `Get membership ${id} failed: ${error.message}`, 404);
+  if (error) return safeErr(c, "Get membership", error, 404);
   return ok(c, data);
 });
 
@@ -118,7 +119,7 @@ membershipRoutes.post(memBase, async (c: Context) => {
     );
   }
 
-  console.log(
+  console.warn(
     `[Axon Audit] Membership created by ${user.id} (${roleCheck.role}): ` +
     `target_user=${user_id}, institution=${institution_id}, assigned_role=${role}`,
   );
@@ -128,7 +129,10 @@ membershipRoutes.post(memBase, async (c: Context) => {
   if (typeof body.institution_plan_id === "string") row.institution_plan_id = body.institution_plan_id;
 
   const { data, error } = await admin.from("memberships").insert(row).select().single();
-  if (error) return err(c, `Create membership failed: ${error.message}`, error.message.includes("duplicate") ? 409 : 500);
+  if (error) {
+    const status = error.message?.includes("duplicate") ? 409 : 500;
+    return safeErr(c, "Create membership", error, status);
+  }
   return ok(c, data, 201);
 });
 
@@ -224,7 +228,7 @@ membershipRoutes.put(`${memBase}/:id`, async (c: Context) => {
 
   patch.updated_at = new Date().toISOString();
   const { data, error } = await db.from("memberships").update(patch).eq("id", id).select().single();
-  if (error) return err(c, `Update membership ${id} failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Update membership", error);
   return ok(c, data);
 });
 
@@ -285,6 +289,6 @@ membershipRoutes.delete(`${memBase}/:id`, async (c: Context) => {
     .update({ is_active: false, updated_at: new Date().toISOString() })
     .eq("id", id).eq("is_active", true).select().single();
 
-  if (error) return err(c, `Deactivate membership ${id} failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Deactivate membership", error);
   return ok(c, data);
 });

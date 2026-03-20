@@ -16,6 +16,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { PREFIX, authenticate, safeJson, ok, err } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import {
   requireInstitutionRole,
@@ -104,7 +105,7 @@ muxTrackingRoutes.post(`${PREFIX}/mux/track-view`, async (c: Context) => {
     updated_at: new Date().toISOString(),
   }, { onConflict: "video_id,user_id" }).select().single();
 
-  if (upsertErr) return err(c, `Track view failed: ${upsertErr.message}`, 500);
+  if (upsertErr) return safeErr(c, "Track view", upsertErr);
   if (isFirstCompletion) {
     await fireFirstCompletionSignal(db, user.id, video_id);
     // PR #99: Award video completion XP (20 XP, fire-and-forget)

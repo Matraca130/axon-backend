@@ -13,13 +13,7 @@ import {
   generateText as claudeGenerateText,
   type ClaudeTool,
 } from "../../claude-ai.ts";
-import {
-  selectStrategy,
-  executeRetrievalEmbedding,
-  rerankWithClaude,
-  mergeSearchResults,
-  type MatchedChunk,
-} from "../../retrieval-strategies.ts";
+import { ragSearch } from "../../lib/rag-search.ts";
 import {
   formatProgressSummary,
   formatScheduleSummary,
@@ -231,100 +225,8 @@ CONTEXTO DEL ALUMNO:
 {STUDENT_CONTEXT}
 `;
 
-// ─── RAG Search Helper ──────────────────────────────────
-
-const RAG_MAX_CONTEXT_CHARS = 4000;
-const RAG_TOP_K = 5;
-
-async function ragSearch(
-  question: string,
-  userId: string,
-  summaryId?: string,
-): Promise<{ context: string; sources: string[]; strategy: string }> {
-  const db = getAdminClient();
-
-  try {
-    let institutionId: string | null = null;
-
-    if (summaryId) {
-      const { data: instId } = await db.rpc("resolve_parent_institution", {
-        p_table: "summaries",
-        p_id: summaryId,
-      });
-      institutionId = instId as string | null;
-    }
-
-    if (!institutionId) {
-      const { data: membership } = await db
-        .from("memberships")
-        .select("institution_id")
-        .eq("user_id", userId)
-        .eq("is_active", true)
-        .limit(1)
-        .single();
-      institutionId = membership?.institution_id ?? null;
-    }
-
-    if (!institutionId) {
-      return { context: "", sources: [], strategy: "no_institution" };
-    }
-
-    const strategy = summaryId ? "standard" : selectStrategy(question, summaryId ?? null, 0);
-    const { embeddings } = await executeRetrievalEmbedding(strategy, question);
-
-    const searchPromises = embeddings.map(async ({ embedding }) => {
-      const { data, error } = await db.rpc("rag_hybrid_search", {
-        p_query_embedding: JSON.stringify(embedding),
-        p_query_text: question,
-        p_institution_id: institutionId,
-        p_match_count: RAG_TOP_K * 2,
-        p_similarity_threshold: 0.3,
-        p_summary_id: summaryId ?? null,
-      });
-
-      if (error) {
-        console.warn(`[TG-RAG] hybrid search failed: ${error.message}`);
-        return [] as MatchedChunk[];
-      }
-      return (data ?? []) as MatchedChunk[];
-    });
-
-    const resultSets = await Promise.all(searchPromises);
-    let merged = mergeSearchResults(resultSets);
-
-    if (merged.length === 0) {
-      return { context: "", sources: [], strategy: `${strategy}_empty` };
-    }
-
-    merged = await rerankWithClaude(question, merged, RAG_TOP_K);
-
-    let contextChars = 0;
-    const contextParts: string[] = [];
-    const sources: string[] = [];
-
-    for (const chunk of merged) {
-      if (contextChars + chunk.content.length > RAG_MAX_CONTEXT_CHARS) {
-        const remaining = RAG_MAX_CONTEXT_CHARS - contextChars;
-        if (remaining > 200) {
-          contextParts.push(
-            `## ${chunk.summary_title}\n${chunk.content.slice(0, remaining)}...`,
-          );
-        }
-        break;
-      }
-      contextParts.push(`## ${chunk.summary_title}\n${chunk.content}`);
-      contextChars += chunk.content.length;
-      if (!sources.includes(chunk.summary_title)) {
-        sources.push(chunk.summary_title);
-      }
-    }
-
-    return { context: contextParts.join("\n\n"), sources, strategy };
-  } catch (e) {
-    console.error(`[TG-RAG] Pipeline failed: ${(e as Error).message}`);
-    return { context: "", sources: [], strategy: "error" };
-  }
-}
+// ─── RAG Search ─────────────────────────────────────────
+// Shared ragSearch imported from ../../lib/rag-search.ts
 
 // ─── Tool Executor ───────────────────────────────────────
 
@@ -532,12 +434,26 @@ export async function executeToolCall(
       }
 
       case "get_keywords": {
+        // 8.2: Resolve user's institution for scoping
+        const { data: kwMembership } = await db
+          .from("memberships")
+          .select("institution_id")
+          .eq("user_id", userId)
+          .eq("is_active", true)
+          .limit(1)
+          .single();
+        const kwInstitutionId = kwMembership?.institution_id;
+
         if (args.search_term) {
-          const { data, error } = await db
+          let kwSearchQuery = db
             .from("keywords")
-            .select("id, name, definition, topic_id, topics(name, section_id, sections(name, course_id, courses(name)))")
+            .select("id, name, definition, topic_id, topics!inner(name, section_id, sections!inner(name, course_id, courses!inner(name, institution_id)))")
             .ilike("name", `%${args.search_term}%`)
             .limit(5);
+          if (kwInstitutionId) {
+            kwSearchQuery = kwSearchQuery.eq("topics.sections.courses.institution_id", kwInstitutionId);
+          }
+          const { data, error } = await kwSearchQuery;
           if (error) throw new Error(`keywords search: ${error.message}`);
 
           if (!data?.length) {
@@ -574,11 +490,14 @@ export async function executeToolCall(
         // List keywords by course or topic
         let query = db
           .from("keywords")
-          .select("id, name, definition")
+          .select("id, name, definition, topic_id, topics!inner(section_id, sections!inner(course_id, courses!inner(institution_id)))")
           .limit(20);
 
         if (args.topic_id) {
           query = query.eq("topic_id", args.topic_id as string);
+        }
+        if (kwInstitutionId) {
+          query = query.eq("topics.sections.courses.institution_id", kwInstitutionId);
         }
 
         const { data, error } = await query;
@@ -588,12 +507,26 @@ export async function executeToolCall(
       }
 
       case "get_summary": {
+        // 8.2: Resolve user's institution for scoping
+        const { data: sumMembership } = await db
+          .from("memberships")
+          .select("institution_id")
+          .eq("user_id", userId)
+          .eq("is_active", true)
+          .limit(1)
+          .single();
+        const sumInstitutionId = sumMembership?.institution_id;
+
         if (args.summary_id) {
-          const { data, error } = await db
+          // Fetch with institution join to verify scope
+          let sumByIdQuery = db
             .from("summaries")
-            .select("id, title, content_markdown, word_count")
-            .eq("id", args.summary_id as string)
-            .single();
+            .select("id, title, content_markdown, word_count, topic_id, topics!inner(section_id, sections!inner(course_id, courses!inner(institution_id)))")
+            .eq("id", args.summary_id as string);
+          if (sumInstitutionId) {
+            sumByIdQuery = sumByIdQuery.eq("topics.sections.courses.institution_id", sumInstitutionId);
+          }
+          const { data, error } = await sumByIdQuery.single();
           if (error) throw new Error(`summary: ${error.message}`);
           if (!data) return { name, result: { error: "Resumen no encontrado" } };
 
@@ -607,13 +540,17 @@ export async function executeToolCall(
         }
 
         if (args.search_term) {
-          const { data, error } = await db
+          let sumSearchQuery = db
             .from("summaries")
-            .select("id, title, word_count")
+            .select("id, title, word_count, topic_id, topics!inner(section_id, sections!inner(course_id, courses!inner(institution_id)))")
             .ilike("title", `%${args.search_term}%`)
             .eq("is_active", true)
             .is("deleted_at", null)
             .limit(10);
+          if (sumInstitutionId) {
+            sumSearchQuery = sumSearchQuery.eq("topics.sections.courses.institution_id", sumInstitutionId);
+          }
+          const { data, error } = await sumSearchQuery;
           if (error) throw new Error(`summary search: ${error.message}`);
 
           return { name, result: { summaries: data ?? [], count: data?.length ?? 0 } };
@@ -696,7 +633,7 @@ export async function executeToolCall(
           summaryId,
         );
 
-        console.log(
+        console.warn(
           `[TG-RAG] strategy=${strategy}, sources=${sources.length}, context=${context.length} chars`,
         );
 

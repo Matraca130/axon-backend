@@ -32,6 +32,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -176,7 +177,7 @@ keywordSearchRoutes.get(searchBase, async (c: Context) => {
         .limit(limit);
 
       if (kwError) {
-        return err(c, `Keyword search fallback failed: ${kwError.message}`, 500);
+        return safeErr(c, "Keyword search fallback", kwError);
       }
 
       // Phase 3: Enrich with summary_title
@@ -204,7 +205,7 @@ keywordSearchRoutes.get(searchBase, async (c: Context) => {
       return ok(c, enriched);
     } catch (fallbackErr: any) {
       console.error("[keyword-search] Fallback error:", fallbackErr);
-      return err(c, `Keyword search failed: ${fallbackErr.message}`, 500);
+      return safeErr(c, "Keyword search", fallbackErr);
     }
   }
 

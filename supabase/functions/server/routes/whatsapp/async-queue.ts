@@ -72,7 +72,8 @@ const MAX_ATTEMPTS = 3;
  * Output: base64(iv + ciphertext)
  */
 export async function encryptPhone(phone: string): Promise<string> {
-  const secret = Deno.env.get("WHATSAPP_APP_SECRET") ?? "axon-fallback-key";
+  const secret = Deno.env.get("WHATSAPP_APP_SECRET");
+  if (!secret) throw new Error("WHATSAPP_APP_SECRET not configured");
   const encoder = new TextEncoder();
   const keyMaterial = await crypto.subtle.digest("SHA-256", encoder.encode(secret));
   const key = await crypto.subtle.importKey("raw", keyMaterial, "AES-GCM", false, ["encrypt"]);
@@ -85,7 +86,8 @@ export async function encryptPhone(phone: string): Promise<string> {
 }
 
 async function decryptPhone(encryptedBase64: string): Promise<string> {
-  const secret = Deno.env.get("WHATSAPP_APP_SECRET") ?? "axon-fallback-key";
+  const secret = Deno.env.get("WHATSAPP_APP_SECRET");
+  if (!secret) throw new Error("WHATSAPP_APP_SECRET not configured");
   const encoder = new TextEncoder();
   const keyMaterial = await crypto.subtle.digest("SHA-256", encoder.encode(secret));
   const key = await crypto.subtle.importKey("raw", keyMaterial, "AES-GCM", false, ["decrypt"]);
@@ -136,7 +138,7 @@ export async function enqueueJob(payload: JobPayload): Promise<boolean> {
       return false;
     }
 
-    console.log(`[WA-Queue] Job enqueued: ${payload.type} for user ${payload.user_id}`);
+    console.warn(`[WA-Queue] Job enqueued: ${payload.type} for user ${payload.user_id}`);
     return true;
   } catch (e) {
     console.error(`[WA-Queue] Enqueue error: ${(e as Error).message}`);
@@ -161,6 +163,7 @@ export async function processNextJob(): Promise<boolean> {
     .from("whatsapp_jobs")
     .select("*")
     .eq("status", "pending")
+    .eq("channel", "whatsapp")
     .order("created_at", { ascending: true })
     .limit(1);
 
@@ -192,7 +195,7 @@ export async function processNextJob(): Promise<boolean> {
       .update({ status: "done", processed_at: new Date().toISOString() })
       .eq("id", job.id);
 
-    console.log(`[WA-Queue] Job ${job.id} completed: ${job.payload.type}`);
+    console.warn(`[WA-Queue] Job ${job.id} completed: ${job.payload.type}`);
     return true;
   } catch (e) {
     const errorMsg = (e as Error).message;
@@ -402,7 +405,7 @@ export async function processPendingJobs(maxJobs = 5): Promise<number> {
     processed++;
   }
   if (processed > 0) {
-    console.log(`[WA-Queue] Batch processed ${processed} jobs`);
+    console.warn(`[WA-Queue] Batch processed ${processed} jobs`);
   }
   return processed;
 }

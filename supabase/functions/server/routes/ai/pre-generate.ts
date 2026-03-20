@@ -26,7 +26,7 @@
  *   D14: CONTENT_WRITE_ROLES — only professors/admins can pre-generate.
  *        Students access AI content via /ai/generate or /ai/generate-smart.
  *   D15: Sequential Claude calls, NOT parallel.
- *        Gemini has 15 RPM for generation. 5 parallel calls could spike.
+ *        LLM APIs have RPM limits. 5 parallel calls could spike.
  *        Sequential also gives cleaner partial-success error handling.
  *   D16: Partial-success response — if 3 of 5 succeed, return the 3
  *        successful items + 2 error entries. Never all-or-nothing.
@@ -54,7 +54,7 @@
  * SECURITY FIX (Gemini Code Assist review):
  *   Rate limiter changed from fail-open to FAIL-CLOSED.
  *   If check_rate_limit() RPC fails, the request is DENIED (500)
- *   instead of allowed through. This prevents uncontrolled Gemini
+ *   instead of allowed through. This prevents uncontrolled LLM
  *   API usage and unexpected costs when the DB is unreachable.
  */
 
@@ -69,6 +69,10 @@ import {
 } from "../../auth-helpers.ts";
 import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.ts";
 import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
+import { truncateForPrompt } from "./generate-smart-helpers.ts";
+import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
+import { validateQuizQuestion, validateFlashcard } from "../../lib/validate-llm-output.ts";
+import { checkPlanLimit } from "../plans/access.ts";
 
 export const aiPreGenerateRoutes = new Hono();
 
@@ -80,16 +84,6 @@ const DEFAULT_COUNT = 3; // Default items if count not provided
 // D9: Separate rate limit bucket for pre-generation
 const PREGEN_RATE_LIMIT = 10;           // max requests per window
 const PREGEN_RATE_WINDOW_MS = 3_600_000; // 1 hour
-
-// ── D12: Local truncateAtWord (same as generate-smart.ts) ─────
-function truncateAtWord(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  const truncated = text.substring(0, maxLen);
-  const lastSpace = truncated.lastIndexOf(" ");
-  return lastSpace > maxLen * 0.8
-    ? truncated.substring(0, lastSpace) + "..."
-    : truncated + "...";
-}
 
 // ── Types ────────────────────────────────────────────────
 interface GeneratedItem {
@@ -158,6 +152,12 @@ aiPreGenerateRoutes.post(
     if (isDenied(roleCheck))
       return err(c, roleCheck.message, roleCheck.status);
 
+    // ── Step 3b: Plan limit enforcement ────────────────────────
+    const planCheck = await checkPlanLimit(db, user.id, institutionId as string);
+    if (!planCheck.allowed) {
+      return err(c, `Daily AI generation limit reached (${planCheck.limit}). Upgrade your plan.`, 429);
+    }
+
     // ── Step 4: Pre-gen rate limit (D9: separate bucket) ──────
     // Uses the SAME check_rate_limit() RPC but with a different key.
     // adminClient required because rate_limit_entries may have RLS.
@@ -207,7 +207,7 @@ aiPreGenerateRoutes.post(
     if (!summary)
       return err(c, "Summary not found", 404);
 
-    const contentSnippet = truncateAtWord(
+    const contentSnippet = truncateForPrompt(
       summary.content_markdown || "",
       1500,
     );
@@ -275,9 +275,8 @@ aiPreGenerateRoutes.post(
           .limit(3);
 
         if (profNotes && profNotes.length > 0) {
-          profNotesContext =
-            "\nNotas del profesor: " +
-            profNotes.map((n: { note: string }) => n.note).join("; ");
+          const notesJoined = profNotes.map((n: { note: string }) => n.note).join("; ");
+          profNotesContext = sanitizeForPrompt(notesJoined, 1000);
         }
 
         // 7b. Build prompt (D17: no student profile, generic content)
@@ -285,10 +284,10 @@ aiPreGenerateRoutes.post(
 
         if (action === "quiz_question") {
           userPrompt = `Genera UNA pregunta de quiz sobre:
-Tema: ${summary.title}
-Keyword: ${kw.name}${kw.definition ? ` \u2014 ${kw.definition}` : ""}
-${profNotesContext}
-Contenido relevante: ${contentSnippet}
+Tema: ${sanitizeForPrompt(summary.title, 200)}
+Keyword: ${sanitizeForPrompt(kw.name, 200)}${kw.definition ? ` \u2014 ${sanitizeForPrompt(kw.definition, 500)}` : ""}
+${profNotesContext ? wrapXml('professor_notes', sanitizeForPrompt(profNotesContext, 1000)) : ""}
+${wrapXml('course_content', sanitizeForPrompt(contentSnippet, 2000))}
 
 Genera una pregunta de dificultad media, clara y educativa.
 
@@ -304,12 +303,12 @@ Responde en JSON con este schema exacto:
 Nota: question_type debe ser "mcq", "true_false", "fill_blank" o "open".
 Nota: difficulty debe ser un entero: 1 (facil), 2 (medio), 3 (dificil).`;
         } else {
-          userPrompt = `Genera una flashcard sobre el keyword "${kw.name}".
+          userPrompt = `Genera una flashcard sobre el keyword "${sanitizeForPrompt(kw.name, 200)}".
 
-Tema: ${summary.title}
-Keyword: ${kw.name}${kw.definition ? ` \u2014 ${kw.definition}` : ""}
-${profNotesContext}
-Contenido relevante: ${contentSnippet}
+Tema: ${sanitizeForPrompt(summary.title, 200)}
+Keyword: ${sanitizeForPrompt(kw.name, 200)}${kw.definition ? ` \u2014 ${sanitizeForPrompt(kw.definition, 500)}` : ""}
+${profNotesContext ? wrapXml('professor_notes', sanitizeForPrompt(profNotesContext, 1000)) : ""}
+${wrapXml('course_content', sanitizeForPrompt(contentSnippet, 2000))}
 
 Genera una flashcard clara y educativa.
 
@@ -320,7 +319,7 @@ Responde en JSON con este schema exacto:
 }`;
         }
 
-        // 7c. Call Gemini (D15: sequential, D17: fixed temperature)
+        // 7c. Call Claude (D15: sequential, D17: fixed temperature)
         const result = await generateText({
           prompt: userPrompt,
           systemPrompt,
@@ -337,17 +336,19 @@ Responde en JSON con este schema exacto:
 
         // 7d. Insert into DB (BUG-1: created_by = user.id)
         // NORM-1 FIX: Use shared normalizers for type safety
+        // AI-001 FIX: Validate + sanitize LLM output before insert
         if (action === "quiz_question") {
+          const validated = validateQuizQuestion(g);
           const { data: inserted, error: insertErr } = await db
             .from("quiz_questions")
             .insert({
               summary_id: summaryId,
               keyword_id: kw.id,
               question_type: normalizeQuestionType(g.question_type),
-              question: g.question,
-              options: g.options || null,
-              correct_answer: g.correct_answer,
-              explanation: g.explanation || null,
+              question: validated.question,
+              options: validated.options,
+              correct_answer: validated.correct_answer,
+              explanation: validated.explanation,
               difficulty: normalizeDifficulty(g.difficulty),
               source: "ai",
               created_by: user.id,
@@ -371,13 +372,14 @@ Responde en JSON con este schema exacto:
             keyword_name: kw.name as string,
           });
         } else {
+          const validated = validateFlashcard(g);  // AI-001 FIX: sanitize LLM output
           const { data: inserted, error: insertErr } = await db
             .from("flashcards")
             .insert({
               summary_id: summaryId,
               keyword_id: kw.id,
-              front: g.front,
-              back: g.back,
+              front: validated.front,
+              back: validated.back,
               source: "ai",
               created_by: user.id,
             })

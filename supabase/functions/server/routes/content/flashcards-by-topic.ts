@@ -44,7 +44,13 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
+import {
+  requireInstitutionRole,
+  isDenied,
+  ALL_ROLES,
+} from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
 
 export const flashcardsByTopicRoutes = new Hono();
@@ -61,12 +67,27 @@ flashcardsByTopicRoutes.get(
   async (c: Context) => {
     const auth = await authenticate(c);
     if (auth instanceof Response) return auth;
-    const { db } = auth;
+    const { user, db } = auth;
 
     // ── Validate topic_id ──
     const topicId = c.req.query("topic_id");
     if (!isUuid(topicId)) {
       return err(c, "topic_id must be a valid UUID", 400);
+    }
+
+    // ── Defense-in-depth: resolve institution + verify membership ──
+    const { data: institutionId } = await db.rpc("resolve_parent_institution", {
+      p_table: "topics",
+      p_id: topicId,
+    });
+    if (!institutionId) {
+      return err(c, "Topic not found or not linked to an institution", 404);
+    }
+    const roleCheck = await requireInstitutionRole(
+      db, user.id, institutionId as string, ALL_ROLES,
+    );
+    if (isDenied(roleCheck)) {
+      return err(c, roleCheck.message, roleCheck.status);
     }
 
     // ── Parse pagination ──
@@ -93,7 +114,7 @@ flashcardsByTopicRoutes.get(
         .is("deleted_at", null);
 
       if (sumErr) {
-        return err(c, `Failed to fetch summaries: ${sumErr.message}`, 500);
+        return safeErr(c, "Fetch summaries", sumErr);
       }
 
       if (!summaries || summaries.length === 0) {
@@ -120,7 +141,7 @@ flashcardsByTopicRoutes.get(
         .range(offset, offset + limit - 1);
 
       if (fcErr) {
-        return err(c, `Failed to fetch flashcards: ${fcErr.message}`, 500);
+        return safeErr(c, "Fetch flashcards", fcErr);
       }
 
       return ok(c, {

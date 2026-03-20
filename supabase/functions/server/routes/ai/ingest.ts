@@ -34,13 +34,14 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, getAdminClient, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import {
   requireInstitutionRole,
   isDenied,
   CONTENT_WRITE_ROLES,
 } from "../../auth-helpers.ts";
-import { generateEmbedding } from "../../openai-embeddings.ts";
+import { generateEmbedding, generateEmbeddings } from "../../openai-embeddings.ts";
 import { embedSummaryContent } from "../../auto-ingest.ts";
 
 export const aiIngestRoutes = new Hono();
@@ -174,27 +175,28 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
 
     const { data: fallbackChunks, error: fallbackErr } = await fallbackQuery;
     if (fallbackErr)
-      return err(c, `Fetch chunks failed: ${fallbackErr.message}`, 500);
+      return safeErr(c, "Fetch chunks", fallbackErr);
     chunksToProcess = fallbackChunks;
   }
 
   if (!chunksToProcess || chunksToProcess.length === 0)
     return ok(c, { processed: 0, target: "chunks", message: "No chunks without embeddings found" });
 
-  // ── Process each chunk ───────────────────────────────────
+  // ── Process chunks (batch, with sequential fallback) ─────
   let processed = 0;
   let failed = 0;
   const errors: string[] = [];
 
-  for (const chunk of chunksToProcess) {
-    try {
-      // D57: OpenAI embeddings — no taskType parameter needed
-      const embedding = await generateEmbedding(chunk.content);
+  try {
+    // Task 4.1: Batch embeddings — single API call for all chunks
+    const chunkTexts = chunksToProcess.map((chunk: { content: string }) => chunk.content);
+    const allEmbeddings = await generateEmbeddings(chunkTexts);
 
-      // PF-09 FIX: Use adminDb to bypass RLS for embedding updates
+    for (let i = 0; i < chunksToProcess.length; i++) {
+      const chunk = chunksToProcess[i];
       const { error: updateErr } = await adminDb
         .from("chunks")
-        .update({ embedding: JSON.stringify(embedding) })
+        .update({ embedding: JSON.stringify(allEmbeddings[i]) })
         .eq("id", chunk.id);
 
       if (updateErr) {
@@ -203,14 +205,36 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
       } else {
         processed++;
       }
+    }
+  } catch (batchErr) {
+    // Fallback: sequential embedding on batch failure
+    console.warn(`[Ingest] Batch embedding failed, falling back to sequential: ${(batchErr as Error).message}`);
 
-      // Respect rate limits: pause 1s every 10 embeddings
-      if (processed > 0 && processed % 10 === 0) {
-        await new Promise((r) => setTimeout(r, 1000));
+    for (const chunk of chunksToProcess) {
+      try {
+        const embedding = await generateEmbedding(chunk.content);
+
+        // PF-09 FIX: Use adminDb to bypass RLS for embedding updates
+        const { error: updateErr } = await adminDb
+          .from("chunks")
+          .update({ embedding: JSON.stringify(embedding) })
+          .eq("id", chunk.id);
+
+        if (updateErr) {
+          failed++;
+          errors.push(`${chunk.id}: ${updateErr.message}`);
+        } else {
+          processed++;
+        }
+
+        // Respect rate limits: pause 1s every 10 embeddings
+        if (processed > 0 && processed % 10 === 0) {
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      } catch (e) {
+        failed++;
+        errors.push(`${chunk.id}: ${(e as Error).message}`);
       }
-    } catch (e) {
-      failed++;
-      errors.push(`${chunk.id}: ${(e as Error).message}`);
     }
   }
 
@@ -275,7 +299,7 @@ async function ingestSummaryEmbeddings(
     .limit(batchSize);
 
   if (fetchErr) {
-    return err(c, `Failed to fetch summaries: ${fetchErr.message}`, 500);
+    return safeErr(c, "Fetch summaries", fetchErr);
   }
 
   if (!summaries || summaries.length === 0) {

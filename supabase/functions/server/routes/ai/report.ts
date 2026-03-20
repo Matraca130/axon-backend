@@ -35,6 +35,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid, isOneOf } from "../../validate.ts";
 import {
   requireInstitutionRole,
@@ -185,7 +186,7 @@ aiReportRoutes.post(`${PREFIX}/ai/report`, async (c: Context) => {
       return err(c, "You have already reported this content", 409);
     }
     console.error("[Report] Insert error:", insertErr.message);
-    return err(c, `Failed to create report: ${insertErr.message}`, 500);
+    return safeErr(c, "Create report", insertErr);
   }
 
   // ── Step 7: Return created report ──────────────────────────
@@ -305,7 +306,7 @@ aiReportRoutes.patch(`${PREFIX}/ai/report/:id`, async (c: Context) => {
 
   if (updateErr) {
     console.error("[Report] Update error:", updateErr.message);
-    return err(c, `Failed to update report: ${updateErr.message}`, 500);
+    return safeErr(c, "Update report", updateErr);
   }
 
   // ── Step 7: Return updated report ──────────────────────────

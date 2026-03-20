@@ -7,6 +7,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid, isNonEmpty, isNonNegInt, validateFields } from "../../validate.ts";
 import type { Context } from "npm:hono";
 
@@ -38,7 +39,7 @@ aiGenerationRoutes.get(aiGenBase, async (c: Context) => {
   query = query.range(offset, offset + limit - 1);
 
   const { data, error } = await query;
-  if (error) return err(c, `List ai_generations failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "List ai_generations", error);
   return ok(c, data);
 });
 
@@ -66,6 +67,6 @@ aiGenerationRoutes.post(aiGenBase, async (c: Context) => {
   Object.assign(row, fields);
 
   const { data, error } = await db.from("ai_generations").insert(row).select().single();
-  if (error) return err(c, `Create ai_generation failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Create ai_generation", error);
   return ok(c, data, 201);
 });

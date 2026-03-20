@@ -12,6 +12,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import {
   resolveMembershipInstitution,
   requireInstitutionRole,
@@ -43,7 +44,7 @@ adminScopeRoutes.get(scopeBase, async (c: Context) => {
     .eq("membership_id", membershipId)
     .order("created_at", { ascending: true });
 
-  if (error) return err(c, `List admin_scopes failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "List admin_scopes", error);
   return ok(c, data);
 });
 
@@ -70,7 +71,7 @@ adminScopeRoutes.post(scopeBase, async (c: Context) => {
   if (typeof body.scope_id === "string") row.scope_id = body.scope_id;
 
   const { data, error } = await db.from("admin_scopes").insert(row).select().single();
-  if (error) return err(c, `Create admin_scope failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Create admin_scope", error);
   return ok(c, data, 201);
 });
 
@@ -99,6 +100,6 @@ adminScopeRoutes.delete(`${scopeBase}/:id`, async (c: Context) => {
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   const { error } = await db.from("admin_scopes").delete().eq("id", id);
-  if (error) return err(c, `Delete admin_scope ${id} failed: ${error.message}`, 500);
+  if (error) return safeErr(c, "Delete admin_scope", error);
   return ok(c, { deleted: id });
 });

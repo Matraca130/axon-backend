@@ -9,14 +9,15 @@
  *   - getUserClient(jwt)  → ANON_KEY + user JWT, respects RLS. Per-request, zero background timers.
  *
  * Auth strategy:
- *   - authenticate() decodes the JWT locally (~0.1ms, zero network).
- *   - Cryptographic signature validation is deferred to PostgREST/RLS on every DB query.
+ *   - authenticate() verifies the JWT cryptographically via jose + JWKS (~0.3ms after cache warm).
+ *   - JWT signature is verified via jose ES256 (P-256 JWKS). PostgREST verifies again on DB queries (defense-in-depth).
  *   - For admin-only routes (signup, institution creation), use getAdminClient().auth.getUser(token).
  */
 
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js";
 import type { Context } from "npm:hono";
 import type { StatusCode } from "npm:hono/utils/http-status";
+import { jwtVerify, createRemoteJWKSet, errors as joseErrors } from "https://deno.land/x/jose@v5.9.6/index.ts";
 
 // ─── Environment Validation (fail fast on cold start) ─────────────────
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
@@ -31,6 +32,12 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !SUPABASE_SERVICE_ROLE_KEY) {
   ].filter(Boolean).join(", ");
   throw new Error(`[Axon Fatal] Missing required env vars: ${missing}`);
 }
+
+// ── JWKS for jose verification (D2 — ES256/P-256) ──────────────────
+// Supabase signs JWTs with ES256 (P-256). We verify using the public JWKS endpoint.
+// createRemoteJWKSet caches keys in-memory and auto-refreshes on key rotation.
+const JWKS_URL = new URL(`${SUPABASE_URL}/auth/v1/.well-known/jwks.json`);
+const JWKS = createRemoteJWKSet(JWKS_URL);
 
 // ─── Route Prefix ─────────────────────────────────────────────────────
 /**
@@ -92,55 +99,64 @@ export const extractToken = (c: Context): string | null => {
   return header.split(" ")[1];
 };
 
+/** Auth error with structured response (DECISIONS.md D2 #2) */
+function authErr(c: Context, code: string, message: string, status: 401 | 403 | 503 = 401): Response {
+  return c.json({ error: code, message, source: "jose_middleware" }, status);
+}
+
+/** Verified JWT payload */
+interface VerifiedPayload {
+  sub: string;
+  email?: string;
+  exp?: number;
+  aud?: string;
+}
+
 /**
- * Decode JWT payload locally — ~0.1ms, zero network.
- * Does NOT verify the cryptographic signature (PostgREST/RLS handles that).
- * Does check `exp` locally to fast-fail expired tokens before wasting a DB round-trip.
+ * Verify JWT cryptographically using jose (D2).
+ * Checks: ES256 signature via JWKS, expiration, audience = "authenticated".
+ * JWKS keys are cached in-memory by jose (~0.3ms after first fetch).
+ * Returns verified payload or structured error.
  */
-const decodeJwtPayload = (
-  token: string,
-): { sub: string; email?: string; exp?: number } | null => {
+async function verifyJwt(token: string): Promise<VerifiedPayload | { error: string; status: 401 | 503 }> {
   try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
+    const { payload } = await jwtVerify(token, JWKS, {
+      audience: "authenticated",
+    });
 
-    // Base64URL → Base64
-    let base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    if (!payload.sub || typeof payload.sub !== "string") {
+      return { error: "jwt_missing_sub", status: 401 };
+    }
 
-    // Restore padding stripped by JWT spec. atob strictly requires length % 4 === 0.
-    // A valid Base64 string never has remainder 1; only 0, 2, or 3 are possible.
-    const pad = base64.length % 4;
-    if (pad === 1) return null; // invalid Base64
-    if (pad) base64 += "=".repeat(4 - pad);
-
-    const json = atob(base64);
-    const payload = JSON.parse(json);
-    if (!payload.sub) return null;
-    return payload;
-  } catch {
-    return null;
+    return {
+      sub: payload.sub,
+      email: payload.email as string | undefined,
+      exp: payload.exp,
+      aud: payload.aud as string | undefined,
+    };
+  } catch (e) {
+    if (e instanceof joseErrors.JWTExpired) {
+      return { error: "jwt_expired", status: 401 };
+    }
+    if (e instanceof joseErrors.JWTClaimValidationFailed) {
+      return { error: "jwt_claim_invalid", status: 401 };
+    }
+    if (e instanceof joseErrors.JWSSignatureVerificationFailed) {
+      return { error: "jwt_signature_invalid", status: 401 };
+    }
+    return { error: "jwt_verification_failed", status: 401 };
   }
-};
+}
 
 /**
- * Authenticate the request: decode JWT locally → return { user, db }.
+ * Authenticate the request: verify JWT with jose → return { user, db }.
  * Returns an error Response if auth fails, so routes can early-return.
  *
- * Security model:
- *   - This function only extracts claims (id, email) for application logic.
- *   - The real cryptographic validation happens when `db` makes its first query:
- *     PostgREST verifies the JWT signature + expiration before any SQL executes.
- *   - For admin-only routes that need verified user metadata, use
- *     getAdminClient().auth.getUser(token) directly.
- *
- * ⚠️  CRITICAL WARNING — NON-DB ROUTES:
- *   If a route calls an external API (OpenAI, Stripe, etc.) using user.id WITHOUT
- *   making any Supabase DB query, the JWT is NEVER cryptographically validated.
- *   An attacker could forge a JWT and consume paid API credits.
- *   For such routes, ALWAYS either:
- *     (a) Do a canary DB query first (e.g. db.from('profiles').select('id').single())
- *     (b) Use getAdminClient().auth.getUser(token) to verify the token via network
- *     (c) [Phase 3] Use jose to verify the JWT signature locally with SUPABASE_JWT_SECRET
+ * Security model (D2 — jose verification):
+ *   - JWT signature is cryptographically verified via ES256 JWKS (jose).
+ *   - Audience "authenticated" is enforced, preventing cross-project JWT abuse.
+ *   - Expiration is verified by jose (no manual check needed).
+ *   - PostgREST still verifies independently on every DB query (defense-in-depth).
  *
  * Usage:
  *   const auth = await authenticate(c);
@@ -154,23 +170,19 @@ export const authenticate = async (
 > => {
   const token = extractToken(c);
   if (!token) {
-    return err(c, "Missing Authorization header", 401);
+    return authErr(c, "missing_token", "Missing Authorization header", 401);
   }
 
-  const payload = decodeJwtPayload(token);
-  if (!payload) {
-    return err(c, "Malformed or invalid JWT", 401);
-  }
+  const result = await verifyJwt(token);
 
-  // Fast-fail expired tokens locally (saves a wasted DB round-trip)
-  if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
-    return err(c, "JWT has expired", 401);
+  if ("error" in result) {
+    return authErr(c, result.error, result.error, result.status);
   }
 
   const db = getUserClient(token);
 
   return {
-    user: { id: payload.sub, email: payload.email ?? "" },
+    user: { id: result.sub, email: result.email ?? "" },
     db,
   };
 };

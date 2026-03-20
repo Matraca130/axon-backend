@@ -148,7 +148,11 @@ export interface ClaudeChatResponse {
 
 const CLAUDE_TIMEOUT_MS = 30_000;
 
-export async function generateText(
+/**
+ * Internal text generation -- called by the public generateText() wrapper.
+ * Handles a single model attempt (no cross-model fallback).
+ */
+async function generateTextInternal(
   opts: ClaudeGenerateOpts,
 ): Promise<ClaudeGenerateResult> {
   const key = getApiKey();
@@ -202,6 +206,26 @@ export async function generateText(
       output: data.usage?.output_tokens ?? 0,
     },
   };
+}
+
+/**
+ * Public text generation with automatic fallback tier-down.
+ * If the target model (sonnet/opus) fails, falls back to haiku.
+ * If haiku itself fails, the error propagates normally.
+ */
+export async function generateText(
+  opts: ClaudeGenerateOpts,
+): Promise<ClaudeGenerateResult> {
+  const targetModel = opts.model ?? "sonnet";
+  try {
+    return await generateTextInternal({ ...opts, model: targetModel });
+  } catch (err) {
+    if (targetModel === "haiku") throw err; // No further fallback
+    console.warn(
+      `[AI Fallback] ${targetModel} failed: ${(err as Error).message}. Falling back to haiku.`,
+    );
+    return await generateTextInternal({ ...opts, model: "haiku" });
+  }
 }
 
 // ─── Chat with Tools (Agentic) ──────────────────────────
@@ -276,9 +300,17 @@ export function selectModelForTask(task: string): ClaudeModel {
   // Opus for complex tasks
   if (
     lowerTask.includes("report") ||
+    lowerTask.includes("reporte") ||
+    lowerTask.includes("informe") ||
     lowerTask.includes("analysis") ||
+    lowerTask.includes("análisis") ||
+    lowerTask.includes("analisis") ||
     lowerTask.includes("explain in depth") ||
-    lowerTask.includes("compare and contrast")
+    lowerTask.includes("explicar en profundidad") ||
+    lowerTask.includes("explicar en detalle") ||
+    lowerTask.includes("compare and contrast") ||
+    lowerTask.includes("comparar y contrastar") ||
+    lowerTask.includes("comparar")
   ) {
     return "opus";
   }
@@ -286,9 +318,18 @@ export function selectModelForTask(task: string): ClaudeModel {
   // Haiku for simple tasks
   if (
     lowerTask.includes("format") ||
+    lowerTask.includes("formatear") ||
+    lowerTask.includes("formato") ||
     lowerTask.includes("translate") ||
+    lowerTask.includes("traducir") ||
+    lowerTask.includes("traducción") ||
+    lowerTask.includes("traduccion") ||
     lowerTask.includes("summarize briefly") ||
-    lowerTask.includes("list")
+    lowerTask.includes("resumir brevemente") ||
+    lowerTask.includes("resumir") ||
+    lowerTask.includes("list") ||
+    lowerTask.includes("listar") ||
+    lowerTask.includes("enumerar")
   ) {
     return "haiku";
   }
@@ -303,6 +344,69 @@ export function selectModelForTask(task: string): ClaudeModel {
 // to log which model produced the output.
 
 export const GENERATE_MODEL = "claude-sonnet-4-20250514";
+
+// ─── Streaming Text Generation ──────────────────────────
+
+/**
+ * Streaming text generation via Anthropic Messages API.
+ * Returns a ReadableStream that yields SSE-formatted chunks.
+ */
+const STREAM_TIMEOUT_MS = 60_000;
+
+export async function generateTextStream(
+  opts: ClaudeGenerateOpts,
+): Promise<ReadableStream<Uint8Array>> {
+  const key = getApiKey();
+  const modelId = getModelId(opts.model ?? "sonnet");
+  const url = `${CLAUDE_BASE}/messages`;
+
+  const body: Record<string, unknown> = {
+    model: modelId,
+    max_tokens: opts.maxTokens ?? 2048,
+    messages: [{ role: "user", content: opts.prompt }],
+    stream: true,
+  };
+  if (opts.systemPrompt) body.system = opts.systemPrompt;
+  if (opts.temperature !== undefined) body.temperature = opts.temperature;
+
+  // Task 4.7: AbortController with 60s timeout for streaming requests
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": ANTHROPIC_VERSION,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      clearTimeout(timer);
+      const errBody = await res.text();
+      throw new Error(`Claude streaming failed (${res.status}): ${errBody.slice(0, 200)}`);
+    }
+
+    if (!res.body) {
+      clearTimeout(timer);
+      throw new Error("Claude streaming response has no body");
+    }
+
+    // Clear the timeout once we start reading — the stream itself handles its own lifecycle
+    clearTimeout(timer);
+    return res.body;
+  } catch (e) {
+    clearTimeout(timer);
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new Error(`Claude streaming timeout after ${STREAM_TIMEOUT_MS}ms`);
+    }
+    throw e;
+  }
+}
 
 // ─── Parse JSON safely from Claude output ─────────────────
 // Claude sometimes wraps JSON in markdown code blocks.
