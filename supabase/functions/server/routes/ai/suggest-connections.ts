@@ -159,7 +159,8 @@ aiSuggestConnectionsRoutes.post(
     const { data: existingConns, error: connErr } = await db
       .from("keyword_connections")
       .select("keyword_a_id, keyword_b_id, connection_type")
-      .or(`keyword_a_id.in.(${idList}),keyword_b_id.in.(${idList})`);
+      .or(`keyword_a_id.in.(${idList}),keyword_b_id.in.(${idList})`)
+      .is("deleted_at", null);
 
     if (connErr)
       return err(c, `Failed to fetch connections: ${connErr.message}`, 500);

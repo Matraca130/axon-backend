@@ -158,7 +158,8 @@ aiAnalyzeGraphRoutes.post(
     const { data: connections, error: connErr } = await db
       .from("keyword_connections")
       .select("keyword_a_id, keyword_b_id, connection_type, relationship")
-      .or(`keyword_a_id.in.(${idList}),keyword_b_id.in.(${idList})`);
+      .or(`keyword_a_id.in.(${idList}),keyword_b_id.in.(${idList})`)
+      .is("deleted_at", null);
 
     if (connErr)
       return err(
@@ -332,8 +333,15 @@ aiAnalyzeGraphRoutes.post(
     parsed.weak_areas = (parsed.weak_areas || []).filter((wa) => kwNameMap.has(wa.keyword_id));
     parsed.strong_areas = (parsed.strong_areas || []).filter((sa) => kwNameMap.has(sa.keyword_id));
     parsed.study_path = (parsed.study_path || []).filter((s) => kwNameMap.has(s.keyword_id));
+
+    // missing_connections: Claude returns keyword *names* (not IDs), so check
+    // against a name set. Also accept IDs for robustness.
+    const kwNameSet = new Set(kwNameMap.values());
+    const kwIdSet = new Set(kwNameMap.keys());
     parsed.missing_connections = (parsed.missing_connections || []).filter(
-      (mc) => kwNameMap.has(mc.from_keyword) && kwNameMap.has(mc.to_keyword),
+      (mc) =>
+        (kwNameSet.has(mc.from_keyword) || kwIdSet.has(mc.from_keyword)) &&
+        (kwNameSet.has(mc.to_keyword) || kwIdSet.has(mc.to_keyword)),
     );
 
     const enrichedStudyPath = parsed.study_path.map((step) => ({
