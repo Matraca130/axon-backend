@@ -212,39 +212,46 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
   const adminDb = getAdminClient();
 
   // 3. Gather student context (parallel queries)
+  // Note: Supabase PostgrestBuilder is a thenable but lacks .catch(),
+  // so we wrap each query with Promise.resolve() to get a real Promise.
   const [knowledgeResult, summaryResult, statsResult, xpResult] = await Promise.all([
     // Knowledge profile (weak/strong/lapsing/quiz_fail)
-    adminDb.rpc("get_student_knowledge_context", {
-      p_student_id: user.id,
-      p_institution_id: institutionId,
-    }).catch(() => ({ data: null })),
+    Promise.resolve(
+      adminDb.rpc("get_student_knowledge_context", {
+        p_student_id: user.id,
+        p_institution_id: institutionId,
+      })
+    ).catch(() => ({ data: null })),
 
     // Summary + course info (if summary_id provided)
     summaryId
-      ? adminDb
-          .from("summaries")
-          .select("title, topics!inner(title, sections!inner(title, semesters!inner(title, courses!inner(name))))")
-          .eq("id", summaryId)
-          .single()
-          .catch(() => ({ data: null }))
+      ? Promise.resolve(
+          adminDb
+            .from("summaries")
+            .select("title, topics!inner(title, sections!inner(title, semesters!inner(title, courses!inner(name))))")
+            .eq("id", summaryId)
+            .single()
+        ).catch(() => ({ data: null }))
       : Promise.resolve({ data: null }),
 
     // Student stats
-    adminDb
-      .from("student_stats")
-      .select("current_streak, total_reviews, total_time_seconds")
-      .eq("student_id", user.id)
-      .single()
-      .catch(() => ({ data: null })),
+    Promise.resolve(
+      adminDb
+        .from("student_stats")
+        .select("current_streak, total_reviews, total_time_seconds")
+        .eq("student_id", user.id)
+        .single()
+    ).catch(() => ({ data: null })),
 
     // Student XP
-    adminDb
-      .from("student_xp")
-      .select("total_xp, current_level, xp_today")
-      .eq("student_id", user.id)
-      .eq("institution_id", institutionId)
-      .single()
-      .catch(() => ({ data: null })),
+    Promise.resolve(
+      adminDb
+        .from("student_xp")
+        .select("total_xp, current_level, xp_today")
+        .eq("student_id", user.id)
+        .eq("institution_id", institutionId)
+        .single()
+    ).catch(() => ({ data: null })),
   ]);
 
   // Extract summary/course names from nested join
