@@ -177,8 +177,10 @@ Deno.test("getMasteryColor: well above threshold returns blue", () => {
 Deno.test("getMasteryColor: clinical priority raises domination threshold", () => {
   // Without priority: threshold=0.70, 0.75/0.70 = 1.07 → green
   assertEquals(getMasteryColor(0.75, 1.0, 0), "green");
-  // With priority=1: threshold=0.90, 0.75/0.90 = 0.833 → yellow
-  assertEquals(getMasteryColor(0.75, 1.0, 1), "yellow");
+  // With priority=1: threshold=0.90, 0.75/0.90 = 0.833 → orange (below 0.85 yellow cutoff)
+  assertEquals(getMasteryColor(0.75, 1.0, 1), "orange");
+  // With priority=1: threshold=0.90, 0.80/0.90 = 0.889 → yellow (above 0.85)
+  assertEquals(getMasteryColor(0.80, 1.0, 1), "yellow");
 });
 
 Deno.test("getMasteryColor: low retention reduces display mastery", () => {
