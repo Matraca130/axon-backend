@@ -323,7 +323,7 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
   if (!sessionResponse.ok) {
     const errorBody = await sessionResponse.text().catch(() => "");
     console.error("[Realtime] OpenAI error:", sessionResponse.status, errorBody.slice(0, 200));
-    return err(c, `Error de sesión OpenAI: ${sessionResponse.status}`, 502);
+    return err(c, `Error de sesión OpenAI: ${sessionResponse.status} — ${errorBody.slice(0, 300)}`, 502);
   }
 
   let session: Record<string, unknown>;
