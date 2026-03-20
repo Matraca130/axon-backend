@@ -300,16 +300,23 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "gpt-4o-realtime-preview",
-        voice: "coral",
-        instructions: systemPrompt,
-        tools: REALTIME_TOOLS,
-        input_audio_transcription: { model: "whisper-1" },
-        turn_detection: {
-          type: "server_vad",
-          threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 700,
+        session: {
+          type: "realtime",
+          model: "gpt-4o-realtime-preview",
+          instructions: systemPrompt,
+          tools: REALTIME_TOOLS,
+          audio: {
+            output: {
+              voice: "coral",
+            },
+          },
+          input_audio_transcription: { model: "whisper-1" },
+          turn_detection: {
+            type: "server_vad",
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 700,
+          },
         },
       }),
     });
