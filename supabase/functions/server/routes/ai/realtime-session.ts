@@ -303,22 +303,17 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
         session: {
           type: "realtime",
           model: "gpt-4o-realtime-preview",
+          modalities: ["text", "audio"],
+          voice: "coral",
           instructions: systemPrompt,
           tools: REALTIME_TOOLS,
-          audio: {
-            input: {
-              transcription: { model: "whisper-1" },
-              noise_reduction: { type: "near_field" },
-              turn_detection: {
-                type: "semantic_vad",
-                eagerness: "medium",
-                create_response: true,
-                interrupt_response: true,
-              },
-            },
-            output: {
-              voice: "coral",
-            },
+          input_audio_transcription: { model: "whisper-1" },
+          input_audio_noise_reduction: { type: "near_field" },
+          turn_detection: {
+            type: "semantic_vad",
+            eagerness: "medium",
+            create_response: true,
+            interrupt_response: true,
           },
         },
       }),
