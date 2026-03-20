@@ -303,6 +303,7 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
         session: {
           type: "realtime",
           model: "gpt-4o-realtime-preview",
+          output_modalities: ["audio"],
           instructions: systemPrompt,
           tools: REALTIME_TOOLS,
           audio: {
