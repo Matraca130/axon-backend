@@ -306,11 +306,13 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
           instructions: systemPrompt,
           tools: REALTIME_TOOLS,
           audio: {
+            input: {
+              transcription: { model: "whisper-1" },
+            },
             output: {
               voice: "coral",
             },
           },
-          input_audio_transcription: { model: "whisper-1" },
           turn_detection: {
             type: "server_vad",
             threshold: 0.5,
