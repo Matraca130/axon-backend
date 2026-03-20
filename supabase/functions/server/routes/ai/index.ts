@@ -75,6 +75,8 @@ async function aiRateLimitMiddleware(c: Context, next: Next) {
   if (url.pathname.endsWith("/ai/pre-generate")) return next();
   // Schedule agent has own rate limit bucket (10/hour)
   if (url.pathname.endsWith("/ai/schedule-agent")) return next();
+  // Voice calls use ephemeral tokens, no Gemini cost — own session management
+  if (url.pathname.endsWith("/ai/realtime-session")) return next();
 
   try {
     const auth = await authenticate(c);
