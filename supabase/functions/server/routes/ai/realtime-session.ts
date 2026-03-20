@@ -308,16 +308,18 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
           audio: {
             input: {
               transcription: { model: "whisper-1" },
+              turn_detection: {
+                type: "server_vad",
+                threshold: 0.5,
+                prefix_padding_ms: 300,
+                silence_duration_ms: 700,
+                create_response: true,
+                interrupt_response: true,
+              },
             },
             output: {
               voice: "coral",
             },
-          },
-          turn_detection: {
-            type: "server_vad",
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 700,
           },
         },
       }),
@@ -342,17 +344,19 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
     return err(c, "Respuesta inválida de OpenAI", 502);
   }
 
-  const clientSecret = (session.client_secret as Record<string, unknown>)?.value
+  // GA response shape: { value: "ek_...", expires_at: 123, session: {...} }
+  const clientSecret = session.value
+    ?? (session.client_secret as Record<string, unknown>)?.value
     ?? session.client_secret;
   if (!clientSecret || typeof clientSecret !== "string") {
-    console.error("[Realtime] Missing client_secret in OpenAI response:", JSON.stringify(session).slice(0, 200));
+    console.error("[Realtime] Missing client_secret in OpenAI response:", JSON.stringify(session).slice(0, 300));
     return err(c, "OpenAI no devolvió un token de sesión válido", 502);
   }
 
   // 6. Return ephemeral token to frontend
   return ok(c, {
     client_secret: clientSecret,
-    expires_at: (session.client_secret as Record<string, unknown>)?.expires_at ?? session.expires_at ?? null,
+    expires_at: session.expires_at ?? null,
     model: "gpt-4o-realtime-preview",
     voice: "coral",
   });
