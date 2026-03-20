@@ -517,8 +517,9 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
   const sanitizedContext = ragContext ? wrapXml("course_content", sanitizeForPrompt(ragContext, 6000)) : "";
   const userPrompt = `${sanitizedHistory}\n${sanitizedMessage}\n${sanitizedContext}`;
 
-  // --- Streaming path: ?stream=1 --------------------------------
-  const isStream = new URL(c.req.url).searchParams.get("stream") === "1";
+  // --- Streaming path: ?stream=1 OR body.stream === true ---------
+  const isStream = new URL(c.req.url).searchParams.get("stream") === "1" ||
+    body.stream === true;
 
   if (isStream) {
     try {
