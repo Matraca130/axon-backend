@@ -342,7 +342,9 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
   });
 
   } catch (handlerErr) {
-    console.error("[Realtime] Unhandled error:", (handlerErr as Error).message);
-    return err(c, "Error interno al crear sesión de voz", 500);
+    const msg = (handlerErr as Error).message || String(handlerErr);
+    const stack = (handlerErr as Error).stack || "";
+    console.error("[Realtime] Unhandled error:", msg, "\n", stack);
+    return err(c, `Error interno al crear sesión de voz: ${msg}`, 500);
   }
 });
