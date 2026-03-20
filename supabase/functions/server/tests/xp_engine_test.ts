@@ -28,7 +28,7 @@ Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "fake-service-role-key-for-testing");
 
 // Dynamic import after env vars are set
 const { awardXP, XP_TABLE } = await import("../xp-engine.ts");
-type { AwardXPParams, AwardResult } from "../xp-engine.ts";
+import type { AwardXPParams, AwardResult } from "../xp-engine.ts";
 
 // ═══════════════════════════════════════════════════════════════
 // Mock Supabase Client Factory
