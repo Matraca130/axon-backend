@@ -292,7 +292,7 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
-    sessionResponse = await fetch("https://api.openai.com/v1/realtime/sessions", {
+    sessionResponse = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
       method: "POST",
       signal: controller.signal,
       headers: {
