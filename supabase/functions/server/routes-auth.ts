@@ -9,7 +9,8 @@
  * Signup flow:
  *   1. Creates auth.users row via admin client (email_confirm: true)
  *   2. Creates profiles row with same id
- *   3. On profiles failure, rolls back auth.users row
+ *   3. Auto-joins user to first active institution as 'student'
+ *   On profiles failure, rolls back auth.users row
  *
  * GET /me auto-profile-creation:
  *   If the user exists in auth.users but has no profiles row (error PGRST116),
@@ -118,6 +119,40 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
     );
     await admin.auth.admin.deleteUser(userId);
     return safeErr(c, "Profile creation (auth rolled back)", profileError);
+  }
+
+  // Step 3: Auto-join first active institution as 'student'
+  // This ensures new signups land directly in the platform.
+  // Non-critical: if it fails, user is still created — admin can add them later.
+  try {
+    const { data: firstInst } = await admin
+      .from("institutions")
+      .select("id")
+      .eq("is_active", true)
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .single();
+
+    if (firstInst) {
+      const { error: memberError } = await admin.from("memberships").insert({
+        user_id: userId,
+        institution_id: firstInst.id,
+        role: "student",
+        is_active: true,
+      });
+      if (memberError) {
+        // Log but don't fail signup — membership can be added manually
+        console.warn(
+          `[Axon] Auto-join failed for ${userId} → institution ${firstInst.id}: ${memberError.message}`,
+        );
+      } else {
+        console.log(`[Axon] Auto-joined ${userId} → institution ${firstInst.id} as student`);
+      }
+    } else {
+      console.warn("[Axon] No active institution found for auto-join");
+    }
+  } catch (e) {
+    console.warn(`[Axon] Auto-join exception: ${(e as Error).message}`);
   }
 
   return ok(c, { id: userId, email }, 201);
