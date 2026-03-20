@@ -310,10 +310,8 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
               transcription: { model: "whisper-1" },
               noise_reduction: { type: "near_field" },
               turn_detection: {
-                type: "server_vad",
-                threshold: 0.6,
-                prefix_padding_ms: 300,
-                silence_duration_ms: 800,
+                type: "semantic_vad",
+                eagerness: "medium",
                 create_response: true,
                 interrupt_response: true,
               },
