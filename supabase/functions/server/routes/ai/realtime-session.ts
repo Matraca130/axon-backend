@@ -302,7 +302,7 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
       body: JSON.stringify({
         session: {
           type: "realtime",
-          model: "gpt-4o-realtime-preview",
+          model: "gpt-realtime-1.5",
           output_modalities: ["audio"],
           instructions: systemPrompt,
           tools: REALTIME_TOOLS,
@@ -318,7 +318,7 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
               },
             },
             output: {
-              voice: "coral",
+              voice: "marin",
             },
           },
         },
@@ -357,8 +357,8 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
   return ok(c, {
     client_secret: clientSecret,
     expires_at: session.expires_at ?? null,
-    model: "gpt-4o-realtime-preview",
-    voice: "coral",
+    model: "gpt-realtime-1.5",
+    voice: "marin",
   });
 
   } catch (handlerErr) {
