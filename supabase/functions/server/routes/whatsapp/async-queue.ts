@@ -23,6 +23,7 @@
  */
 
 import { getAdminClient } from "../../db.ts";
+import { collectWeeklyData } from "../../lib/weekly-data-collector.ts";
 import { generateText } from "../../claude-ai.ts";
 import { sendText } from "./wa-client.ts";
 
@@ -341,33 +342,10 @@ async function executeWeeklyReport(payload: LegacyJobPayload): Promise<void> {
   // C1 FIX: Decrypt phone
   const phone = await resolvePhone(payload);
 
-  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-
-  // C2 FIX: Removed broken reviewsRes query (Supabase JS doesn't support
-  // subqueries in .eq()). All needed data is in sessionsRes + progressRes.
-  const [sessionsRes, progressRes] = await Promise.all([
-    db.from("study_sessions")
-      .select("id, session_type, completed_at, total_reviews, correct_reviews")
-      .eq("student_id", user_id)
-      .gte("created_at", weekAgo),
-
-    db.from("topic_progress")
-      .select("topic_name, mastery_level")
-      .eq("student_id", user_id)
-      .order("mastery_level", { ascending: true })
-      .limit(10),
-  ]);
-
-  const sessions = sessionsRes.data || [];
-  const totalSessions = sessions.length;
-  const totalReviews = sessions.reduce((sum, s) => sum + (s.total_reviews || 0), 0);
-  const correctReviews = sessions.reduce((sum, s) => sum + (s.correct_reviews || 0), 0);
-  const accuracy = totalReviews > 0 ? Math.round((correctReviews / totalReviews) * 100) : 0;
-
-  const weakTopics = (progressRes.data || [])
-    .filter((t) => (t.mastery_level || 0) < 0.5)
-    .slice(0, 3)
-    .map((t) => t.topic_name);
+  // Data collection via shared lib (no institutionId in bot payloads)
+  const data = await collectWeeklyData(db, user_id);
+  const { totalSessions, totalReviews, accuracyPercent: accuracy } = data;
+  const weakTopics = data.weakTopics.slice(0, 3).map((t) => t.topicName);
 
   const { text: analysis } = await generateText({
     prompt:
