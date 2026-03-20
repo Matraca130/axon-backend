@@ -100,6 +100,15 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
     });
 
   if (authError) {
+    // Return user-friendly messages for common signup errors
+    // instead of the generic "Signup failed" from safeErr
+    const msg = authError.message?.toLowerCase() ?? "";
+    if (msg.includes("already been registered") || msg.includes("already registered") || msg.includes("duplicate")) {
+      return c.json({ error: "Este email ya esta registrado. Intenta iniciar sesion." }, 409);
+    }
+    if (msg.includes("rate limit") || msg.includes("too many")) {
+      return c.json({ error: "Demasiados intentos. Intenta de nuevo mas tarde." }, 429);
+    }
     return safeErr(c, "Signup", authError, 400);
   }
 
