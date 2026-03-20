@@ -132,12 +132,14 @@ Deno.test("selectStrategy: returns 'multi_query' for long queries (>5 words)", (
   assertEquals(result, "multi_query");
 });
 
-Deno.test("selectStrategy: returns 'multi_query' when history is deep (>2)", () => {
-  // R1 FIX: Even with a short query, deep history → multi_query
-  // (historyLength checked before wordCount)
-  assertEquals(selectStrategy("¿Y luego?", null, 3), "multi_query");
-  assertEquals(selectStrategy("¿Y luego?", null, 4), "multi_query");
+Deno.test("selectStrategy: returns 'multi_query' when history is deep (>4)", () => {
+  // Task 4.4: Threshold raised from > 2 to > 4 to avoid multi_query overhead
+  // historyLength <= 4 → falls through to wordCount check
+  assertEquals(selectStrategy("¿Y luego?", null, 3), "hyde");  // short query, shallow history → hyde
+  assertEquals(selectStrategy("¿Y luego?", null, 4), "hyde");  // still at boundary → hyde
+  // historyLength > 4 → multi_query regardless of wordCount
   assertEquals(selectStrategy("ATP", null, 5), "multi_query");
+  assertEquals(selectStrategy("¿Y luego?", null, 6), "multi_query");
 });
 
 Deno.test("selectStrategy: summaryId takes highest priority over everything", () => {
