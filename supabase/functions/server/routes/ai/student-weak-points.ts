@@ -109,10 +109,11 @@ aiWeakPointsRoutes.get(
     if (stErr)
       return err(c, `Failed to fetch subtopics: ${stErr.message}`, 500);
 
-    if (!subtopics || subtopics.length === 0) return ok(c, []);
+    // Note: if subtopics is empty, keywords without subtopics will still
+    // be returned with mastery=0 (handled in step 7b).
 
     // ── 4. Fetch BKT states for the student ─────────────────────
-    const subtopicIds = subtopics.map((s: { id: string }) => s.id);
+    const subtopicIds = (subtopics || []).map((s: { id: string }) => s.id);
     const { data: bktStates, error: bktErr } = await db
       .from("bkt_states")
       .select("subtopic_id, p_know, total_attempts, last_attempt_at")
@@ -169,6 +170,17 @@ aiWeakPointsRoutes.get(
           totalPKnow: pKnow,
           count: 1,
           lastReviewed: lastAt,
+        });
+      }
+    }
+
+    // ── 7b. Add keywords without subtopics as weakest (mastery=0) ──
+    for (const kw of keywords) {
+      if (!keywordAgg.has(kw.id)) {
+        keywordAgg.set(kw.id, {
+          totalPKnow: 0,
+          count: 0,
+          lastReviewed: null,
         });
       }
     }
