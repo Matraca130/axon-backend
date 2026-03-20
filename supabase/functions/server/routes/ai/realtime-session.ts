@@ -174,6 +174,7 @@ function buildSystemPrompt(ctx: StudentContext): string {
 // ── Route ─────────────────────────────────────────────────────────────
 
 aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
+  try {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
   const { user, db } = auth;
@@ -225,6 +226,7 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
           .select("title, topics!inner(title, sections!inner(title, semesters!inner(title, courses!inner(name))))")
           .eq("id", summaryId)
           .single()
+          .catch(() => ({ data: null }))
       : Promise.resolve({ data: null }),
 
     // Student stats
@@ -338,4 +340,9 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
     model: "gpt-4o-realtime-preview",
     voice: "coral",
   });
+
+  } catch (handlerErr) {
+    console.error("[Realtime] Unhandled error:", (handlerErr as Error).message);
+    return err(c, "Error interno al crear sesión de voz", 500);
+  }
 });
