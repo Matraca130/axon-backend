@@ -264,20 +264,32 @@ aiPreGenerateRoutes.post(
       "Eres un tutor educativo. Genera contenido de estudio de calidad.\n" +
       "Responde SOLO con JSON valido, sin explicaciones adicionales.";
 
+    // Pre-fetch all prof notes in one batch query instead of N+1 per keyword
+    const targetKeywordIds = targetKeywords.map((kw: { id: string }) => kw.id);
+    const { data: allProfNotes } = await db
+      .from("kw_prof_notes")
+      .select("keyword_id, note")
+      .in("keyword_id", targetKeywordIds)
+      .limit(15); // 3 per keyword * 5 keywords max
+
+    const profNotesMap = new Map<string, string>();
+    if (allProfNotes) {
+      const grouped = new Map<string, string[]>();
+      for (const n of allProfNotes as { keyword_id: string; note: string }[]) {
+        const arr = grouped.get(n.keyword_id) || [];
+        arr.push(n.note);
+        grouped.set(n.keyword_id, arr);
+      }
+      for (const [kwId, notes] of grouped) {
+        profNotesMap.set(kwId, notes.slice(0, 3).join("; "));
+      }
+    }
+
     for (const kw of targetKeywords) {
       try {
-        // 7a. Fetch professor notes for this keyword (INC-6 pattern)
-        let profNotesContext = "";
-        const { data: profNotes } = await db
-          .from("kw_prof_notes")
-          .select("note")
-          .eq("keyword_id", kw.id)
-          .limit(3);
-
-        if (profNotes && profNotes.length > 0) {
-          const notesJoined = profNotes.map((n: { note: string }) => n.note).join("; ");
-          profNotesContext = sanitizeForPrompt(notesJoined, 1000);
-        }
+        // 7a. Use pre-fetched professor notes (was N+1, now O(1) lookup)
+        const profNotesJoined = profNotesMap.get(kw.id as string) || "";
+        const profNotesContext = profNotesJoined ? sanitizeForPrompt(profNotesJoined, 1000) : "";
 
         // 7b. Build prompt (D17: no student profile, generic content)
         let userPrompt = "";

@@ -85,9 +85,10 @@ progressRoutes.get(`${PREFIX}/topic-progress`, async (c: Context) => {
 
   try {
     // Step 1: Get published summaries for this topic
+    // Explicit columns: excludes content_markdown (tens of KB) and embedding (6 KB)
     const { data: summaries, error: sumErr } = await db
       .from("summaries")
-      .select("*")
+      .select("id, topic_id, title, status, order_index, is_active, created_by, created_at, updated_at, deleted_at")
       .eq("topic_id", topicId)
       .eq("status", "published")
       .eq("is_active", true)
@@ -108,7 +109,7 @@ progressRoutes.get(`${PREFIX}/topic-progress`, async (c: Context) => {
     const [readingStatesResult, flashcardsResult] = await Promise.all([
       db
         .from("reading_states")
-        .select("*")
+        .select("id, student_id, summary_id, scroll_position, time_spent_seconds, completed, last_read_at, created_at, updated_at")
         .eq("student_id", user.id)
         .in("summary_id", summaryIds),
 
@@ -196,9 +197,10 @@ progressRoutes.get(`${PREFIX}/topics-overview`, async (c: Context) => {
   try {
     // Step 1: Get all published, active summaries for all requested topics
     // F3 FIX: Added .eq("status", "published") for consistency with topic-progress
+    // Explicit columns: excludes content_markdown (tens of KB) and embedding (6 KB)
     const { data: allSummaries, error: sumErr } = await db
       .from("summaries")
-      .select("*")
+      .select("id, topic_id, title, status, order_index, is_active, created_by, created_at, updated_at, deleted_at")
       .in("topic_id", topicIds)
       .eq("status", "published")
       .eq("is_active", true)

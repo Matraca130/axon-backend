@@ -70,12 +70,17 @@ async function verifySessionOwnership(
   return null;
 }
 
-// ─── Leech Threshold Loader ─────────────────────────────────
+// ─── Leech Threshold Loader (cached 60s) ────────────────────
+
+let _leechCache: { value: number; ts: number } | null = null;
 
 async function loadLeechThreshold(
   db: SupabaseClient,
   _userId: string,
 ): Promise<number> {
+  if (_leechCache && Date.now() - _leechCache.ts < 60_000) {
+    return _leechCache.value;
+  }
   try {
     const { data: globalData } = await db
       .from("algorithm_config")
@@ -83,7 +88,9 @@ async function loadLeechThreshold(
       .is("institution_id", null)
       .maybeSingle();
 
-    return globalData?.leech_threshold ?? DEFAULT_LEECH_THRESHOLD;
+    const result = globalData?.leech_threshold ?? DEFAULT_LEECH_THRESHOLD;
+    _leechCache = { value: result, ts: Date.now() };
+    return result;
   } catch {
     return DEFAULT_LEECH_THRESHOLD;
   }

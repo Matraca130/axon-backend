@@ -64,18 +64,28 @@ export async function resolveSummaryIdsForStudent(
   const allIds = new Set<string>();
   let rpcFailed = false;
 
-  for (const m of memberships) {
-    const { data: rpcData, error: rpcError } = await db.rpc(
-      "resolve_student_summary_ids",
-      { p_student_id: userId, p_institution_id: m.institution_id },
-    );
+  // Parallelize RPC calls across institutions instead of sequential loop
+  const rpcResults = await Promise.allSettled(
+    memberships.map((m: { institution_id: string }) =>
+      db.rpc("resolve_student_summary_ids", {
+        p_student_id: userId,
+        p_institution_id: m.institution_id,
+      })
+    ),
+  );
 
+  for (const result of rpcResults) {
+    if (result.status === "rejected") {
+      console.warn(`[study-queue] resolve_student_summary_ids RPC failed, using fallback: ${(result.reason as Error).message}`);
+      rpcFailed = true;
+      break;
+    }
+    const { data: rpcData, error: rpcError } = result.value;
     if (rpcError) {
       console.warn(`[study-queue] resolve_student_summary_ids RPC failed, using fallback: ${rpcError.message}`);
       rpcFailed = true;
       break;
     }
-
     if (rpcData) {
       for (const r of rpcData as { summary_id: string }[]) {
         allIds.add(r.summary_id);

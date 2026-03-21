@@ -13,23 +13,20 @@ import { awardXP, XP_TABLE } from "./xp-engine.ts";
 import { getAdminClient } from "./db.ts";
 
 // --- Helper: Resolve institution_id from study session ---
+// Uses PostgREST embedded resource to collapse 2 sequential queries into 1.
 async function resolveInstitutionFromSession(
   sessionId: string,
 ): Promise<string | null> {
   const db = getAdminClient();
   try {
-    const { data: session } = await db
+    const { data } = await db
       .from("study_sessions")
-      .select("course_id")
+      .select("courses(institution_id)")
       .eq("id", sessionId)
       .single();
-    if (!session?.course_id) return null;
-    const { data: course } = await db
-      .from("courses")
-      .select("institution_id")
-      .eq("id", session.course_id)
-      .single();
-    return course?.institution_id ?? null;
+    if (!data?.courses) return null;
+    const courses = data.courses as { institution_id: string } | null;
+    return courses?.institution_id ?? null;
   } catch {
     return null;
   }

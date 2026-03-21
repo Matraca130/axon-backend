@@ -192,18 +192,32 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
     const chunkTexts = chunksToProcess.map((chunk: { content: string }) => chunk.content);
     const allEmbeddings = await generateEmbeddings(chunkTexts);
 
-    for (let i = 0; i < chunksToProcess.length; i++) {
-      const chunk = chunksToProcess[i];
-      const { error: updateErr } = await adminDb
-        .from("chunks")
-        .update({ embedding: JSON.stringify(allEmbeddings[i]) })
-        .eq("id", chunk.id);
+    // Batch UPDATE: parallel updates in batches of 25 instead of sequential
+    const BATCH_SIZE = 25;
+    for (let b = 0; b < chunksToProcess.length; b += BATCH_SIZE) {
+      const batch = chunksToProcess.slice(b, b + BATCH_SIZE);
+      const batchEmbeddings = allEmbeddings.slice(b, b + BATCH_SIZE);
 
-      if (updateErr) {
-        failed++;
-        errors.push(`${chunk.id}: ${updateErr.message}`);
-      } else {
-        processed++;
+      const results = await Promise.allSettled(
+        batch.map((chunk: { id: string; content: string }, i: number) =>
+          adminDb
+            .from("chunks")
+            .update({ embedding: JSON.stringify(batchEmbeddings[i]) })
+            .eq("id", chunk.id)
+        ),
+      );
+
+      for (let j = 0; j < results.length; j++) {
+        const result = results[j];
+        if (result.status === "rejected" || (result.status === "fulfilled" && result.value.error)) {
+          failed++;
+          const errMsg = result.status === "rejected"
+            ? (result.reason as Error).message
+            : result.value.error!.message;
+          errors.push(`${batch[j].id}: ${errMsg}`);
+        } else {
+          processed++;
+        }
       }
     }
   } catch (batchErr) {

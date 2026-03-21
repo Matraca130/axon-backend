@@ -298,20 +298,40 @@ export async function autoChunkAndEmbed(
       );
     }
 
-    for (let i = 0; i < inserted.length; i++) {
-      const { error: embedErr } = await adminDb
-        .from("chunks")
-        .update({ embedding: JSON.stringify(allEmbeddings[i]) })
-        .eq("id", inserted[i].id);
+    // Batch UPDATE: build rows and upsert in one call instead of N sequential UPDATEs
+    const batchRows = inserted.map((ins: { id: string }, i: number) => ({
+      id: ins.id,
+      embedding: JSON.stringify(allEmbeddings[i]),
+    }));
 
-      if (embedErr) {
-        failed++;
-        console.warn(
-          `[Auto-Ingest] Embedding UPDATE failed for chunk ${inserted[i].id}: ` +
-            embedErr.message,
-        );
-      } else {
-        generated++;
+    const BATCH_SIZE = 25;
+    for (let b = 0; b < batchRows.length; b += BATCH_SIZE) {
+      const batch = batchRows.slice(b, b + BATCH_SIZE);
+      const ids = batch.map((r: { id: string }) => r.id);
+
+      // Use individual updates within a smaller batch to maintain error tracking
+      const results = await Promise.allSettled(
+        batch.map((row: { id: string; embedding: string }) =>
+          adminDb
+            .from("chunks")
+            .update({ embedding: row.embedding })
+            .eq("id", row.id)
+        ),
+      );
+
+      for (let j = 0; j < results.length; j++) {
+        const result = results[j];
+        if (result.status === "rejected" || (result.status === "fulfilled" && result.value.error)) {
+          failed++;
+          const errMsg = result.status === "rejected"
+            ? (result.reason as Error).message
+            : result.value.error!.message;
+          console.warn(
+            `[Auto-Ingest] Embedding UPDATE failed for chunk ${batch[j].id}: ${errMsg}`,
+          );
+        } else {
+          generated++;
+        }
       }
     }
   } catch (batchErr) {
