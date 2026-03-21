@@ -308,7 +308,8 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
           tools: REALTIME_TOOLS,
           audio: {
             input: {
-              transcription: { model: "whisper-1" },
+              format: { type: "audio/pcm", rate: 24000 },
+              transcription: { model: "gpt-4o-mini-transcribe" },
               noise_reduction: { type: "near_field" },
               turn_detection: {
                 type: "semantic_vad",
@@ -318,6 +319,7 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
               },
             },
             output: {
+              format: { type: "audio/pcm" },
               voice: "marin",
             },
           },
