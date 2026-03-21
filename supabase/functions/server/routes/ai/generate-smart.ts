@@ -374,29 +374,23 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
       return err(c, `Daily AI generation limit reached (${planCheck.limit}). Upgrade your plan.`, 429);
     }
 
-    // Fetch context
-    const { data: summary } = await db
-      .from("summaries")
-      .select("content_markdown")
-      .eq("id", chosen.summary_id)
-      .single();
+    // Fetch context — all 3 queries are independent, run in parallel
+    const [summaryResult, targetCtx, profileResult] = await Promise.all([
+      db.from("summaries").select("content_markdown").eq("id", chosen.summary_id).single(),
+      fetchTargetContext(db, user.id, chosen),
+      db.rpc("get_student_knowledge_context", {
+        p_student_id: user.id,
+        p_institution_id: resolvedInstId as string,
+      }),
+    ]);
 
     const contentSnippet = truncateForPrompt(
-      summary?.content_markdown || "", 1500,
+      summaryResult.data?.content_markdown || "", 1500,
     );
-
-    const { profNotesContext, bktContext } = await fetchTargetContext(
-      db, user.id, chosen,
-    );
-
-    let profileContext = "";
-    const { data: profile } = await db.rpc("get_student_knowledge_context", {
-      p_student_id: user.id,
-      p_institution_id: resolvedInstId as string,
-    });
-    if (profile) {
-      profileContext = `\nPerfil del alumno: ${JSON.stringify(profile)}`;
-    }
+    const { profNotesContext, bktContext } = targetCtx;
+    const profileContext = profileResult.data
+      ? `\nPerfil del alumno: ${JSON.stringify(profileResult.data)}`
+      : "";
 
     const ctx = buildPromptContext(
       chosen, contentSnippet, profNotesContext, profileContext, bktContext,
@@ -457,26 +451,33 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
   const institutionIdCache = new Map<string, string>();
   const uniqueSummaryIds = [...new Set(selectedTargets.map((t) => t.summary_id))];
 
-  for (const sid of uniqueSummaryIds) {
-    // PF-05: Institution check BEFORE any Claude call
-    const { data: instId } = await db.rpc("resolve_parent_institution", {
-      p_table: "summaries", p_id: sid,
-    });
-    if (!instId) return err(c, `Summary ${sid} not found or inaccessible`, 404);
+  // Parallelize institution resolution + content fetch per summary
+  const resolutionResults = await Promise.all(
+    uniqueSummaryIds.map(async (sid) => {
+      const [instResult, summaryResult] = await Promise.all([
+        db.rpc("resolve_parent_institution", { p_table: "summaries", p_id: sid }),
+        db.from("summaries").select("content_markdown").eq("id", sid).single(),
+      ]);
+      return { sid, instId: instResult.data, summaryData: summaryResult.data };
+    }),
+  );
 
+  // Validate all resolutions (fail-fast on first error)
+  for (const { sid, instId } of resolutionResults) {
+    if (!instId) return err(c, `Summary ${sid} not found or inaccessible`, 404);
+  }
+
+  // Sequential role checks (guard clauses that may return HTTP errors)
+  for (const { sid, instId } of resolutionResults) {
     const roleCheck = await requireInstitutionRole(
       db, user.id, instId as string, ALL_ROLES,
     );
     if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
-
     institutionIdCache.set(sid, instId as string);
+  }
 
-    const { data: summaryData } = await db
-      .from("summaries")
-      .select("content_markdown")
-      .eq("id", sid)
-      .single();
-
+  // Populate content cache
+  for (const { sid, summaryData } of resolutionResults) {
     summaryContentCache.set(
       sid, truncateForPrompt(summaryData?.content_markdown || "", 1500),
     );

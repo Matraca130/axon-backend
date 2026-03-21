@@ -396,6 +396,14 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   let rerankApplied = false;
   let strategyMeta: Record<string, unknown> = {};
 
+  // Start profile fetch in parallel with RAG search (independent, ~50-100ms hidden behind search latency)
+  const profilePromise = db.rpc("get_student_knowledge_context", {
+    p_student_id: user.id,
+    p_institution_id: institutionId,
+  }).then(({ data }) =>
+    data ? `\nPerfil del alumno (adapta tu respuesta a su nivel): ${JSON.stringify(data)}` : ""
+  ).catch(() => "");
+
   try {
     const embeddingOutput = await executeRetrievalEmbedding(
       strategy, searchQuery,
@@ -486,18 +494,8 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     console.warn("[RAG Chat] Search failed, continuing without context:", e);
   }
 
-  let profileContext = "";
-  try {
-    const { data: profile } = await db.rpc("get_student_knowledge_context", {
-      p_student_id: user.id,
-      p_institution_id: institutionId,
-    });
-    if (profile) {
-      profileContext = `\nPerfil del alumno (adapta tu respuesta a su nivel): ${JSON.stringify(profile)}`;
-    }
-  } catch {
-    // Profile not available, continue without it
-  }
+  // Await the profile fetch started before the search (runs in parallel, ~free latency)
+  const profileContext = await profilePromise;
 
   const systemPrompt = `Eres un tutor educativo amable y preciso.
 Responde basandote en el contexto proporcionado del material de estudio.

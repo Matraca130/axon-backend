@@ -32,7 +32,7 @@ profileRoutes.get(`${PREFIX}/gamification/profile`, async (c: Context) => {
   const [xpResult, statsResult, badgeCountResult] = await Promise.all([
     db
       .from("student_xp")
-      .select("*")
+      .select("total_xp, xp_today, xp_this_week, current_level, daily_goal_minutes, streak_freezes_owned")
       .eq("student_id", user.id)
       .eq("institution_id", institutionId)
       .maybeSingle(),
@@ -96,7 +96,7 @@ profileRoutes.get(`${PREFIX}/gamification/xp-history`, async (c: Context) => {
 
   const { data, count, error } = await db
     .from("xp_transactions")
-    .select("*", { count: "exact" })
+    .select("id, action, xp_base, xp_final, bonus_type, multiplier, source_type, source_id, created_at", { count: "estimated" })
     .eq("student_id", user.id)
     .eq("institution_id", institutionId)
     .order("created_at", { ascending: false })
