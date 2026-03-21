@@ -4,8 +4,10 @@
  * Called by crud-factory.ts fire-and-forget after successful
  * POST or PUT on the summaries table.
  *
- * Triggers autoChunkAndEmbed() to split the summary's
- * content_markdown into chunks and generate embeddings.
+ * Triggers two pipelines (both fire-and-forget):
+ *   1. autoChunkAndEmbed() — chunks + embeddings (existing)
+ *   2. analyzeTopicDifficulty() — AI difficulty estimation (sessioncalendario)
+ *      Runs AFTER auto-ingest completes so embeddings are ready.
  *
  * Trigger conditions:
  *   - POST (create): always, if content_markdown is non-empty
@@ -28,6 +30,7 @@
 
 import type { AfterWriteParams } from "./crud-factory.ts";
 import { autoChunkAndEmbed } from "./auto-ingest.ts";
+import { analyzeTopicDifficulty } from "./topic-analyzer.ts";
 
 /**
  * afterWrite hook for summaries.
@@ -77,17 +80,28 @@ export function onSummaryWrite({
     return;
   }
 
-  // ── Fire: trigger auto-ingest (fire-and-forget).
+  // ── Fire: trigger auto-ingest + topic analysis (fire-and-forget).
   //
-  // - NOT awaited: the HTTP response returns immediately.
-  // - autoChunkAndEmbed logs its own start/end messages,
-  //   so .then() is intentionally silent to avoid double-logging.
-  // - .catch() logs errors that escape autoChunkAndEmbed
-  //   (fatal throws: summary not found, chunk INSERT failed).
-  autoChunkAndEmbed(summaryId, institutionId).catch((e) => {
-    console.error(
-      `[Summary Hook] Auto-ingest failed for summary ${summaryId}:`,
-      (e as Error).message,
-    );
-  });
+  // Pipeline: autoChunkAndEmbed → then → analyzeTopicDifficulty
+  //
+  // The topic analysis runs AFTER auto-ingest so that:
+  //   1. Embeddings are ready (needed for find_similar_topics)
+  //   2. We know the ingest succeeded (chunks_created > 0)
+  //
+  // Both stages are fire-and-forget: the HTTP response returns immediately.
+  const topicId = row.topic_id as string | undefined;
+
+  autoChunkAndEmbed(summaryId, institutionId)
+    .then((result) => {
+      // Only analyze if ingest was successful and topic_id is available
+      if (result.chunks_created > 0 && topicId) {
+        return analyzeTopicDifficulty(summaryId, topicId, institutionId);
+      }
+    })
+    .catch((e) => {
+      console.error(
+        `[Summary Hook] Pipeline failed for summary ${summaryId}:`,
+        (e as Error).message,
+      );
+    });
 }
