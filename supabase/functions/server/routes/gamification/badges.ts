@@ -150,18 +150,22 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
 
   const newBadges: Array<Record<string, unknown>> = [];
 
-  for (const badge of unearnedBadges) {
+  // Evaluate all Phase 1 badges, then award in parallel (was sequential)
+  const passedPhase1 = unearnedBadges.filter((badge) => {
     const criteria = badge.criteria as string;
-    if (!criteria) continue;
-
+    if (!criteria) return false;
     const conditions = criteria.split(" AND ").map((s: string) => s.trim());
-    const allMet = conditions.every((cond: string) =>
+    return conditions.length > 0 && conditions.every((cond: string) =>
       evaluateSimpleCondition(cond, evalContext),
     );
+  });
 
-    if (allMet) {
-      await tryAwardBadge(adminDb, user.id, institutionId, badge, newBadges);
-    }
+  if (passedPhase1.length > 0) {
+    await Promise.allSettled(
+      passedPhase1.map((badge) =>
+        tryAwardBadge(adminDb, user.id, institutionId, badge, newBadges),
+      ),
+    );
   }
 
   // ══════════════════════════════════════════════════════════════
