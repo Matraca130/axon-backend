@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS weekly_reports (
   ai_summary TEXT,
   ai_strengths JSONB DEFAULT '[]',
   ai_weaknesses JSONB DEFAULT '[]',
-  ai_mastery_trend TEXT,
+  ai_mastery_trend TEXT CHECK (ai_mastery_trend IN ('improving', 'stable', 'declining')),
   ai_recommended_focus JSONB DEFAULT '[]',
   ai_model TEXT,
   ai_tokens_used INTEGER DEFAULT 0,

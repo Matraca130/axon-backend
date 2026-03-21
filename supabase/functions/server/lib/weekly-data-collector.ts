@@ -144,17 +144,22 @@ export async function collectWeeklyData(
 ): Promise<WeeklyRawData> {
   // Use week boundary (Mon 00:00 – Sun 23:59 UTC) instead of rolling 7 days.
   // This aligns data collection with the week_start/week_end stored in weekly_reports.
-  const weekStartDate = formatDate(getCurrentWeekStart());
+  const weekStart = getCurrentWeekStart();
+  const weekStartDate = formatDate(weekStart);
   const weekEndDate = formatDate(getCurrentWeekEnd());
+  // Next Monday = weekStart + 7 days. Used as exclusive upper bound for timestamps.
+  const nextMonday = new Date(weekStart);
+  nextMonday.setUTCDate(nextMonday.getUTCDate() + 7);
+  const nextMondayDate = formatDate(nextMonday);
 
   // Build parallel queries — always run sessions, activities, stats
   const queries: Promise<unknown>[] = [
-    // Q1: study_sessions within current week (Mon–Sun)
+    // Q1: study_sessions within current week (Mon 00:00 – next Mon 00:00, exclusive)
     db.from("study_sessions")
       .select("id, total_reviews, correct_reviews")
       .eq("student_id", studentId)
       .gte("created_at", `${weekStartDate}T00:00:00Z`)
-      .lte("created_at", `${weekEndDate}T23:59:59Z`),
+      .lt("created_at", `${nextMondayDate}T00:00:00Z`),
 
     // Q2: daily_activities within current week — count distinct days + sum time
     db.from("daily_activities")
@@ -201,6 +206,17 @@ export async function collectWeeklyData(
       // deno-lint-ignore no-explicit-any
       any, any, any, any, any,
     ];
+
+  // ── Fail fast on query errors (prevents silent all-zero reports) ──
+  const errors: string[] = [];
+  if (sessionsRes.error) errors.push(`sessions: ${sessionsRes.error.message}`);
+  if (activitiesRes.error) errors.push(`activities: ${activitiesRes.error.message}`);
+  if (statsRes.error) errors.push(`stats: ${statsRes.error.message}`);
+  if (profileRes.error) errors.push(`knowledge: ${profileRes.error.message}`);
+  if (xpRes.error) errors.push(`xp: ${xpRes.error.message}`);
+  if (errors.length > 0) {
+    throw new Error(`Weekly data queries failed: ${errors.join("; ")}`);
+  }
 
   // ── Parse sessions ──
   const sessions = sessionsRes.data || [];

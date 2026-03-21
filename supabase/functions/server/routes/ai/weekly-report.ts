@@ -185,7 +185,18 @@ aiWeeklyReportRoutes.post(`${PREFIX}/ai/weekly-report`, async (c: Context) => {
       jsonMode: true,
     });
 
-    aiResult = parseClaudeJson(res.text);
+    const parsed = parseClaudeJson(res.text);
+
+    // Validate AI response shape — AI is non-deterministic, so we guard every field
+    const VALID_TRENDS = new Set(["improving", "stable", "declining"]);
+    aiResult = {
+      summary: typeof parsed.summary === "string" ? parsed.summary : "Resumen no disponible.",
+      strengths: Array.isArray(parsed.strengths) ? parsed.strengths.filter((s: unknown) => typeof s === "string") : [],
+      weaknesses: Array.isArray(parsed.weaknesses) ? parsed.weaknesses.filter((s: unknown) => typeof s === "string") : [],
+      masteryTrend: VALID_TRENDS.has(parsed.masteryTrend) ? parsed.masteryTrend : "stable",
+      recommendedFocus: Array.isArray(parsed.recommendedFocus) ? parsed.recommendedFocus : [],
+    };
+
     tokensUsed = res.tokensUsed.input + res.tokensUsed.output;
     aiModel = model; // will be "opus" or "haiku" if fallback kicked in
   } catch (e) {
@@ -236,9 +247,9 @@ aiWeeklyReportRoutes.post(`${PREFIX}/ai/weekly-report`, async (c: Context) => {
       ai_latency_ms: latencyMs,
     }, { onConflict: "student_id,institution_id,week_start", ignoreDuplicates: true })
     .select("*")
-    .single();
+    .maybeSingle();
 
-  // If upsert returned no row (race: another request won), fetch the existing one
+  // If upsert returned no row (race: another request won the DO NOTHING), fetch it
   if (upsertErr || !upserted) {
     const { data: raceWinner, error: fetchErr } = await adminDb
       .from("weekly_reports")
