@@ -125,7 +125,13 @@ aiWeeklyReportRoutes.post(`${PREFIX}/ai/weekly-report`, async (c: Context) => {
   }
 
   // Collect all weekly data server-side
-  const rawData = await collectWeeklyData(db, user.id, institutionId);
+  let rawData;
+  try {
+    rawData = await collectWeeklyData(db, user.id, institutionId);
+  } catch (e) {
+    console.error(`[WeeklyReport] Data collection failed: ${(e as Error).message}`);
+    return err(c, "Failed to collect weekly study data. Please try again later.", 500);
+  }
 
   // Generate AI analysis
   const startMs = Date.now();
@@ -196,11 +202,15 @@ aiWeeklyReportRoutes.post(`${PREFIX}/ai/weekly-report`, async (c: Context) => {
 
   const latencyMs = Date.now() - startMs;
 
-  // Persist via admin client (bypasses RLS for INSERT)
+  // Persist via admin client (bypasses RLS for INSERT).
+  // Use upsert with onConflict to handle race conditions: if two concurrent
+  // POSTs pass the "existing?" check, the UNIQUE constraint on
+  // (student_id, institution_id, week_start) prevents duplicates.
+  // ignoreDuplicates=true makes the second request a no-op instead of error.
   const adminDb = getAdminClient();
-  const { data: inserted, error: insertErr } = await adminDb
+  const { data: upserted, error: upsertErr } = await adminDb
     .from("weekly_reports")
-    .insert({
+    .upsert({
       student_id: user.id,
       institution_id: institutionId,
       week_start: weekStart,
@@ -224,13 +234,25 @@ aiWeeklyReportRoutes.post(`${PREFIX}/ai/weekly-report`, async (c: Context) => {
       ai_model: aiModel,
       ai_tokens_used: tokensUsed,
       ai_latency_ms: latencyMs,
-    })
+    }, { onConflict: "student_id,institution_id,week_start", ignoreDuplicates: true })
     .select("*")
     .single();
 
-  if (insertErr) return safeErr(c, "save weekly report", insertErr);
+  // If upsert returned no row (race: another request won), fetch the existing one
+  if (upsertErr || !upserted) {
+    const { data: raceWinner, error: fetchErr } = await adminDb
+      .from("weekly_reports")
+      .select("*")
+      .eq("student_id", user.id)
+      .eq("institution_id", institutionId)
+      .eq("week_start", weekStart)
+      .single();
 
-  return ok(c, mapReport(inserted), 201);
+    if (fetchErr || !raceWinner) return safeErr(c, "save weekly report", upsertErr || fetchErr);
+    return ok(c, mapReport(raceWinner));
+  }
+
+  return ok(c, mapReport(upserted), 201);
 });
 
 // ─── Response Mapper ─────────────────────────────────────

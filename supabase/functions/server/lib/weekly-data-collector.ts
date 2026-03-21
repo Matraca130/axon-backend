@@ -76,15 +76,29 @@ export function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
+// ─── Pure Helpers (exported for testing) ─────────────────
+
+/** Accuracy percentage rounded to 2 decimals. Returns 0 when totalReviews is 0. */
+export function computeAccuracy(correctReviews: number, totalReviews: number): number {
+  return totalReviews > 0
+    ? Math.round((correctReviews / totalReviews) * 10000) / 100
+    : 0;
+}
+
+/** Days active capped at 7 (one week max). */
+export function computeDaysActive(activityCount: number): number {
+  return Math.min(activityCount, 7);
+}
+
 // ─── RPC Response Mapping ────────────────────────────────
 
-interface KnowledgeProfile {
+export interface KnowledgeProfile {
   weak?: { sub: string; kw: string; p: number; att: number }[];
   strong?: { sub: string; kw: string; p: number }[];
   lapsing?: { card: string; kw: string; lapses: number; state: number }[];
 }
 
-function mapKnowledgeProfile(profile: KnowledgeProfile | null): {
+export function mapKnowledgeProfile(profile: KnowledgeProfile | null): {
   weakTopics: WeeklyWeakTopic[];
   strongTopics: WeeklyStrongTopic[];
   lapsingCards: WeeklyLapsingCard[];
@@ -128,21 +142,26 @@ export async function collectWeeklyData(
   studentId: string,
   institutionId?: string,
 ): Promise<WeeklyRawData> {
-  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  // Use week boundary (Mon 00:00 – Sun 23:59 UTC) instead of rolling 7 days.
+  // This aligns data collection with the week_start/week_end stored in weekly_reports.
+  const weekStartDate = formatDate(getCurrentWeekStart());
+  const weekEndDate = formatDate(getCurrentWeekEnd());
 
   // Build parallel queries — always run sessions, activities, stats
   const queries: Promise<unknown>[] = [
-    // Q1: study_sessions (last 7 days)
+    // Q1: study_sessions within current week (Mon–Sun)
     db.from("study_sessions")
       .select("id, total_reviews, correct_reviews")
       .eq("student_id", studentId)
-      .gte("created_at", weekAgo),
+      .gte("created_at", `${weekStartDate}T00:00:00Z`)
+      .lte("created_at", `${weekEndDate}T23:59:59Z`),
 
-    // Q2: daily_activities (last 7 days) — count distinct days + sum time
+    // Q2: daily_activities within current week — count distinct days + sum time
     db.from("daily_activities")
       .select("*")
       .eq("student_id", studentId)
-      .gte("activity_date", weekAgo.slice(0, 10)),
+      .gte("activity_date", weekStartDate)
+      .lte("activity_date", weekEndDate),
 
     // Q3: student_stats — current streak
     db.from("student_stats")
@@ -194,13 +213,11 @@ export async function collectWeeklyData(
     (sum: number, s: { correct_reviews?: number }) => sum + (s.correct_reviews || 0),
     0,
   );
-  const accuracyPercent = totalReviews > 0
-    ? Math.round((correctReviews / totalReviews) * 10000) / 100
-    : 0;
+  const accuracyPercent = computeAccuracy(correctReviews, totalReviews);
 
   // ── Parse daily activities ──
   const activities = activitiesRes.data || [];
-  const daysActive = Math.min(activities.length, 7);
+  const daysActive = computeDaysActive(activities.length);
   const totalTimeSeconds = activities.reduce(
     (sum: number, a: { total_time_seconds?: number }) =>
       sum + (a.total_time_seconds || 0),
