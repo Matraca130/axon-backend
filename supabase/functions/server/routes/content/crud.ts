@@ -13,6 +13,7 @@
 import { Hono } from "npm:hono";
 import { registerCrud } from "../../crud-factory.ts";
 import { onSummaryWrite } from "../../summary-hook.ts";
+import { onBlockWrite } from "../../block-hook.ts";
 
 export const contentCrudRoutes = new Hono();
 
@@ -120,17 +121,19 @@ registerCrud(contentCrudRoutes, {
 
 // 7. Summary Blocks — Summary -> Block (Smart Reader)
 // Column is "type" NOT "block_type" (see Guidelines.md)
+// Fase 4: afterWrite triggers dirty-flag hook (reverts published → review).
 registerCrud(contentCrudRoutes, {
   table: "summary_blocks",
   slug: "summary-blocks",
   parentKey: "summary_id",
-  hasCreatedBy: false,
-  hasUpdatedAt: false,
+  hasCreatedBy: true,
+  hasUpdatedAt: true,
   hasOrderIndex: true,
   hasIsActive: true,
   requiredFields: ["type", "content"],
-  createFields: ["type", "content", "order_index", "heading_text", "heading_level", "is_active"],
-  updateFields: ["type", "content", "order_index", "heading_text", "heading_level", "is_active"],
+  createFields: ["type", "content", "order_index", "heading_text", "heading_level", "is_active", "style", "metadata"],
+  updateFields: ["type", "content", "order_index", "heading_text", "heading_level", "is_active", "style", "metadata"],
+  afterWrite: onBlockWrite,
 });
 
 // 8. Keywords — Summary -> Keyword (SACRED, soft-delete)

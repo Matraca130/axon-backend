@@ -18,15 +18,7 @@ import {
 import { BLOCKS, makeBlockList } from "./block-fixtures.ts";
 import type { TestBlock } from "./block-fixtures.ts";
 
-// TODO: uncomment when block-flatten.ts exists
-// import { flattenBlocksToMarkdown } from "../block-flatten.ts";
-
-// ═══════════════════════════════════════════════════════════════
-// Placeholder — remove when block-flatten.ts is created (TASK_8)
-// ═══════════════════════════════════════════════════════════════
-function flattenBlocksToMarkdown(_blocks: TestBlock[]): string {
-  throw new Error("block-flatten.ts not yet implemented");
-}
+import { flattenBlocksToMarkdown } from "../block-flatten.ts";
 
 // ═══════════════════════════════════════════════════════════════
 // 1. Prose

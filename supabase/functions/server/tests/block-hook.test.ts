@@ -36,18 +36,7 @@ Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "fake-service-role-key-for-testing");
 // Dynamic Import — after env vars are set
 // ═══════════════════════════════════════════════════════════════
 
-// TODO: uncomment when block-hook.ts exists
-// const { onBlockWrite } = await import("../block-hook.ts");
-
-// Placeholder until block-hook.ts is created (TASK_7)
-function onBlockWrite(_params: {
-  action: "create" | "update";
-  row: Record<string, unknown>;
-  updatedFields?: string[];
-  userId: string;
-}): void {
-  throw new Error("block-hook.ts not yet implemented");
-}
+const { onBlockWrite } = await import("../block-hook.ts");
 
 // ═══════════════════════════════════════════════════════════════
 // Helpers
