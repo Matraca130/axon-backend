@@ -75,11 +75,13 @@ function flattenKeyPoint(c: Record<string, unknown>): string {
 function flattenStages(c: Record<string, unknown>): string {
   const title = str(c.title);
   const items = (c.items as Array<Record<string, unknown>>) || [];
-  const lines = items.map((item, _i) => {
-    const label = str(item.label);
-    const desc = stripKeywordMarkers(str(item.description));
-    return `- ${label}: ${desc}`;
-  });
+  const lines = items
+    .filter((item) => item != null)
+    .map((item) => {
+      const label = str(item.label);
+      const desc = stripKeywordMarkers(str(item.description));
+      return `- ${label}: ${desc}`;
+    });
   return `## ${title}\n\n${lines.join("\n")}`;
 }
 
@@ -88,9 +90,13 @@ function flattenComparison(c: Record<string, unknown>): string {
   const headers = (c.headers as string[]) || [];
   const rows = (c.rows as string[][]) || [];
 
+  if (headers.length === 0) return `## ${title}`;
+
   const headerLine = `| ${headers.join(" | ")} |`;
   const separator = `| ${headers.map(() => "---").join(" | ")} |`;
-  const rowLines = rows.map((row) => `| ${row.join(" | ")} |`);
+  const rowLines = rows
+    .filter((row) => Array.isArray(row))
+    .map((row) => `| ${row.join(" | ")} |`);
 
   return `## ${title}\n\n${headerLine}\n${separator}\n${rowLines.join("\n")}`;
 }
@@ -188,6 +194,9 @@ function flattenBlock(block: Block): string {
   // Handle null/undefined content gracefully
   if (!block.content) return "";
 
+  // Handle missing or empty type
+  if (!block.type) return JSON.stringify(block.content);
+
   const fn = FLATTEN_MAP[block.type];
   if (fn) {
     return fn(block.content);
@@ -211,8 +220,12 @@ function flattenBlock(block: Block): string {
 export function flattenBlocksToMarkdown(blocks: Block[]): string {
   if (!blocks || blocks.length === 0) return "";
 
-  // Sort by order_index (ascending)
-  const sorted = [...blocks].sort((a, b) => a.order_index - b.order_index);
+  // Sort by order_index (ascending). Treat NaN/undefined as Infinity (end of list).
+  const sorted = [...blocks].sort((a, b) => {
+    const ai = Number.isFinite(a.order_index) ? a.order_index : Infinity;
+    const bi = Number.isFinite(b.order_index) ? b.order_index : Infinity;
+    return ai - bi;
+  });
 
   // Flatten each block
   const parts = sorted

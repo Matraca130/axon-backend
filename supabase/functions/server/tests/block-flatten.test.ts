@@ -1,5 +1,5 @@
 /**
- * block-flatten.test.ts — 22 tests for flattenBlocksToMarkdown()
+ * block-flatten.test.ts — 29 tests for flattenBlocksToMarkdown()
  *
  * TDD Red Phase: these tests are written BEFORE block-flatten.ts exists.
  * The import is commented out until TASK_8 creates the implementation.
@@ -229,6 +229,55 @@ Deno.test("T21 · content null/undefined → does not crash", () => {
 
   const result2 = flattenBlocksToMarkdown(makeBlockList("undefined_content"));
   assert(typeof result2 === "string", "Should return a string for undefined content");
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 14. Additional Edge Cases (REVIEW_8)
+// ═══════════════════════════════════════════════════════════════
+
+Deno.test("T23 · empty content object → does not crash", () => {
+  const result = flattenBlocksToMarkdown(makeBlockList("empty_content"));
+  assert(typeof result === "string", "Should return a string for empty content");
+});
+
+Deno.test("T24 · empty type string → JSON fallback", () => {
+  const result = flattenBlocksToMarkdown(makeBlockList("empty_type"));
+  assertStringIncludes(result, "test");
+});
+
+Deno.test("T25 · comparison with empty headers/rows → no crash", () => {
+  const result = flattenBlocksToMarkdown(makeBlockList("comparison_empty"));
+  assertStringIncludes(result, "Empty Table");
+});
+
+Deno.test("T26 · stages with empty items → no crash", () => {
+  const result = flattenBlocksToMarkdown(makeBlockList("stages_empty_items"));
+  assertStringIncludes(result, "Empty Stages");
+});
+
+Deno.test("T27 · stages with null item in array → filters gracefully", () => {
+  const result = flattenBlocksToMarkdown(makeBlockList("stages_null_item"));
+  assertStringIncludes(result, "Valid");
+});
+
+Deno.test("T28 · mixed legacy + edu types in same array", () => {
+  const result = flattenBlocksToMarkdown(
+    makeBlockList("prose", "mixed_legacy_edu", "key_point"),
+  );
+  assertStringIncludes(result, "Anatomía del SNC");
+  assertStringIncludes(result, "Legacy mixed with edu");
+  assertStringIncludes(result, "CONCEPTO CLAVE");
+});
+
+Deno.test("T29 · block with NaN order_index → sorted to end", () => {
+  const blocks: TestBlock[] = [
+    { ...BLOCKS.prose, order_index: NaN },
+    { ...BLOCKS.key_point, order_index: 0 },
+  ];
+  const result = flattenBlocksToMarkdown(blocks);
+  const keyPointPos = result.indexOf("CONCEPTO CLAVE");
+  const prosePos = result.indexOf("Anatomía del SNC");
+  assert(keyPointPos < prosePos, "NaN order_index should sort to end");
 });
 
 Deno.test("T22 · realistic full summary (9 blocks, >200 chars, no {{ }})", () => {

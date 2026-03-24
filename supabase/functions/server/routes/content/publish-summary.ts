@@ -124,6 +124,7 @@ publishSummaryRoutes.post(
 
     // ── 8. Per-block embeddings in batches of 5 ─────────────
     let blocksEmbedded = 0;
+    let blocksFailed = 0;
     const BATCH_SIZE = 5;
 
     for (let i = 0; i < blocks.length; i += BATCH_SIZE) {
@@ -161,9 +162,13 @@ publishSummaryRoutes.post(
         }),
       );
 
-      blocksEmbedded += results.filter(
-        (r) => r.status === "fulfilled" && r.value !== null,
-      ).length;
+      for (const r of results) {
+        if (r.status === "fulfilled" && r.value !== null) {
+          blocksEmbedded++;
+        } else if (r.status === "rejected") {
+          blocksFailed++;
+        }
+      }
     }
 
     // ── 9. Return result ────────────────────────────────────
@@ -171,6 +176,7 @@ publishSummaryRoutes.post(
       status: "published",
       chunks_count: chunksCount,
       blocks_embedded: blocksEmbedded,
+      blocks_failed: blocksFailed,
       total_blocks: blocks.length,
     });
   },

@@ -212,6 +212,54 @@ export const BLOCKS: Record<string, TestBlock> = {
     content: undefined as unknown as Record<string, unknown>,
     order_index: 18,
   },
+
+  empty_content: {
+    type: "prose",
+    content: {} as Record<string, unknown>,
+    order_index: 19,
+  },
+
+  empty_type: {
+    type: "",
+    content: { data: "test" },
+    order_index: 20,
+  },
+
+  comparison_empty: {
+    type: "comparison",
+    content: {
+      title: "Empty Table",
+      headers: [],
+      rows: [],
+    },
+    order_index: 21,
+  },
+
+  stages_empty_items: {
+    type: "stages",
+    content: {
+      title: "Empty Stages",
+      items: [],
+    },
+    order_index: 22,
+  },
+
+  stages_null_item: {
+    type: "stages",
+    content: {
+      title: "Stages with null",
+      items: [null as unknown as Record<string, unknown>, { label: "Valid", description: "item" }],
+    },
+    order_index: 23,
+  },
+
+  mixed_legacy_edu: {
+    type: "text",
+    content: {
+      html: "<p>Legacy mixed with edu</p>",
+    },
+    order_index: 24,
+  },
 };
 
 // ─── Helper ─────────────────────────────────────────────────────
