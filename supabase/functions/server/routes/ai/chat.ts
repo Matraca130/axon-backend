@@ -167,13 +167,17 @@ async function fetchAdjacentChunks(
       });
     }
 
+    // H3 FIX: Combine N+1 adjacent chunk queries into a single .or() query
     const summaryEntries = Array.from(summaryGroups.entries()).slice(0, 3);
-    for (const [sumId, orderIndexes] of summaryEntries) {
+    if (summaryEntries.length > 0) {
+      const orConditions = summaryEntries.map(([sumId, orderIndexes]) =>
+        `and(summary_id.eq.${sumId},order_index.in.(${orderIndexes.join(",")}))`
+      ).join(",");
+
       const { data: adjacent } = await db
         .from("chunks")
         .select("id, summary_id, content, order_index")
-        .eq("summary_id", sumId)
-        .in("order_index", orderIndexes)
+        .or(orConditions)
         .is("deleted_at", null);
 
       if (adjacent) {
@@ -445,7 +449,12 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
 
     let mergedMatches = mergeSearchResults(allResultSets);
 
-    if (mergedMatches.length > 1) {
+    // H4 FIX: Skip reranking when top match is high confidence (score > 0.75)
+    const topScore = mergedMatches.length > 0
+      ? (mergedMatches[0].combined_score ?? mergedMatches[0].similarity)
+      : 0;
+
+    if (mergedMatches.length > 1 && topScore <= 0.75) {
       try {
         mergedMatches = await rerankWithClaude(message, mergedMatches, 5);
         rerankApplied = true;

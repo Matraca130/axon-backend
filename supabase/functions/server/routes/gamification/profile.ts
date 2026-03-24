@@ -95,7 +95,8 @@ profileRoutes.get(`${PREFIX}/gamification/xp-history`, async (c: Context) => {
 
   const { data, count, error } = await db
     .from("xp_transactions")
-    .select("*", { count: "exact" })
+    // H5 FIX: Use estimated count (matches crud-factory.ts pattern)
+    .select("*", { count: "estimated" })
     .eq("student_id", user.id)
     .eq("institution_id", institutionId)
     .order("created_at", { ascending: false })

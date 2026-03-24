@@ -285,6 +285,74 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   // Track successfully created reviews for XP hook
   const successfulReviews: Array<{ item_id: string; grade: number; instrument_type: string }> = [];
 
+  // C5 FIX: Declare stats object for keyword propagation error tracking
+  const stats: Record<string, string | undefined> = {};
+
+  // C5 FIX: Pre-fetch ALL existing FSRS states in bulk for PATH B items
+  const pathBItemIds = validatedItems
+    .filter((item) => !item.fsrs_update)
+    .map((item) => item.item_id);
+
+  const fsrsLookup = new Map<string, {
+    stability: number; difficulty: number; reps: number; lapses: number;
+    state: string; last_review_at: string | null;
+    consecutive_lapses: number; is_leech: boolean;
+  }>();
+
+  if (pathBItemIds.length > 0) {
+    const { data: allFsrs, error: fsrsErr } = await db
+      .from("fsrs_states")
+      .select("flashcard_id, stability, difficulty, reps, lapses, state, last_review_at, consecutive_lapses, is_leech")
+      .eq("student_id", user.id)
+      .in("flashcard_id", pathBItemIds);
+
+    if (fsrsErr) {
+      return c.json({ error: `Pre-fetch FSRS states failed: ${fsrsErr.message}` }, 503);
+    }
+
+    for (const row of allFsrs ?? []) {
+      fsrsLookup.set(row.flashcard_id as string, row);
+    }
+  }
+
+  // C5 FIX: Pre-fetch ALL existing BKT states in bulk for both PATH A and PATH B
+  const allSubtopicIds = [
+    ...validatedItems
+      .filter((item) => item.bkt_update)
+      .map((item) => item.bkt_update!.subtopic_id),
+    ...validatedItems
+      .filter((item) => !item.bkt_update && item.subtopic_id)
+      .map((item) => item.subtopic_id!),
+    // Also include subtopic_ids needed for FSRS PATH B recovery cross-signal
+    ...validatedItems
+      .filter((item) => !item.fsrs_update && (item.subtopic_id || item.bkt_update?.subtopic_id))
+      .map((item) => item.subtopic_id || item.bkt_update?.subtopic_id)
+      .filter((id): id is string => !!id),
+  ];
+  const uniqueSubtopicIds = [...new Set(allSubtopicIds)];
+
+  const bktLookup = new Map<string, {
+    p_know: number; max_p_know: number;
+    total_attempts: number; correct_attempts: number;
+    p_transit: number; p_slip: number; p_guess: number;
+  }>();
+
+  if (uniqueSubtopicIds.length > 0) {
+    const { data: allBkt, error: bktErr } = await db
+      .from("bkt_states")
+      .select("subtopic_id, p_know, max_p_know, total_attempts, correct_attempts, p_transit, p_slip, p_guess")
+      .eq("student_id", user.id)
+      .in("subtopic_id", uniqueSubtopicIds);
+
+    if (bktErr) {
+      return c.json({ error: `Pre-fetch BKT states failed: ${bktErr.message}` }, 503);
+    }
+
+    for (const row of allBkt ?? []) {
+      bktLookup.set(row.subtopic_id as string, row);
+    }
+  }
+
   for (let i = 0; i < validatedItems.length; i++) {
     const item = validatedItems[i];
     const now = new Date();
@@ -354,24 +422,14 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     } else {
       // ════════ PATH B (server-side FSRS v4 Petrick) ════════
       try {
-        // 1. Read current FSRS state
-        const { data: existingFsrs } = await db
-          .from("fsrs_states")
-          .select("stability, difficulty, reps, lapses, state, last_review_at, consecutive_lapses, is_leech")
-          .eq("student_id", user.id)
-          .eq("flashcard_id", item.item_id)
-          .maybeSingle();
+        // C5 FIX: Use pre-fetched FSRS state from lookup Map
+        const existingFsrs = fsrsLookup.get(item.item_id) ?? null;
 
-        // 2. Read BKT for recovery cross-signal
+        // C5 FIX: Use pre-fetched BKT state for recovery cross-signal
         let isRecovering = false;
         const resolvedSubtopicId = item.subtopic_id || item.bkt_update?.subtopic_id;
         if (resolvedSubtopicId) {
-          const { data: existingBkt } = await db
-            .from("bkt_states")
-            .select("p_know, max_p_know")
-            .eq("student_id", user.id)
-            .eq("subtopic_id", resolvedSubtopicId)
-            .maybeSingle();
+          const existingBkt = bktLookup.get(resolvedSubtopicId);
 
           if (existingBkt) {
             const maxPKnow = existingBkt.max_p_know ?? 0;
@@ -430,6 +488,18 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         } else {
           fsrsUpdated++;
 
+          // Fix #32/#27: Update lookup for subsequent items in this batch
+          fsrsLookup.set(item.item_id, {
+            stability: fsrsResult.stability,
+            difficulty: fsrsResult.difficulty,
+            reps: fsrsResult.reps,
+            lapses: fsrsResult.lapses,
+            state: fsrsResult.state,
+            last_review_at: fsrsResult.last_review_at,
+            consecutive_lapses: newConsecutiveLapses,
+            is_leech: newIsLeech,
+          });
+
           computedResults.push({
             item_id: item.item_id,
             fsrs: {
@@ -457,12 +527,8 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         let finalTotalAttempts = bkt.total_attempts;
         let finalCorrectAttempts = bkt.correct_attempts;
 
-        const { data: existing } = await db
-          .from("bkt_states")
-          .select("total_attempts, correct_attempts")
-          .eq("student_id", user.id)
-          .eq("subtopic_id", bkt.subtopic_id)
-          .maybeSingle();
+        // C5 FIX: Use pre-fetched BKT state from lookup Map
+        const existing = bktLookup.get(bkt.subtopic_id) ?? null;
 
         if (existing) {
           finalTotalAttempts = (existing.total_attempts || 0) + bkt.total_attempts;
@@ -491,6 +557,17 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         } else {
           bktUpdated++;
 
+          // Fix #32/#27: Update lookup for subsequent items in this batch
+          bktLookup.set(bkt.subtopic_id, {
+            p_know: bkt.p_know,
+            max_p_know: bkt.p_know, // PATH A doesn't track max_p_know separately
+            total_attempts: finalTotalAttempts,
+            correct_attempts: finalCorrectAttempts,
+            p_transit: bkt.p_transit,
+            p_slip: bkt.p_slip,
+            p_guess: bkt.p_guess,
+          });
+
           // §4.2: Fire-and-forget keyword BKT propagation (PATH A)
           const pathAGrade = mapToFsrsGrade(item.grade);
           const pathAIsCorrect = pathAGrade >= THRESHOLDS.BKT_CORRECT_MIN_GRADE;
@@ -511,12 +588,8 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         const instrumentType =
           item.instrument_type === "quiz" ? "quiz" as const : "flashcard" as const;
 
-        const { data: existingBkt } = await db
-          .from("bkt_states")
-          .select("p_know, max_p_know, total_attempts, correct_attempts, p_transit, p_slip, p_guess")
-          .eq("student_id", user.id)
-          .eq("subtopic_id", item.subtopic_id)
-          .maybeSingle();
+        // C5 FIX: Use pre-fetched BKT state from lookup Map
+        const existingBkt = bktLookup.get(item.subtopic_id!) ?? null;
 
         const currentMastery = existingBkt?.p_know ?? 0;
         const maxReachedMastery = existingBkt?.max_p_know ?? 0;
@@ -555,6 +628,17 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           errors.push({ index: i, step: "bkt_pathb", message: bktErr.message });
         } else {
           bktUpdated++;
+
+          // Fix #32/#27: Update lookup for subsequent items in this batch
+          bktLookup.set(item.subtopic_id!, {
+            p_know: bktResult.p_know,
+            max_p_know: bktResult.max_p_know,
+            total_attempts: finalTotalAttempts,
+            correct_attempts: finalCorrectAttempts,
+            p_transit: existingBkt?.p_transit ?? 0.18,
+            p_slip: existingBkt?.p_slip ?? 0.10,
+            p_guess: existingBkt?.p_guess ?? 0.25,
+          });
 
           // §4.2: Fire-and-forget keyword BKT propagation (PATH B)
           propagateKeywordBkt(
@@ -606,5 +690,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     bkt_updated: bktUpdated,
     errors: errors.length > 0 ? errors : undefined,
     results: computedResults.length > 0 ? computedResults : undefined,
+    ...(Object.keys(stats).length > 0 ? { _stats: stats } : {}),
   });
 });

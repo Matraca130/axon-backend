@@ -97,7 +97,7 @@ export const extractToken = (c: Context): string | null => {
  * Does NOT verify the cryptographic signature (PostgREST/RLS handles that).
  * Does check `exp` locally to fast-fail expired tokens before wasting a DB round-trip.
  */
-const decodeJwtPayload = (
+export const decodeJwtPayload = (
   token: string,
 ): { sub: string; email?: string; exp?: number } | null => {
   try {

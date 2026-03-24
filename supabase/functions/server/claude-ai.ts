@@ -343,7 +343,8 @@ export function selectModelForTask(task: string): ClaudeModel {
 // Used by generate.ts, generate-smart.ts, pre-generate.ts, chat.ts
 // to log which model produced the output.
 
-export const GENERATE_MODEL = "claude-sonnet-4-20250514";
+// L6 FIX: Reference MODEL_IDS.sonnet instead of duplicating the model string
+export const GENERATE_MODEL = MODEL_IDS.sonnet;
 
 // ─── Streaming Text Generation ──────────────────────────
 
@@ -367,25 +368,48 @@ export async function generateTextStream(
   if (opts.systemPrompt) body.system = opts.systemPrompt;
   if (opts.temperature !== undefined) body.temperature = opts.temperature;
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": key,
-      "anthropic-version": ANTHROPIC_VERSION,
-    },
-    body: JSON.stringify(body),
-  });
+  // M6 FIX: Add AbortController with 60s timeout to streaming fetch
+  const controller = new AbortController();
+  const streamTimeout = setTimeout(() => controller.abort(), 60_000);
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": ANTHROPIC_VERSION,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    clearTimeout(streamTimeout);
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new Error("Claude streaming timeout after 60s");
+    }
+    throw e;
+  }
 
   if (!res.ok) {
+    clearTimeout(streamTimeout);
     const errBody = await res.text();
     throw new Error(`Claude streaming failed (${res.status}): ${errBody.slice(0, 200)}`);
   }
 
   if (!res.body) {
+    clearTimeout(streamTimeout);
     throw new Error("Claude streaming response has no body");
   }
-  return res.body;
+
+  // Clear timeout when stream ends naturally
+  const originalBody = res.body;
+  const transform = new TransformStream<Uint8Array, Uint8Array>({
+    flush() { clearTimeout(streamTimeout); },
+    cancel() { clearTimeout(streamTimeout); },
+  });
+  return originalBody.pipeThrough(transform);
 }
 
 // ─── Parse JSON safely from Claude output ─────────────────

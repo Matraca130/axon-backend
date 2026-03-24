@@ -48,7 +48,7 @@ export const aiGenerateRoutes = new Hono();
 const ACTIONS = ["quiz_question", "flashcard"] as const;
 
 aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
-  const auth = await authenticate(c);
+  const auth = c.get("auth") ?? await authenticate(c);
   if (auth instanceof Response) return auth;
   const { user, db } = auth;
 
@@ -106,72 +106,68 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
   if (!keywordId)
     return err(c, "No keywords found for this summary", 400);
 
-  // ── Fetch keyword + subtopic details ───────────────────
-  const { data: keyword } = await db
-    .from("keywords")
-    .select("name, definition")
-    .eq("id", keywordId)
-    .single();
-
-  let subtopicName: string | null = null;
-  if (subtopicId) {
-    const { data: sub } = await db
-      .from("subtopics")
-      .select("name")
-      .eq("id", subtopicId)
-      .single();
-    subtopicName = sub?.name || null;
+  // ── Parallel batch 1: keyword, subtopic, block, profNotes, profile, BKT ──
+  // All queries depend only on already-resolved IDs (keywordId, subtopicId, blockId, user.id)
+  // NEW FIX: Wrap Promise.all in try/catch to handle network-level failures
+  let keyword, subtopicResult, blockResult, profNotes, profile, bktResult;
+  try {
+    const [kwRes, stRes, blkRes, pnRes, profRes, bktRes] = await Promise.all([
+      // keyword details
+      db.from("keywords").select("name, definition").eq("id", keywordId).single(),
+      // subtopic name (conditional)
+      subtopicId
+        ? db.from("subtopics").select("name").eq("id", subtopicId).single()
+        : Promise.resolve({ data: null }),
+      // block context (conditional)
+      blockId
+        ? db.from("summary_blocks").select("content, heading_text").eq("id", blockId).single()
+        : Promise.resolve({ data: null }),
+      // INC-6 FIX: professor notes
+      db.from("kw_prof_notes").select("note").eq("keyword_id", keywordId).limit(3),
+      // student profile
+      db.rpc("get_student_knowledge_context", {
+        p_student_id: user.id,
+        p_institution_id: instId as string,
+      }),
+      // BKT state (conditional)
+      subtopicId
+        ? db.from("bkt_states").select("p_know, total_attempts, correct_attempts")
+            .eq("student_id", user.id).eq("subtopic_id", subtopicId).maybeSingle()
+        : Promise.resolve({ data: null }),
+    ]);
+    keyword = kwRes.data;
+    subtopicResult = stRes;
+    blockResult = blkRes;
+    profNotes = pnRes.data;
+    profile = profRes.data;
+    bktResult = bktRes;
+  } catch (e) {
+    console.error("[AI Generate] Parallel context fetch failed:", e);
+    return err(c, `Failed to fetch generation context: ${(e as Error).message}`, 500);
   }
 
-  // ── Optional: scope to summary_block ───────────────────
+  const subtopicName: string | null = subtopicResult.data?.name || null;
+
   let blockContext = "";
-  if (blockId) {
-    const { data: block } = await db
-      .from("summary_blocks")
-      .select("content, heading_text")
-      .eq("id", blockId)
-      .single();
-    if (block) {
-      blockContext = `\nBloque especifico: "${block.heading_text || ""}": ${block.content?.substring(0, 500)}`;
-    }
+  if (blockResult.data) {
+    const block = blockResult.data;
+    blockContext = `\nBloque especifico: "${block.heading_text || ""}": ${block.content?.substring(0, 500)}`;
   }
-
-  // ── INC-6 FIX: Fetch professor notes for this keyword ──────
-  // Quick fix from RAG_ROADMAP.md Fase 8C: include kw_prof_notes
-  // in the prompt so generated content reflects professor guidance.
-  const { data: profNotes } = await db
-    .from("kw_prof_notes")
-    .select("note")
-    .eq("keyword_id", keywordId)
-    .limit(3);
 
   if (profNotes && profNotes.length > 0) {
     blockContext += "\nNotas del profesor: " +
       profNotes.map((n: { note: string }) => n.note).join("; ");
   }
 
-  // ── Fetch student profile ────────────────────────────────
   let profileContext = "";
-  const { data: profile } = await db.rpc("get_student_knowledge_context", {
-    p_student_id: user.id,
-    p_institution_id: instId as string,
-  });
   if (profile) {
     profileContext = `\nPerfil del alumno: ${JSON.stringify(profile)}`;
   }
 
-  // ── Fetch BKT state for this subtopic ──────────────────
   let bktContext = "";
-  if (subtopicId) {
-    const { data: bkt } = await db
-      .from("bkt_states")
-      .select("p_know, total_attempts, correct_attempts")
-      .eq("student_id", user.id)
-      .eq("subtopic_id", subtopicId)
-      .maybeSingle();
-    if (bkt) {
-      bktContext = `\nBKT del subtema: p_know=${bkt.p_know}, intentos=${bkt.total_attempts}, correctos=${bkt.correct_attempts}`;
-    }
+  if (bktResult.data) {
+    const bkt = bktResult.data;
+    bktContext = `\nBKT del subtema: p_know=${bkt.p_know}, intentos=${bkt.total_attempts}, correctos=${bkt.correct_attempts}`;
   }
 
   // ── Build prompt ───────────────────────────────────────

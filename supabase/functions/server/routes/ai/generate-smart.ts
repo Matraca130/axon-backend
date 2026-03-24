@@ -442,34 +442,52 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
           .slice(0, count - freshTargets.length),
       ];
 
-  // Pre-fetch shared context
+  // Pre-fetch shared context — parallelized for unique summary IDs
   const summaryContentCache = new Map<string, string>();
   const institutionIdCache = new Map<string, string>();
   const uniqueSummaryIds = [...new Set(selectedTargets.map((t) => t.summary_id))];
 
-  for (const sid of uniqueSummaryIds) {
-    // PF-05: Institution check BEFORE any Claude call
-    const { data: instId } = await db.rpc("resolve_parent_institution", {
-      p_table: "summaries", p_id: sid,
-    });
-    if (!instId) return err(c, `Summary ${sid} not found or inaccessible`, 404);
+  // C5 FIX: Parallelize institution checks + summary lookups per unique summary
+  // NEW FIX: Wrap in try/catch for network-level error safety
+  let summaryFetchResults;
+  try {
+    summaryFetchResults = await Promise.all(
+      uniqueSummaryIds.map(async (sid) => {
+        // PF-05: Institution check BEFORE any Claude call
+        const { data: instId } = await db.rpc("resolve_parent_institution", {
+          p_table: "summaries", p_id: sid,
+        });
+        if (!instId) return { sid, error: `Summary ${sid} not found or inaccessible` as string, instId: null, content: "" };
 
-    const roleCheck = await requireInstitutionRole(
-      db, user.id, instId as string, ALL_ROLES,
+        const roleCheck = await requireInstitutionRole(
+          db, user.id, instId as string, ALL_ROLES,
+        );
+        if (isDenied(roleCheck)) return { sid, error: roleCheck.message, instId: null, content: "" };
+
+        const { data: summaryData } = await db
+          .from("summaries")
+          .select("content_markdown")
+          .eq("id", sid)
+          .single();
+
+        return {
+          sid,
+          error: null,
+          instId: instId as string,
+          content: truncateForPrompt(summaryData?.content_markdown || "", 1500),
+        };
+      }),
     );
-    if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+  } catch (e) {
+    console.error("[GenerateSmart] Parallel context fetch failed:", e);
+    return err(c, `Failed to fetch generation context: ${(e as Error).message}`, 500);
+  }
 
-    institutionIdCache.set(sid, instId as string);
-
-    const { data: summaryData } = await db
-      .from("summaries")
-      .select("content_markdown")
-      .eq("id", sid)
-      .single();
-
-    summaryContentCache.set(
-      sid, truncateForPrompt(summaryData?.content_markdown || "", 1500),
-    );
+  // Check for errors and populate caches
+  for (const result of summaryFetchResults) {
+    if (result.error) return err(c, result.error, result.instId ? 403 : 404);
+    institutionIdCache.set(result.sid, result.instId!);
+    summaryContentCache.set(result.sid, result.content);
   }
 
   let sharedProfileContext = "";
@@ -484,54 +502,127 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
     }
   }
 
-  // Sequential generation loop (D15, D16)
+  // C5 FIX: Pre-fetch all prof notes and BKT states before bulk loop
+  const uniqueKeywordIds = [...new Set(selectedTargets.map((t) => t.keyword_id))];
+  const uniqueSubtopicIdsForBkt = [...new Set(
+    selectedTargets.map((t) => t.subtopic_id).filter((id): id is string => !!id),
+  )];
+
+  // Parallel pre-fetch of prof notes and BKT states
+  // NEW FIX: Wrap in try/catch for network-level error safety
+  let profNotesResult, bktStatesResult;
+  try {
+    [profNotesResult, bktStatesResult] = await Promise.all([
+      uniqueKeywordIds.length > 0
+        ? db.from("kw_prof_notes")
+            .select("keyword_id, note")
+            .in("keyword_id", uniqueKeywordIds)
+            .limit(uniqueKeywordIds.length * 3)
+        : Promise.resolve({ data: [] as { keyword_id: string; note: string }[] }),
+      uniqueSubtopicIdsForBkt.length > 0
+        ? db.from("bkt_states")
+            .select("subtopic_id, p_know, total_attempts, correct_attempts")
+            .eq("student_id", user.id)
+            .in("subtopic_id", uniqueSubtopicIdsForBkt)
+        : Promise.resolve({ data: [] as { subtopic_id: string; p_know: number; total_attempts: number; correct_attempts: number }[] }),
+    ]);
+  } catch (e) {
+    console.error("[GenerateSmart] Prof notes/BKT pre-fetch failed:", e);
+    return err(c, `Failed to fetch study context: ${(e as Error).message}`, 500);
+  }
+
+  // Build lookup maps
+  const profNotesMap = new Map<string, string[]>();
+  for (const row of (profNotesResult.data ?? []) as { keyword_id: string; note: string }[]) {
+    const existing = profNotesMap.get(row.keyword_id) ?? [];
+    existing.push(row.note);
+    profNotesMap.set(row.keyword_id, existing);
+  }
+
+  const bktMap = new Map<string, { p_know: number; total_attempts: number; correct_attempts: number }>();
+  for (const row of (bktStatesResult.data ?? []) as { subtopic_id: string; p_know: number; total_attempts: number; correct_attempts: number }[]) {
+    bktMap.set(row.subtopic_id, row);
+  }
+
+  // Helper: build context from pre-fetched data (replaces fetchTargetContext)
+  function buildTargetContextFromCache(target: SmartTarget): { profNotesContext: string; bktContext: string } {
+    let profNotesContext = "";
+    const notes = profNotesMap.get(target.keyword_id);
+    if (notes && notes.length > 0) {
+      profNotesContext = "\nNotas del profesor: " + notes.slice(0, 3).join("; ");
+    }
+
+    let bktContext = "";
+    if (target.subtopic_id) {
+      const bkt = bktMap.get(target.subtopic_id);
+      if (bkt) {
+        bktContext = `\nBKT del subtema: p_know=${bkt.p_know}, intentos=${bkt.total_attempts}, correctos=${bkt.correct_attempts}`;
+      }
+    }
+
+    return { profNotesContext, bktContext };
+  }
+
+  // Bounded concurrency generation loop (3 parallel Claude calls)
   const generatedItems: BulkGeneratedItem[] = [];
   const bulkErrors: BulkErrorItem[] = [];
   let totalTokensInput = 0;
   let totalTokensOutput = 0;
 
-  for (const target of selectedTargets) {
-    try {
-      const pKnow = Number(target.p_know);
-      const contentSnippet = summaryContentCache.get(target.summary_id) || "";
-      const { profNotesContext, bktContext } = await fetchTargetContext(
-        db, user.id, target,
-      );
+  const CLAUDE_CONCURRENCY = 3;
+  for (let i = 0; i < selectedTargets.length; i += CLAUDE_CONCURRENCY) {
+    const batch = selectedTargets.slice(i, i + CLAUDE_CONCURRENCY);
+    const results = await Promise.allSettled(
+      batch.map(async (target) => {
+        const pKnow = Number(target.p_know);
+        const contentSnippet = summaryContentCache.get(target.summary_id) || "";
+        const { profNotesContext, bktContext } = buildTargetContextFromCache(target);
 
-      const ctx = buildPromptContext(
-        target, contentSnippet, profNotesContext, sharedProfileContext, bktContext,
-      );
+        const ctx = buildPromptContext(
+          target, contentSnippet, profNotesContext, sharedProfileContext, bktContext,
+        );
 
-      const { data: inserted, tokensUsed } = await generateAndInsert(
-        db, user.id, action, related, quizId, target, ctx,
-      );
+        const { data: inserted, tokensUsed } = await generateAndInsert(
+          db, user.id, action, related, quizId, target, ctx,
+        );
 
-      totalTokensInput += tokensUsed.input;
-      totalTokensOutput += tokensUsed.output;
+        return { target, inserted, tokensUsed, pKnow };
+      }),
+    );
 
-      generatedItems.push({
-        type: action === "quiz_question" ? "quiz_question" : "flashcard",
-        id: (inserted as Record<string, unknown>).id as string,
-        keyword_id: target.keyword_id,
-        keyword_name: target.keyword_name,
-        summary_id: target.summary_id,
-        _smart: {
-          p_know: pKnow,
-          need_score: Number(target.need_score),
-          primary_reason: target.primary_reason,
-          target_subtopic: target.subtopic_name,
-        },
-      });
-    } catch (e) {
-      console.error(
-        `[GenerateSmart Bulk] Failed for keyword ${target.keyword_name}:`,
-        (e as Error).message,
-      );
-      bulkErrors.push({
-        keyword_id: target.keyword_id,
-        keyword_name: target.keyword_name,
-        error: (e as Error).message,
-      });
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        const { target, inserted, tokensUsed, pKnow } = result.value;
+        totalTokensInput += tokensUsed.input;
+        totalTokensOutput += tokensUsed.output;
+
+        generatedItems.push({
+          type: action === "quiz_question" ? "quiz_question" : "flashcard",
+          id: (inserted as Record<string, unknown>).id as string,
+          keyword_id: target.keyword_id,
+          keyword_name: target.keyword_name,
+          summary_id: target.summary_id,
+          _smart: {
+            p_know: pKnow,
+            need_score: Number(target.need_score),
+            primary_reason: target.primary_reason,
+            target_subtopic: target.subtopic_name,
+          },
+        });
+      } else {
+        // Find which target failed from the batch index
+        const batchIdx = results.indexOf(result);
+        const failedTarget = batch[batchIdx];
+        console.error(
+          `[GenerateSmart Bulk] Failed for keyword ${failedTarget.keyword_name}:`,
+          result.reason?.message ?? "Unknown error",
+        );
+        bulkErrors.push({
+          keyword_id: failedTarget.keyword_id,
+          keyword_name: failedTarget.keyword_name,
+          error: result.reason?.message ?? "Unknown error",
+        });
+      }
     }
   }
 

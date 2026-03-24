@@ -71,7 +71,7 @@ aiSuggestConnectionsRoutes.post(
   `${PREFIX}/ai/suggest-student-connections`,
   async (c: Context) => {
     // ── 1. Auth + parse body ──────────────────────────────────
-    const auth = await authenticate(c);
+    const auth = c.get("auth") ?? await authenticate(c);
     if (auth instanceof Response) return auth;
     const { user, db } = auth;
 
@@ -141,28 +141,64 @@ aiSuggestConnectionsRoutes.post(
     if (summaryIds.length === 0)
       return err(c, "No active summaries found for this topic", 404);
 
-    const { data: keywords, error: kwErr } = await db
-      .from("keywords")
-      .select("id, name, definition")
-      .in("summary_id", summaryIds)
-      .is("deleted_at", null);
+    // 5a+5b: Parallelize keywords + connections (independent queries)
+    const nodeIds = existing_node_ids;
 
+    // M4 FIX: For large ID sets (>100), split or() queries into chunks and merge results
+    const OR_CHUNK_SIZE = 100;
+
+    async function fetchConnectionsChunked(ids: string[]) {
+      if (ids.length <= OR_CHUNK_SIZE) {
+        const idList = ids.join(",");
+        return db.from("keyword_connections")
+          .select("keyword_a_id, keyword_b_id, connection_type")
+          .or(`keyword_a_id.in.(${idList}),keyword_b_id.in.(${idList})`)
+          .is("deleted_at", null);
+      }
+      const allData: Array<{ keyword_a_id: string; keyword_b_id: string; connection_type: string }> = [];
+      for (let i = 0; i < ids.length; i += OR_CHUNK_SIZE) {
+        const chunk = ids.slice(i, i + OR_CHUNK_SIZE);
+        const chunkList = chunk.join(",");
+        const { data, error } = await db.from("keyword_connections")
+          .select("keyword_a_id, keyword_b_id, connection_type")
+          .or(`keyword_a_id.in.(${chunkList}),keyword_b_id.in.(${chunkList})`)
+          .is("deleted_at", null);
+        if (error) return { data: null, error };
+        if (data) allData.push(...data);
+      }
+      const seen = new Set<string>();
+      const deduped = allData.filter((c) => {
+        const key = `${c.keyword_a_id}|${c.keyword_b_id}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      return { data: deduped, error: null };
+    }
+
+    // NEW FIX: Wrap Promise.all in try/catch for network-level error safety
+    let keywordsResult, connsResult;
+    try {
+      [keywordsResult, connsResult] = await Promise.all([
+        db.from("keywords")
+          .select("id, name, definition")
+          .in("summary_id", summaryIds)
+          .is("deleted_at", null),
+        fetchConnectionsChunked(nodeIds),
+      ]);
+    } catch (e) {
+      console.error("[suggest-connections] Parallel DB fetch failed:", e);
+      return err(c, `Failed to fetch graph data: ${(e as Error).message}`, 500);
+    }
+
+    const { data: keywords, error: kwErr } = keywordsResult;
     if (kwErr)
       return err(c, `Failed to fetch keywords: ${kwErr.message}`, 500);
 
     if (!keywords || keywords.length === 0)
       return err(c, "No keywords found for this topic", 404);
 
-    // 5b. Fetch existing connections among these nodes
-    const nodeIds = existing_node_ids;
-    const idList = nodeIds.join(",");
-
-    const { data: existingConns, error: connErr } = await db
-      .from("keyword_connections")
-      .select("keyword_a_id, keyword_b_id, connection_type")
-      .or(`keyword_a_id.in.(${idList}),keyword_b_id.in.(${idList})`)
-      .is("deleted_at", null);
-
+    const { data: existingConns, error: connErr } = connsResult;
     if (connErr)
       return err(c, `Failed to fetch connections: ${connErr.message}`, 500);
 

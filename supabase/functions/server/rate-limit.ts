@@ -29,7 +29,7 @@
  */
 
 import type { Context, Next } from "npm:hono";
-import { extractToken } from "./db.ts";
+import { extractToken, decodeJwtPayload } from "./db.ts";
 
 // ─── Configuration ─────────────────────────────────────────────────
 
@@ -64,21 +64,10 @@ const CLEANUP_INTERVAL_MS = 5 * 60_000;
  */
 export function extractKey(token: string): string {
   // ── Primary: decode JWT payload and use `sub` (user UUID) ──
-  try {
-    const parts = token.split(".");
-    if (parts.length === 3) {
-      let base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-      const pad = base64.length % 4;
-      if (pad === 1) throw new Error("invalid base64");
-      if (pad) base64 += "=".repeat(4 - pad);
-
-      const payload = JSON.parse(atob(base64));
-      if (typeof payload.sub === "string" && payload.sub.length > 0) {
-        return `uid:${payload.sub}`;
-      }
-    }
-  } catch {
-    // Decode failed — fall through to signature-based key
+  // L2 FIX: Reuses decodeJwtPayload from db.ts instead of duplicating JWT decoding logic
+  const payload = decodeJwtPayload(token);
+  if (payload && typeof payload.sub === "string" && payload.sub.length > 0) {
+    return `uid:${payload.sub}`;
   }
 
   // ── Fallback: use JWT signature (unique per token issuance) ──
@@ -106,6 +95,9 @@ export function cleanupExpired(now: number = Date.now()): number {
   return cleaned;
 }
 
+// L1 FIX: Max size bound to prevent unbounded memory growth
+const RATE_LIMIT_MAP_MAX_SIZE = 10_000;
+
 export function checkRateLimitLocal(
   key: string,
   now: number = Date.now(),
@@ -113,6 +105,15 @@ export function checkRateLimitLocal(
   const entry = rateLimitMap.get(key);
 
   if (!entry || now > entry.resetAt) {
+    // L1 FIX: Evict expired entries if map is at capacity before adding new key
+    if (!entry && rateLimitMap.size >= RATE_LIMIT_MAP_MAX_SIZE) {
+      cleanupExpired(now);
+      // If still at capacity after cleanup, allow request but don't track it
+      if (rateLimitMap.size >= RATE_LIMIT_MAP_MAX_SIZE) {
+        console.warn(`[RateLimit] Map at max capacity (${RATE_LIMIT_MAP_MAX_SIZE}), skipping tracking`);
+        return { allowed: true, current: 0 };
+      }
+    }
     rateLimitMap.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
     return { allowed: true, current: 1 };
   }

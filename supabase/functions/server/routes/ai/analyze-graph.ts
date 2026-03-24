@@ -79,7 +79,7 @@ aiAnalyzeGraphRoutes.post(
   `${PREFIX}/ai/analyze-knowledge-graph`,
   async (c: Context) => {
     // ── Step 1: Auth (PF-05: JWT before any operation) ──────────
-    const auth = await authenticate(c);
+    const auth = c.get("auth") ?? await authenticate(c);
     if (auth instanceof Response) return auth;
     const { user, db } = auth;
 
@@ -153,14 +153,57 @@ aiAnalyzeGraphRoutes.post(
       (k: { id: string }) => k.id,
     ) as string[];
 
-    // 5c: Get connections between those keywords
-    const idList = keywordIds.join(",");
-    const { data: connections, error: connErr } = await db
-      .from("keyword_connections")
-      .select("keyword_a_id, keyword_b_id, connection_type, relationship")
-      .or(`keyword_a_id.in.(${idList}),keyword_b_id.in.(${idList})`)
-      .is("deleted_at", null);
+    // 5c+5d: Parallelize connections + subtopics (both depend only on keywordIds)
+    // M4 FIX: For large ID sets (>100), split or() queries into chunks and merge results
+    const OR_CHUNK_SIZE = 100;
 
+    async function fetchConnectionsChunked(ids: string[]) {
+      if (ids.length <= OR_CHUNK_SIZE) {
+        const idList = ids.join(",");
+        return db.from("keyword_connections")
+          .select("keyword_a_id, keyword_b_id, connection_type")
+          .or(`keyword_a_id.in.(${idList}),keyword_b_id.in.(${idList})`)
+          .is("deleted_at", null);
+      }
+      // Split into chunks and merge
+      const allData: Array<{ keyword_a_id: string; keyword_b_id: string; connection_type: string }> = [];
+      for (let i = 0; i < ids.length; i += OR_CHUNK_SIZE) {
+        const chunk = ids.slice(i, i + OR_CHUNK_SIZE);
+        const chunkList = chunk.join(",");
+        const { data, error } = await db.from("keyword_connections")
+          .select("keyword_a_id, keyword_b_id, connection_type")
+          .or(`keyword_a_id.in.(${chunkList}),keyword_b_id.in.(${chunkList})`)
+          .is("deleted_at", null);
+        if (error) return { data: null, error };
+        if (data) allData.push(...data);
+      }
+      // Deduplicate by composite key (a_id + b_id)
+      const seen = new Set<string>();
+      const deduped = allData.filter((c) => {
+        const key = `${c.keyword_a_id}|${c.keyword_b_id}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      return { data: deduped, error: null };
+    }
+
+    // NEW FIX: Wrap Promise.all in try/catch for network-level error safety
+    let connectionsResult, subtopicsResult;
+    try {
+      [connectionsResult, subtopicsResult] = await Promise.all([
+        fetchConnectionsChunked(keywordIds),
+        db.from("subtopics")
+          .select("id, keyword_id")
+          .in("keyword_id", keywordIds)
+          .is("deleted_at", null),
+      ]);
+    } catch (e) {
+      console.error("[analyze-graph] Parallel DB fetch failed:", e);
+      return err(c, `Failed to fetch graph data: ${(e as Error).message}`, 500);
+    }
+
+    const { data: connections, error: connErr } = connectionsResult;
     if (connErr)
       return err(
         c,
@@ -168,13 +211,7 @@ aiAnalyzeGraphRoutes.post(
         500,
       );
 
-    // 5d: Get BKT states via subtopics (subtopic -> keyword mapping)
-    const { data: subtopics, error: stErr } = await db
-      .from("subtopics")
-      .select("id, keyword_id")
-      .in("keyword_id", keywordIds)
-      .is("deleted_at", null);
-
+    const { data: subtopics, error: stErr } = subtopicsResult;
     if (stErr)
       return err(c, `Failed to fetch subtopics: ${stErr.message}`, 500);
 
@@ -231,35 +268,42 @@ aiAnalyzeGraphRoutes.post(
     }
 
     // ── Step 7: Build prompt with graph data ───────────────────
+    // M3 FIX: Only send full definitions for weak keywords (mastery < 0.5).
+    // For keywords with BKT data and mastery >= 0.5, send only name + mastery
+    // to reduce token waste in the Claude prompt.
     const keywordData = keywords.map(
-      (kw: { id: string; name: string; definition: string }) => ({
-        id: kw.id,
-        name: kw.name,
-        definition: sanitizeForPrompt(kw.definition || "", 500),
-        mastery: keywordMastery[kw.id] ?? null, // null = no BKT data
-      }),
+      (kw: { id: string; name: string; definition: string }) => {
+        const mastery = keywordMastery[kw.id] ?? null;
+        const isStrong = mastery !== null && mastery >= 0.5;
+        return {
+          id: kw.id,
+          name: kw.name,
+          ...(isStrong ? {} : { definition: sanitizeForPrompt(kw.definition || "", 500) }),
+          mastery,
+        };
+      },
     );
 
+    // L4 FIX: Removed redundant `relationship` field — only send connection_type,
+    // keyword_a_id, keyword_b_id to Claude to reduce token waste.
     const connectionData = (connections || []).map(
       (conn: {
         keyword_a_id: string;
         keyword_b_id: string;
         connection_type: string;
-        relationship: string;
       }) => ({
         from: conn.keyword_a_id,
         to: conn.keyword_b_id,
         type: conn.connection_type,
-        relationship: sanitizeForPrompt(conn.relationship || "", 200),
       }),
     );
 
     const prompt = [
       "Analyze this student's knowledge graph and provide recommendations.",
       "",
-      wrapXml("keywords", JSON.stringify(keywordData, null, 2)),
+      wrapXml("keywords", JSON.stringify(keywordData)),
       "",
-      wrapXml("connections", JSON.stringify(connectionData, null, 2)),
+      wrapXml("connections", JSON.stringify(connectionData)),
       "",
       `Total keywords: ${keywords.length}`,
       `Keywords with mastery data: ${Object.keys(keywordMastery).length}`,

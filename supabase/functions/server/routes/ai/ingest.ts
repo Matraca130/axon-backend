@@ -40,7 +40,7 @@ import {
   isDenied,
   CONTENT_WRITE_ROLES,
 } from "../../auth-helpers.ts";
-import { generateEmbedding } from "../../openai-embeddings.ts";
+import { generateEmbedding, generateEmbeddings } from "../../openai-embeddings.ts";
 import { embedSummaryContent } from "../../auto-ingest.ts";
 
 export const aiIngestRoutes = new Hono();
@@ -181,36 +181,77 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
   if (!chunksToProcess || chunksToProcess.length === 0)
     return ok(c, { processed: 0, target: "chunks", message: "No chunks without embeddings found" });
 
-  // ── Process each chunk ───────────────────────────────────
+  // ── Process chunks in batches using batch embedding API ───
   let processed = 0;
   let failed = 0;
   const errors: string[] = [];
 
-  for (const chunk of chunksToProcess) {
+  // C4 FIX: Use generateEmbeddings batch API instead of sequential calls
+  const EMBED_BATCH_SIZE = 50;
+  for (let batchStart = 0; batchStart < chunksToProcess.length; batchStart += EMBED_BATCH_SIZE) {
+    const batch = chunksToProcess.slice(batchStart, batchStart + EMBED_BATCH_SIZE);
+    const texts = batch.map((chunk: { content: string }) => chunk.content);
+
+    let embeddings: number[][];
     try {
-      // D57: OpenAI embeddings — no taskType parameter needed
-      const embedding = await generateEmbedding(chunk.content);
-
-      // PF-09 FIX: Use adminDb to bypass RLS for embedding updates
-      const { error: updateErr } = await adminDb
-        .from("chunks")
-        .update({ embedding: JSON.stringify(embedding) })
-        .eq("id", chunk.id);
-
-      if (updateErr) {
-        failed++;
-        errors.push(`${chunk.id}: ${updateErr.message}`);
-      } else {
-        processed++;
-      }
-
-      // Respect rate limits: pause 1s every 10 embeddings
-      if (processed > 0 && processed % 10 === 0) {
-        await new Promise((r) => setTimeout(r, 1000));
-      }
+      embeddings = await generateEmbeddings(texts);
     } catch (e) {
-      failed++;
-      errors.push(`${chunk.id}: ${(e as Error).message}`);
+      // If batch fails, mark all in this batch as failed
+      for (const chunk of batch) {
+        failed++;
+        errors.push(`${chunk.id}: batch embedding failed: ${(e as Error).message}`);
+      }
+      continue;
+    }
+
+    // Validate embeddings count matches input; only process valid pairs
+    if (embeddings.length !== texts.length) {
+      console.warn(`[Ingest] Embeddings count mismatch: got ${embeddings.length}, expected ${texts.length}`);
+    }
+    const validCount = Math.min(embeddings.length, batch.length);
+
+    // PF-09 FIX: Use adminDb to bypass RLS for embedding updates
+    // Supabase accepts arrays directly — no JSON.stringify needed
+    // Run DB updates with bounded concurrency (5 parallel)
+    const DB_CONCURRENCY = 5;
+    for (let j = 0; j < validCount; j += DB_CONCURRENCY) {
+      const dbBatch = batch.slice(j, Math.min(j + DB_CONCURRENCY, validCount));
+      const results = await Promise.allSettled(
+        dbBatch.map(async (chunk: { id: string }, localIdx: number) => {
+          const idx = j + localIdx;
+          const embedding = embeddings[idx];
+          if (!embedding) throw new Error(`${chunk.id}: embedding is null/undefined at index ${idx}`);
+          // Fix #28: Only update if still null (idempotent — prevents double-embed from concurrent requests)
+          const { error: updateErr } = await adminDb
+            .from("chunks")
+            .update({ embedding })
+            .eq("id", chunk.id)
+            .is("embedding", null);
+          if (updateErr) throw new Error(`${chunk.id}: ${updateErr.message}`);
+          return chunk.id;
+        }),
+      );
+      for (const result of results) {
+        if (result.status === "fulfilled") {
+          processed++;
+        } else {
+          failed++;
+          errors.push(result.reason?.message ?? "Unknown DB update error");
+        }
+      }
+    }
+
+    // Count chunks that didn't receive embeddings due to length mismatch
+    if (validCount < batch.length) {
+      for (let k = validCount; k < batch.length; k++) {
+        failed++;
+        errors.push(`${batch[k].id}: no embedding returned (count mismatch)`);
+      }
+    }
+
+    // Respect rate limits between embedding batches
+    if (batchStart + EMBED_BATCH_SIZE < chunksToProcess.length) {
+      await new Promise((r) => setTimeout(r, 1000));
     }
   }
 
@@ -289,35 +330,48 @@ async function ingestSummaryEmbeddings(
     });
   }
 
-  // ── Process each summary ──────────────────────────────────
+  // ── Process summaries with bounded concurrency ────────────
   let processed = 0;
   let failed = 0;
   let skipped = 0;
   const errors: string[] = [];
 
+  // C4 FIX: Bounded concurrency (3 parallel) instead of sequential
+  // Filter out empty content first, then process in parallel batches
+  const validSummaries: typeof summaries = [];
   for (const summary of summaries) {
-    try {
-      const title = (summary.title as string) ?? "";
-      const content = summary.content_markdown as string;
+    const content = summary.content_markdown as string;
+    if (!content || content.trim().length === 0) {
+      skipped++;
+    } else {
+      validSummaries.push(summary);
+    }
+  }
 
-      // A2 FIX: Skip empty/whitespace content and count it explicitly.
-      // SQL IS NOT NULL doesn't catch "" or "   \n  ".
-      if (!content || content.trim().length === 0) {
-        skipped++;
-        continue;
+  const SUMMARY_CONCURRENCY = 3;
+  for (let i = 0; i < validSummaries.length; i += SUMMARY_CONCURRENCY) {
+    const batch = validSummaries.slice(i, i + SUMMARY_CONCURRENCY);
+    const results = await Promise.allSettled(
+      batch.map(async (summary) => {
+        const title = (summary.title as string) ?? "";
+        const content = summary.content_markdown as string;
+        await embedSummaryContent(summary.id as string, title, content);
+        return summary.id;
+      }),
+    );
+
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        processed++;
+      } else {
+        failed++;
+        errors.push(result.reason?.message ?? "Unknown summary embed error");
       }
+    }
 
-      await embedSummaryContent(summary.id as string, title, content);
-      processed++;
-
-      // Rate limit: pause 1s every 10 embeddings
-      // Consistent with chunk embedding pattern
-      if (processed > 0 && processed % 10 === 0) {
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-    } catch (e) {
-      failed++;
-      errors.push(`${summary.id}: ${(e as Error).message}`);
+    // Rate limit between batches
+    if (i + SUMMARY_CONCURRENCY < validSummaries.length) {
+      await new Promise((r) => setTimeout(r, 1000));
     }
   }
 

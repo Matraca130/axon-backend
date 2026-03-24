@@ -70,12 +70,16 @@ async function aiRateLimitMiddleware(c: Context, next: Next) {
   if (url.pathname.endsWith("/ai/report")) return next();
   // D9 FIX: Skip /ai/pre-generate (own rate limit bucket)
   if (url.pathname.endsWith("/ai/pre-generate")) return next();
+  // M2 FIX: Skip expensive graph endpoints (own stricter rate limit below)
+  if (url.pathname.endsWith("/ai/analyze-knowledge-graph")) return next();
+  if (url.pathname.endsWith("/ai/suggest-student-connections")) return next();
 
   try {
     const auth = await authenticate(c);
     if (auth instanceof Response) return auth;
     const userId = auth.user.id;
     c.set("userId", userId);
+    c.set("auth", auth);
 
     const adminDb = getAdminClient();
     const { data, error } = await adminDb.rpc("check_rate_limit", {
@@ -107,6 +111,51 @@ async function aiRateLimitMiddleware(c: Context, next: Next) {
 }
 
 aiRoutes.use(`${PREFIX}/ai/*`, aiRateLimitMiddleware);
+
+// M2 FIX: Tighter rate limit for expensive graph endpoints (5 req/hour)
+const GRAPH_RATE_LIMIT = 5;
+const GRAPH_RATE_WINDOW_MS = 3600000;
+
+async function graphRateLimitMiddleware(c: Context, next: Next) {
+  if (c.req.method !== "POST") return next();
+
+  try {
+    const auth = c.get("auth") ?? await authenticate(c);
+    if (auth instanceof Response) return auth;
+    const userId = auth.user.id;
+    c.set("userId", userId);
+    c.set("auth", auth);
+
+    const adminDb = getAdminClient();
+    const { data, error } = await adminDb.rpc("check_rate_limit", {
+      p_key: `ai_graph:${userId}`,
+      p_max_requests: GRAPH_RATE_LIMIT,
+      p_window_ms: GRAPH_RATE_WINDOW_MS,
+    });
+
+    if (error) {
+      console.error(`[Graph RateLimit] RPC failed: ${error.message}. Denying request.`);
+      return err(c, "Could not verify rate limit status. Please try again later.", 500);
+    }
+
+    if (data && !data.allowed) {
+      return err(
+        c,
+        `Graph analysis rate limit exceeded: max ${GRAPH_RATE_LIMIT} requests per hour. ` +
+        `Try again in ${Math.ceil((data.retry_after_ms || 0) / 1000)}s.`,
+        429,
+      );
+    }
+  } catch (e) {
+    console.error(`[Graph RateLimit] Exception: ${(e as Error).message}. Denying request.`);
+    return err(c, "Could not verify rate limit status. Please try again later.", 500);
+  }
+
+  return next();
+}
+
+aiRoutes.use(`${PREFIX}/ai/analyze-knowledge-graph`, graphRateLimitMiddleware);
+aiRoutes.use(`${PREFIX}/ai/suggest-student-connections`, graphRateLimitMiddleware);
 
 // Mount sub-modules
 aiRoutes.route("/", aiGenerateRoutes);

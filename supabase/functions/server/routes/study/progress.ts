@@ -111,9 +111,10 @@ progressRoutes.get(`${PREFIX}/topic-progress`, async (c: Context) => {
         .eq("student_id", user.id)
         .in("summary_id", summaryIds),
 
+      // M7 FIX: Select only summary_id (minimal payload) instead of id + summary_id
       db
         .from("flashcards")
-        .select("id, summary_id")
+        .select("summary_id")
         .in("summary_id", summaryIds)
         .eq("is_active", true)
         .is("deleted_at", null),

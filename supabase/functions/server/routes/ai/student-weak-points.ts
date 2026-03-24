@@ -44,7 +44,7 @@ interface WeakPoint {
 aiWeakPointsRoutes.get(
   `${PREFIX}/ai/student-weak-points`,
   async (c: Context) => {
-    const auth = await authenticate(c);
+    const auth = c.get("auth") ?? await authenticate(c);
     if (auth instanceof Response) return auth;
     const { user, db } = auth;
 
