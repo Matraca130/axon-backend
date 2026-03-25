@@ -28,6 +28,7 @@
 
 import type { AfterWriteParams } from "./crud-factory.ts";
 import { autoChunkAndEmbed } from "./auto-ingest.ts";
+import { getAdminClient } from "./db.ts";
 
 /**
  * afterWrite hook for summaries.
@@ -77,17 +78,52 @@ export function onSummaryWrite({
     return;
   }
 
-  // ── Fire: trigger auto-ingest (fire-and-forget).
+  // ── Gate 4 (Fase 4): Skip if summary has active blocks.
   //
-  // - NOT awaited: the HTTP response returns immediately.
-  // - autoChunkAndEmbed logs its own start/end messages,
-  //   so .then() is intentionally silent to avoid double-logging.
-  // - .catch() logs errors that escape autoChunkAndEmbed
-  //   (fatal throws: summary not found, chunk INSERT failed).
-  autoChunkAndEmbed(summaryId, institutionId).catch((e) => {
+  // Block-based summaries use publish-summary.ts to flatten + embed.
+  // If this summary has summary_blocks, auto-ingest would produce
+  // stale embeddings from the old content_markdown. Skip it.
+  // This check is async (DB call), so we wrap it in the fire-and-forget flow.
+  checkBlocksAndIngest(summaryId, institutionId).catch((e) => {
     console.error(
       `[Summary Hook] Auto-ingest failed for summary ${summaryId}:`,
       (e as Error).message,
     );
   });
+}
+
+/**
+ * Check if summary has active blocks. If not, run autoChunkAndEmbed.
+ * If yes, skip (publish-summary.ts handles embedding for block-based summaries).
+ */
+async function checkBlocksAndIngest(
+  summaryId: string,
+  institutionId: string,
+): Promise<void> {
+  const admin = getAdminClient();
+
+  // Quick count of active blocks for this summary
+  const { count, error: countErr } = await admin
+    .from("summary_blocks")
+    .select("id", { count: "exact", head: true })
+    .eq("summary_id", summaryId)
+    .eq("is_active", true)
+    .is("deleted_at", null);
+
+  if (countErr) {
+    console.warn(
+      `[Summary Hook] Could not check blocks for ${summaryId}: ${countErr.message}. ` +
+        `Proceeding with auto-ingest as fallback.`,
+    );
+    // Fallback: proceed with auto-ingest (safe — worst case, stale embeddings get overwritten on publish)
+  } else if (count && count > 0) {
+    console.info(
+      `[Summary Hook] Summary ${summaryId} has ${count} active blocks. ` +
+        `Skipping auto-ingest (publish-summary.ts handles embedding).`,
+    );
+    return;
+  }
+
+  // No blocks → proceed with legacy auto-ingest
+  await autoChunkAndEmbed(summaryId, institutionId);
 }

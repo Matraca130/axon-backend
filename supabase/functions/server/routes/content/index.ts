@@ -36,6 +36,7 @@ import { reorderRoutes } from "./reorder.ts";
 import { contentTreeRoutes } from "./content-tree.ts";
 import { flashcardsByTopicRoutes } from "./flashcards-by-topic.ts";
 import { flashcardMappingRoutes } from "./flashcard-mappings.ts";
+import { publishSummaryRoutes } from "./publish-summary.ts";
 
 const content = new Hono();
 
@@ -50,5 +51,6 @@ content.route("/", reorderRoutes);
 content.route("/", contentTreeRoutes);
 content.route("/", flashcardsByTopicRoutes);
 content.route("/", flashcardMappingRoutes);
+content.route("/", publishSummaryRoutes);
 
 export { content };
