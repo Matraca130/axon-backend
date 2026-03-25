@@ -36,6 +36,44 @@ export interface ToolExecutionResult {
   isAsync?: boolean;
 }
 
+/** Gemini function_declaration format (used by generateContent with tools) */
+export interface GeminiFunctionDeclaration {
+  name: string;
+  description: string;
+  parameters: {
+    type: string;
+    properties: Record<string, unknown>;
+    required?: string[];
+  };
+}
+
+// ─── Claude → Gemini Tool Adapter ────────────────────────
+// Claude uses `input_schema`; Gemini expects `parameters` in function_declarations.
+// Without this conversion, Gemini ignores the schema and 100% of tool calls fail.
+
+/**
+ * Converts an array of Claude tool definitions to Gemini function_declarations.
+ *
+ * Claude format:  { name, description, input_schema: { type, properties, required } }
+ * Gemini format:  { name, description, parameters:    { type, properties, required } }
+ *
+ * Only `name`, `description`, and the schema (renamed to `parameters`) are kept.
+ * Any Claude-specific fields (e.g. `cache_control`) are stripped.
+ */
+export function convertClaudeToolsToGemini(
+  claudeTools: ClaudeTool[],
+): GeminiFunctionDeclaration[] {
+  return claudeTools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    parameters: {
+      type: tool.input_schema.type,
+      properties: tool.input_schema.properties,
+      ...(tool.input_schema.required && { required: tool.input_schema.required }),
+    },
+  }));
+}
+
 // ─── Tool Declarations for Claude API ─────────────────────
 
 export const WHATSAPP_TOOLS: ClaudeTool[] = [
