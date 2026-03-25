@@ -11,6 +11,7 @@
 import type { AfterWriteParams } from "./crud-factory.ts";
 import { awardXP, XP_TABLE } from "./xp-engine.ts";
 import { getAdminClient } from "./db.ts";
+import { postAwardEvaluation } from "./gamification-dispatcher.ts";
 
 // --- Helper: Resolve institution_id from study session ---
 async function resolveInstitutionFromSession(
@@ -197,7 +198,7 @@ export function xpHookForReview(params: AfterWriteParams): void {
       const xpBase = isCorrect ? XP_TABLE.review_correct : XP_TABLE.review_flashcard;
       const flashcardId = row.item_id as string;
       const bonus = await getBonusContext(userId, flashcardId);
-      await awardXP({
+      const result = await awardXP({
         db: getAdminClient(),
         studentId: userId,
         institutionId,
@@ -209,6 +210,8 @@ export function xpHookForReview(params: AfterWriteParams): void {
       });
       // D-4: Increment total_reviews for badge criteria evaluation
       await _incrementStudentStat(userId, "total_reviews");
+      // Post-award badge evaluation (advisory-lock protected)
+      if (result) postAwardEvaluation(userId, institutionId);
     } catch (e) {
       console.warn("[XP Hook] review error:", (e as Error).message);
     }
@@ -232,7 +235,7 @@ export function xpHookForQuizAttempt(params: AfterWriteParams): void {
         return;
       }
       const bonus = await getBonusContext(userId);
-      await awardXP({
+      const result = await awardXP({
         db: getAdminClient(),
         studentId: userId,
         institutionId,
@@ -242,6 +245,8 @@ export function xpHookForQuizAttempt(params: AfterWriteParams): void {
         sourceId: row.id as string,
         currentStreak: bonus.currentStreak,
       });
+      // Post-award badge evaluation (advisory-lock protected)
+      if (result) postAwardEvaluation(userId, institutionId);
     } catch (e) {
       console.warn("[XP Hook] quiz error:", (e as Error).message);
     }
@@ -259,7 +264,7 @@ export function xpHookForSessionComplete(params: AfterWriteParams): void {
       const institutionId = await resolveInstitutionFromSession(row.id as string);
       if (!institutionId) return;
       const bonus = await getBonusContext(userId);
-      await awardXP({
+      const result = await awardXP({
         db: getAdminClient(),
         studentId: userId,
         institutionId,
@@ -271,6 +276,8 @@ export function xpHookForSessionComplete(params: AfterWriteParams): void {
       });
       // D-4: Increment total_sessions for badge criteria evaluation
       await _incrementStudentStat(userId, "total_sessions");
+      // Post-award badge evaluation (advisory-lock protected)
+      if (result) postAwardEvaluation(userId, institutionId);
     } catch (e) {
       console.warn("[XP Hook] session complete error:", (e as Error).message);
     }
@@ -294,7 +301,7 @@ export function xpHookForReadingComplete(params: AfterWriteParams): void {
       });
       if (!instId) return;
       const bonus = await getBonusContext(userId);
-      await awardXP({
+      const result = await awardXP({
         db,
         studentId: userId,
         institutionId: instId as string,
@@ -304,6 +311,8 @@ export function xpHookForReadingComplete(params: AfterWriteParams): void {
         sourceId: row.id as string,
         currentStreak: bonus.currentStreak,
       });
+      // Post-award badge evaluation (advisory-lock protected)
+      if (result) postAwardEvaluation(userId, instId as string);
     } catch (e) {
       console.warn("[XP Hook] reading error:", (e as Error).message);
     }
@@ -366,6 +375,8 @@ export function xpHookForBatchReviews(
       // D-4: Increment total_reviews for badge criteria evaluation
       // Single increment for the whole batch (more efficient than per-review)
       await _incrementStudentStat(userId, "total_reviews", reviews.length);
+      // Post-award badge evaluation once for entire batch (advisory-lock protected)
+      postAwardEvaluation(userId, institutionId);
     } catch (e) {
       console.warn("[XP Hook] batch reviews error:", (e as Error).message);
     }
@@ -381,7 +392,7 @@ export function xpHookForVideoComplete(
   (async () => {
     try {
       const bonus = await getBonusContext(userId);
-      await awardXP({
+      const result = await awardXP({
         db: getAdminClient(),
         studentId: userId,
         institutionId,
@@ -391,6 +402,8 @@ export function xpHookForVideoComplete(
         sourceId: videoId,
         currentStreak: bonus.currentStreak,
       });
+      // Post-award badge evaluation (advisory-lock protected)
+      if (result) postAwardEvaluation(userId, institutionId);
     } catch (e) {
       console.warn("[XP Hook] video complete error:", (e as Error).message);
     }
@@ -406,7 +419,7 @@ export function xpHookForRagQuestion(
   (async () => {
     try {
       const bonus = await getBonusContext(userId);
-      await awardXP({
+      const result = await awardXP({
         db: getAdminClient(),
         studentId: userId,
         institutionId,
@@ -416,6 +429,8 @@ export function xpHookForRagQuestion(
         sourceId: logId,
         currentStreak: bonus.currentStreak,
       });
+      // Post-award badge evaluation (advisory-lock protected)
+      if (result) postAwardEvaluation(userId, institutionId);
     } catch (e) {
       console.warn("[XP Hook] RAG question error:", (e as Error).message);
     }
@@ -471,7 +486,7 @@ async function _awardPlanTaskXP(
   const institutionId = course.institution_id as string;
   const bonus = await getBonusContext(userId);
 
-  await awardXP({
+  const taskResult = await awardXP({
     db,
     studentId: userId,
     institutionId,
@@ -481,6 +496,9 @@ async function _awardPlanTaskXP(
     sourceId: taskId,
     currentStreak: bonus.currentStreak,
   });
+
+  // Post-award badge evaluation (advisory-lock protected)
+  if (taskResult) postAwardEvaluation(userId, institutionId);
 
   try {
     const [totalResult, completedResult] = await Promise.all([
