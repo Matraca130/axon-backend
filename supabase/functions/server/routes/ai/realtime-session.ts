@@ -211,6 +211,34 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
 
   const adminDb = getAdminClient();
 
+  // 2b. Voice-call rate limit (own bucket, 10 calls/hour)
+  // SEC-NOTE: We fail-open on RPC errors to avoid blocking all voice calls if the RPC is missing. The RPC should be deployed before this code.
+  const VOICE_RATE_LIMIT = 10;
+  const VOICE_RATE_WINDOW_MS = 3600000;
+  try {
+    const { data: rlData, error: rlError } = await adminDb.rpc("check_rate_limit", {
+      p_key: `voice:${user.id}`,
+      p_max_requests: VOICE_RATE_LIMIT,
+      p_window_ms: VOICE_RATE_WINDOW_MS,
+    });
+
+    if (rlError) {
+      // RPC call itself failed (e.g. RPC missing, DB down) — fail-open to avoid blocking all voice calls
+      console.error("[Realtime] Rate limit RPC error (fail-open, allowing request):", rlError.message);
+    } else if (rlData && !rlData.allowed) {
+      // Actual rate limit exceeded — fail-closed
+      return err(
+        c,
+        `Voice call rate limit exceeded: max ${VOICE_RATE_LIMIT} calls per hour. ` +
+        `Try again in ${Math.ceil((rlData.retry_after_ms || 0) / 1000)}s.`,
+        429,
+      );
+    }
+  } catch (rlException) {
+    // Unexpected exception (network error, etc.) — fail-open
+    console.error("[Realtime] Rate limit check exception (fail-open, allowing request):", (rlException as Error).message);
+  }
+
   // 3. Gather student context (parallel queries)
   // Note: Supabase PostgrestBuilder is a thenable but lacks .catch(),
   // so we wrap each query with Promise.resolve() to get a real Promise.
@@ -221,7 +249,10 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
         p_student_id: user.id,
         p_institution_id: institutionId,
       })
-    ).catch(() => ({ data: null })),
+    ).catch((e) => {
+      console.error(`[RealtimeSession] get_student_knowledge_context failed for user=${user.id} institution=${institutionId}: ${(e as Error).message}`);
+      return { data: null };
+    }),
 
     // Summary + course info (if summary_id provided)
     summaryId
@@ -231,7 +262,10 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
             .select("title, topics!inner(title, sections!inner(title, semesters!inner(title, courses!inner(name))))")
             .eq("id", summaryId)
             .single()
-        ).catch(() => ({ data: null }))
+        ).catch((e) => {
+          console.error(`[RealtimeSession] summary query failed for summary=${summaryId}: ${(e as Error).message}`);
+          return { data: null };
+        })
       : Promise.resolve({ data: null }),
 
     // Student stats
@@ -241,7 +275,10 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
         .select("current_streak, total_reviews, total_time_seconds")
         .eq("student_id", user.id)
         .single()
-    ).catch(() => ({ data: null })),
+    ).catch((e) => {
+      console.error(`[RealtimeSession] student_stats query failed for user=${user.id}: ${(e as Error).message}`);
+      return { data: null };
+    }),
 
     // Student XP
     Promise.resolve(
@@ -251,7 +288,10 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
         .eq("student_id", user.id)
         .eq("institution_id", institutionId)
         .single()
-    ).catch(() => ({ data: null })),
+    ).catch((e) => {
+      console.error(`[RealtimeSession] student_xp query failed for user=${user.id} institution=${institutionId}: ${(e as Error).message}`);
+      return { data: null };
+    }),
   ]);
 
   // Extract summary/course names from nested join
@@ -353,7 +393,22 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
     return err(c, "OpenAI no devolvió un token de sesión válido", 502);
   }
 
-  // 6. Return ephemeral token to frontend
+  // 6. Fire-and-forget: log voice session cost/usage
+  adminDb
+    .from("ai_cost_log")
+    .insert({
+      user_id: user.id,
+      institution_id: institutionId,
+      endpoint: "realtime-session",
+      model: "gpt-realtime-1.5",
+      created_at: new Date().toISOString(),
+    })
+    .then(({ error }) => {
+      if (error) console.warn("[Realtime] Cost log insert failed:", error.message);
+    })
+    .catch((e) => console.error("[Realtime] Cost logging failed:", { error: (e as Error).message, user_id: user.id }));
+
+  // 7. Return ephemeral token to frontend
   return ok(c, {
     client_secret: clientSecret,
     expires_at: session.expires_at ?? null,

@@ -324,7 +324,7 @@ progressRoutes.post(`${PREFIX}/reading-states`, async (c: Context) => {
         userId: user.id,
       });
     } catch (hookErr) {
-      console.warn("[XP Hook] reading-state setup error:", (hookErr as Error).message);
+      console.error("[XP Hook] reading-state setup error:", (hookErr as Error).message);
     }
   }
 

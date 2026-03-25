@@ -153,7 +153,7 @@ reviewRoutes.post(`${PREFIX}/reviews`, async (c: Context) => {
   try {
     xpHookForReview({ action: "create", row: data, userId: user.id });
   } catch (hookErr) {
-    console.warn("[XP Hook] review setup error:", (hookErr as Error).message);
+    console.error("[XP Hook] review setup error:", (hookErr as Error).message);
   }
 
   return ok(c, data, 201);
@@ -245,7 +245,7 @@ reviewRoutes.post(`${PREFIX}/quiz-attempts`, async (c: Context) => {
   try {
     xpHookForQuizAttempt({ action: "create", row: data, userId: user.id });
   } catch (hookErr) {
-    console.warn("[XP Hook] quiz-attempt setup error:", (hookErr as Error).message);
+    console.error("[XP Hook] quiz-attempt setup error:", (hookErr as Error).message);
   }
 
   return ok(c, data, 201);
