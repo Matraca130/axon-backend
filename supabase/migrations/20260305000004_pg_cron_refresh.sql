@@ -13,14 +13,19 @@
 -- ============================================================================
 
 -- Refresh every 2 minutes (adaptive AI needs reasonably fresh data)
+-- Wrapped in existence check to avoid errors if MV is dropped/renamed.
 SELECT cron.schedule(
   'refresh-mv-knowledge-profile',
   '*/2 * * * *',
-  $$REFRESH MATERIALIZED VIEW CONCURRENTLY mv_student_knowledge_profile$$
+  $$DO $guard$ BEGIN IF EXISTS (SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_student_knowledge_profile') THEN REFRESH MATERIALIZED VIEW CONCURRENTLY mv_student_knowledge_profile; END IF; END $guard$;$$
 );
 
 -- Initial population (safe to run even if already refreshed)
-REFRESH MATERIALIZED VIEW mv_student_knowledge_profile;
+DO $guard$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_matviews WHERE matviewname = 'mv_student_knowledge_profile') THEN
+    REFRESH MATERIALIZED VIEW mv_student_knowledge_profile;
+  END IF;
+END $guard$;
 
 -- Verify the job was created:
 -- SELECT * FROM cron.job WHERE jobname = 'refresh-mv-knowledge-profile';

@@ -14,6 +14,10 @@
  *            + tryAwardBadge DRY helper with 23505 race handling
  *   S3-004 — Removed ai_conversations & leaderboard_weekly from
  *            ALLOWED_TABLES; 4 badges deactivated (helpers.ts)
+ *
+ * CONCURRENCY FIX:
+ *   C-001 — tryAwardBadge: fresh DB check before insert prevents
+ *           double XP when concurrent check-badges requests race
  */
 
 import { Hono } from "npm:hono";
@@ -212,7 +216,7 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
           newBadges,
         );
       } else if (result.status === "rejected") {
-        console.warn(
+        console.error(
           `[Badges] COUNT eval failed:`,
           result.reason,
         );
@@ -232,6 +236,10 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
 // Inserts student_badges row, pushes to newBadges array,
 // and awards XP. Handles 23505 duplicate key gracefully
 // (concurrent check-badges race condition).
+//
+// CONCURRENCY FIX: Fresh DB check before insert prevents double-award
+// when two concurrent check-badges requests both read the same stale
+// earnedIds set and both attempt to award the same badge.
 
 async function tryAwardBadge(
   adminDb: ReturnType<typeof getAdminClient>,
@@ -240,6 +248,16 @@ async function tryAwardBadge(
   badge: Record<string, unknown>,
   newBadges: Array<Record<string, unknown>>,
 ): Promise<void> {
+  // Fresh check: re-query DB to see if badge was already awarded
+  // (guards against stale earnedIds from concurrent requests)
+  const { count: alreadyEarned } = await adminDb
+    .from("student_badges")
+    .select("badge_id", { count: "exact", head: true })
+    .eq("student_id", studentId)
+    .eq("badge_id", badge.id as string);
+
+  if ((alreadyEarned ?? 0) > 0) return;
+
   // G-002 FIX: Include institution_id in student_badges INSERT
   const { error: insertErr } = await adminDb
     .from("student_badges")
@@ -252,7 +270,7 @@ async function tryAwardBadge(
   if (insertErr) {
     // 23505 = unique_violation (race condition on concurrent calls)
     if (insertErr.code === "23505") return;
-    console.warn(
+    console.error(
       `[Badges] Insert failed for "${badge.name}":`,
       insertErr.message,
     );
@@ -274,7 +292,7 @@ async function tryAwardBadge(
         sourceId: badge.id as string,
       });
     } catch (e) {
-      console.warn(
+      console.error(
         `[Badges] XP award for badge ${badge.slug} failed:`,
         (e as Error).message,
       );

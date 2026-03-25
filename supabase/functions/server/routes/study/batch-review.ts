@@ -83,7 +83,10 @@ async function loadLeechThreshold(
       .is("institution_id", null)
       .maybeSingle();
 
-    return globalData?.leech_threshold ?? DEFAULT_LEECH_THRESHOLD;
+    // FIX: Clamp leech_threshold to [1, 50] to prevent nonsensical values
+    // (0 would mark every card as a leech, >50 would effectively disable detection).
+    const raw = globalData?.leech_threshold ?? DEFAULT_LEECH_THRESHOLD;
+    return Math.max(1, Math.min(50, raw));
   } catch {
     return DEFAULT_LEECH_THRESHOLD;
   }
@@ -121,7 +124,7 @@ async function propagateKeywordBkt(
 
     if (itemErr || !item?.keyword_id) {
       if (itemErr) {
-        console.warn(`[KW-BKT] Failed to look up ${table} keyword_id:`, itemErr.message);
+        console.error(`[KW-BKT] Failed to look up ${table} keyword_id:`, itemErr.message);
         return `Failed to look up keyword: ${itemErr.message}`;
       }
       return; // No keyword linked — nothing to propagate (not an error)
@@ -138,7 +141,7 @@ async function propagateKeywordBkt(
 
     if (subErr || !subtopics || subtopics.length === 0) {
       if (subErr) {
-        console.warn("[KW-BKT] Failed to look up subtopics:", subErr.message);
+        console.error("[KW-BKT] Failed to look up subtopics:", subErr.message);
         return `Failed to look up subtopics: ${subErr.message}`;
       }
       return; // No subtopics — nothing to propagate
@@ -165,7 +168,7 @@ async function propagateKeywordBkt(
       .in("subtopic_id", targetIds);
 
     if (batchErr) {
-      console.warn("[KW-BKT] Batch fetch failed:", batchErr.message);
+      console.error("[KW-BKT] Batch fetch failed:", batchErr.message);
       return `Batch fetch failed: ${batchErr.message}`;
     }
 
@@ -216,7 +219,7 @@ async function propagateKeywordBkt(
         .upsert(upsertRows, { onConflict: "student_id,subtopic_id" });
 
       if (upsertErr) {
-        console.warn(`[KW-BKT] Batch upsert failed (${upsertRows.length} rows):`, upsertErr.message);
+        console.error(`[KW-BKT] Batch upsert failed (${upsertRows.length} rows):`, upsertErr.message);
         return `Batch upsert failed: ${upsertErr.message}`;
       }
     }
@@ -225,7 +228,7 @@ async function propagateKeywordBkt(
     return;
   } catch (e) {
     const msg = (e as Error).message;
-    console.warn("[KW-BKT] Keyword propagation failed:", msg);
+    console.error("[KW-BKT] Keyword propagation failed:", msg);
     return `Propagation error: ${msg}`;
   }
 }
@@ -472,26 +475,15 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
       }
     }
 
-    // ── Step C: READ + INCREMENT + UPSERT bkt_states ──
+    // ── Step C: UPSERT bkt_states + atomic counter increment ──
     if (item.bkt_update) {
       // ════════ PATH A (legacy) ════════
       try {
         const bkt = item.bkt_update;
-        let finalTotalAttempts = bkt.total_attempts;
-        let finalCorrectAttempts = bkt.correct_attempts;
 
-        const { data: existing } = await db
-          .from("bkt_states")
-          .select("total_attempts, correct_attempts")
-          .eq("student_id", user.id)
-          .eq("subtopic_id", bkt.subtopic_id)
-          .maybeSingle();
-
-        if (existing) {
-          finalTotalAttempts = (existing.total_attempts || 0) + bkt.total_attempts;
-          finalCorrectAttempts = (existing.correct_attempts || 0) + bkt.correct_attempts;
-        }
-
+        // FIX: Upsert BKT state fields WITHOUT attempt counters first.
+        // Attempt counters are incremented atomically via RPC below to
+        // prevent the read-then-write race between concurrent requests.
         const bktRow = {
           student_id: user.id,
           subtopic_id: bkt.subtopic_id,
@@ -500,14 +492,28 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           p_slip: bkt.p_slip,
           p_guess: bkt.p_guess,
           delta: bkt.delta,
-          total_attempts: finalTotalAttempts,
-          correct_attempts: finalCorrectAttempts,
+          total_attempts: 0,                          // seed for INSERT; RPC increments atomically
+          correct_attempts: 0,                        // seed for INSERT; RPC increments atomically
           last_attempt_at: bkt.last_attempt_at,
         };
 
         const { error: bktErr } = await atomicUpsert(
           db, "bkt_states", "student_id,subtopic_id", bktRow,
         );
+
+        // FIX: Atomically increment attempt counters via SQL arithmetic
+        // to avoid the read-then-write race condition on concurrent batches.
+        if (!bktErr) {
+          const { error: rpcErr } = await db.rpc("increment_bkt_attempts", {
+            p_student_id: user.id,
+            p_subtopic_id: bkt.subtopic_id,
+            p_total_delta: bkt.total_attempts,
+            p_correct_delta: bkt.correct_attempts,
+          });
+          if (rpcErr) {
+            console.error("[BKT] Atomic increment failed, counters may be stale:", rpcErr.message);
+          }
+        }
 
         if (bktErr) {
           errors.push({ index: i, step: "bkt", message: bktErr.message });
@@ -549,9 +555,8 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           instrumentType,
         });
 
-        const finalTotalAttempts = existingTotal + 1;
-        const finalCorrectAttempts = existingCorrect + (isCorrect ? 1 : 0);
-
+        // FIX: Use placeholder values for INSERT; actual counters are
+        // atomically incremented via RPC to prevent concurrent race.
         const bktRow = {
           student_id: user.id,
           subtopic_id: item.subtopic_id,
@@ -561,14 +566,34 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           p_slip: existingBkt?.p_slip ?? 0.10,
           p_guess: existingBkt?.p_guess ?? 0.25,
           delta: bktResult.delta,
-          total_attempts: finalTotalAttempts,
-          correct_attempts: finalCorrectAttempts,
+          total_attempts: 0,                           // seed for INSERT; RPC increments atomically
+          correct_attempts: 0,                        // seed for INSERT; RPC increments atomically
           last_attempt_at: nowIso,
         };
 
         const { error: bktErr } = await atomicUpsert(
           db, "bkt_states", "student_id,subtopic_id", bktRow,
         );
+
+        // FIX: Atomically increment attempt counters via SQL arithmetic
+        // to avoid the read-then-write race condition on concurrent batches.
+        let finalTotalAttempts = existingTotal;
+        let finalCorrectAttempts = existingCorrect;
+        if (!bktErr) {
+          const correctDelta = isCorrect ? 1 : 0;
+          const { data: rpcData, error: rpcErr } = await db.rpc("increment_bkt_attempts", {
+            p_student_id: user.id,
+            p_subtopic_id: item.subtopic_id,
+            p_total_delta: 1,
+            p_correct_delta: correctDelta,
+          });
+          if (rpcErr) {
+            console.error("[BKT] Atomic increment failed, counters may be stale:", rpcErr.message);
+          } else if (rpcData && rpcData.length > 0) {
+            finalTotalAttempts = rpcData[0].new_total_attempts;
+            finalCorrectAttempts = rpcData[0].new_correct_attempts;
+          }
+        }
 
         if (bktErr) {
           errors.push({ index: i, step: "bkt_pathb", message: bktErr.message });
@@ -629,7 +654,7 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     try {
       xpHookForBatchReviews(user.id, sessionId, successfulReviews);
     } catch (hookErr) {
-      console.warn("[XP Hook] batch review setup error:", (hookErr as Error).message);
+      console.error("[XP Hook] batch review setup error:", (hookErr as Error).message);
     }
   }
 

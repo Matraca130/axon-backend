@@ -164,7 +164,8 @@ async function insertDedupRecord(
  * and indexed for O(1) lookups instead of scanning all rows.
  */
 export async function computeLookupHash(phoneNumber: string): Promise<string> {
-  const secret = Deno.env.get("WHATSAPP_APP_SECRET") ?? "axon-global-salt";
+  const secret = Deno.env.get("WHATSAPP_APP_SECRET");
+  if (!secret) throw new Error("[WA] WHATSAPP_APP_SECRET not configured — cannot hash phone numbers");
   return await hashPhone(phoneNumber, secret);
 }
 
@@ -328,7 +329,8 @@ export async function handleIncoming(c: Context): Promise<Response> {
   try {
     const linked = await lookupLinkedUser(from);
 
-    const globalSalt = Deno.env.get("WHATSAPP_APP_SECRET") ?? "axon-global-salt";
+    const globalSalt = Deno.env.get("WHATSAPP_APP_SECRET");
+    if (!globalSalt) throw new Error("[WA] WHATSAPP_APP_SECRET not configured — cannot hash phone numbers");
     const rateLimitKey = linked
       ? linked.phoneHash
       : await hashPhone(from, globalSalt);

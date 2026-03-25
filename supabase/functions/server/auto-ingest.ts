@@ -36,6 +36,8 @@ import {
 import { chunkSemantic, type SemanticChunkResult } from "./semantic-chunker.ts";
 import { generateEmbedding, generateEmbeddings } from "./openai-embeddings.ts";
 import { getAdminClient } from "./db.ts";
+import { crypto } from "https://deno.land/std/crypto/mod.ts";
+import { encodeHex } from "https://deno.land/std/encoding/hex.ts";
 
 // ─── Public Types ───────────────────────────────────────────────────
 
@@ -46,6 +48,7 @@ export interface AutoIngestResult {
   embeddings_failed: number;
   strategy_used: string;
   summary_embedded: boolean;
+  skipped_unchanged: boolean;
   elapsed_ms: number;
 }
 
@@ -56,6 +59,14 @@ export function truncateAtWord(text: string, maxChars: number): string {
   const cutPoint = text.lastIndexOf(" ", maxChars);
   if (cutPoint <= 0) return text.slice(0, maxChars);
   return text.slice(0, cutPoint);
+}
+
+// ─── Content Hash ───────────────────────────────────────────────────
+
+async function computeContentHash(text: string): Promise<string> {
+  const data = new TextEncoder().encode(text);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  return encodeHex(new Uint8Array(hashBuffer));
 }
 
 // ─── Summary Embedding ──────────────────────────────────────────────
@@ -129,6 +140,7 @@ export async function autoChunkAndEmbed(
       embeddings_failed: 0,
       strategy_used: "skipped_locked",
       summary_embedded: false,
+      skipped_unchanged: false,
       elapsed_ms: Date.now() - t0,
     };
   }
@@ -163,15 +175,41 @@ export async function autoChunkAndEmbed(
       embeddings_failed: 0,
       strategy_used: "none",
       summary_embedded: false,
+      skipped_unchanged: false,
       elapsed_ms: Date.now() - t0,
     };
   }
 
-  // Step 3: Chunk the markdown
+  // Step 2b: Content hash check — skip re-chunking if content hasn't changed
   const title = (summary.title as string) ?? "";
   const fullText = title.trim().length > 0
     ? `${title}\n\n${contentMarkdown}`
     : contentMarkdown;
+
+  const newContentHash = await computeContentHash(fullText);
+
+  const { data: existingChunk } = await adminDb
+    .from("chunks")
+    .select("content_hash")
+    .eq("summary_id", summaryId)
+    .limit(1)
+    .single();
+
+  if (existingChunk?.content_hash && existingChunk.content_hash === newContentHash) {
+    console.info(
+      `[Auto-Ingest] Skipping ${summaryId} — content hash unchanged (${newContentHash.slice(0, 8)}...)`,
+    );
+    return {
+      summary_id: summaryId,
+      chunks_created: 0,
+      embeddings_generated: 0,
+      embeddings_failed: 0,
+      strategy_used: "skipped_unchanged",
+      summary_embedded: false,
+      skipped_unchanged: true,
+      elapsed_ms: Date.now() - t0,
+    };
+  }
 
   // Step 3a: Select strategy (D41, D42)
   const selectedStrategy = selectChunkStrategy(
@@ -202,6 +240,7 @@ export async function autoChunkAndEmbed(
       embeddings_failed: 0,
       strategy_used: "none",
       summary_embedded: false,
+      skipped_unchanged: false,
       elapsed_ms: Date.now() - t0,
     };
   }
@@ -218,12 +257,13 @@ export async function autoChunkAndEmbed(
     );
   }
 
-  // Step 5: Insert new chunks
+  // Step 5: Insert new chunks (with content_hash for change detection)
   const insertData = chunks.map((chunk) => ({
     summary_id: summaryId,
     content: chunk.content,
     order_index: chunk.order_index,
     chunk_strategy: chunk.strategy,
+    content_hash: newContentHash,
   }));
 
   const { data: inserted, error: insertErr } = await adminDb
@@ -381,6 +421,7 @@ export async function autoChunkAndEmbed(
     embeddings_failed: failed,
     strategy_used: chunks[0]?.strategy ?? "recursive",
     summary_embedded: summaryEmbedded,
+    skipped_unchanged: false,
     elapsed_ms: elapsed,
   };
 
