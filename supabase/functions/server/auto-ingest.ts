@@ -46,6 +46,7 @@ export interface AutoIngestResult {
   chunks_created: number;
   embeddings_generated: number;
   embeddings_failed: number;
+  retried_count: number;
   strategy_used: string;
   summary_embedded: boolean;
   skipped_unchanged: boolean;
@@ -112,6 +113,52 @@ function advisoryLockKey(summaryId: string): number {
   return hash;
 }
 
+// ─── Retry with Exponential Backoff ─────────────────────────────────
+
+const MAX_RETRIES = 3;
+const BACKOFF_BASE_MS = 1000; // 1s, 2s, 4s
+
+interface RetryResult<T> {
+  data: T;
+  retries: number;
+}
+
+/**
+ * Wraps an async operation with exponential backoff retry logic.
+ * Only retries on HTTP 429 (rate limit) errors; all other errors fail immediately.
+ */
+async function withBackoff<T>(
+  fn: () => Promise<T>,
+  label: string,
+): Promise<RetryResult<T>> {
+  let lastErr: Error | undefined;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const data = await fn();
+      return { data, retries: attempt };
+    } catch (err) {
+      lastErr = err as Error;
+      const is429 =
+        lastErr.message?.includes("429") ||
+        lastErr.message?.toLowerCase().includes("rate limit") ||
+        (lastErr as unknown as { status?: number }).status === 429;
+
+      if (!is429 || attempt >= MAX_RETRIES) {
+        throw lastErr;
+      }
+
+      const delayMs = BACKOFF_BASE_MS * Math.pow(2, attempt); // 1s, 2s, 4s
+      console.warn(
+        `[Auto-Ingest] Rate limited on ${label}, retry ${attempt + 1}/${MAX_RETRIES} in ${delayMs}ms`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  throw lastErr!;
+}
+
 // ─── Entry Point ────────────────────────────────────────────────────
 
 export async function autoChunkAndEmbed(
@@ -138,6 +185,7 @@ export async function autoChunkAndEmbed(
       chunks_created: 0,
       embeddings_generated: 0,
       embeddings_failed: 0,
+      retried_count: 0,
       strategy_used: "skipped_locked",
       summary_embedded: false,
       skipped_unchanged: false,
@@ -173,6 +221,7 @@ export async function autoChunkAndEmbed(
       chunks_created: 0,
       embeddings_generated: 0,
       embeddings_failed: 0,
+      retried_count: 0,
       strategy_used: "none",
       summary_embedded: false,
       skipped_unchanged: false,
@@ -204,6 +253,7 @@ export async function autoChunkAndEmbed(
       chunks_created: 0,
       embeddings_generated: 0,
       embeddings_failed: 0,
+      retried_count: 0,
       strategy_used: "skipped_unchanged",
       summary_embedded: false,
       skipped_unchanged: true,
@@ -238,6 +288,7 @@ export async function autoChunkAndEmbed(
       chunks_created: 0,
       embeddings_generated: 0,
       embeddings_failed: 0,
+      retried_count: 0,
       strategy_used: "none",
       summary_embedded: false,
       skipped_unchanged: false,
@@ -291,9 +342,10 @@ export async function autoChunkAndEmbed(
     );
   }
 
-  // Step 7: Generate chunk embeddings (batch, with sequential fallback)
+  // Step 7: Generate chunk embeddings (batch, with sequential fallback + backoff)
   let generated = 0;
   let failed = 0;
+  let retried = 0;
 
   try {
     // Task 4.8: Reuse semantic chunker embeddings where chunk matches a paragraph
@@ -317,7 +369,12 @@ export async function autoChunkAndEmbed(
 
     let newEmbeddings: number[][] = [];
     if (textsToEmbed.length > 0) {
-      newEmbeddings = await generateEmbeddings(textsToEmbed);
+      const batchResult = await withBackoff(
+        () => generateEmbeddings(textsToEmbed),
+        `batch embedding (${textsToEmbed.length} chunks)`,
+      );
+      newEmbeddings = batchResult.data;
+      retried += batchResult.retries;
     }
 
     // Merge reused and newly generated embeddings
@@ -355,18 +412,22 @@ export async function autoChunkAndEmbed(
       }
     }
   } catch (batchErr) {
-    // Fallback: sequential embedding on batch failure
+    // Fallback: sequential embedding on batch failure (with per-chunk backoff)
     console.warn(
       `[Auto-Ingest] Batch embedding failed, falling back to sequential: ${(batchErr as Error).message}`,
     );
 
     for (let i = 0; i < inserted.length; i++) {
       try {
-        const embedding = await generateEmbedding(chunks[i].content);
+        const result = await withBackoff(
+          () => generateEmbedding(chunks[i].content),
+          `chunk ${i}/${inserted.length} (id: ${inserted[i].id})`,
+        );
+        retried += result.retries;
 
         const { error: embedErr } = await adminDb
           .from("chunks")
-          .update({ embedding: JSON.stringify(embedding) })
+          .update({ embedding: JSON.stringify(result.data) })
           .eq("id", inserted[i].id);
 
         if (embedErr) {
@@ -385,7 +446,8 @@ export async function autoChunkAndEmbed(
       } catch (e) {
         failed++;
         console.warn(
-          `[Auto-Ingest] Embedding generation failed for chunk ${inserted[i].id}: ` +
+          `[Auto-Ingest] Embedding generation failed for chunk ${i}/${inserted.length} ` +
+            `(id: ${inserted[i].id}) after ${MAX_RETRIES} retries: ` +
             (e as Error).message,
         );
       }
@@ -410,7 +472,7 @@ export async function autoChunkAndEmbed(
 
   console.info(
     `[Auto-Ingest] Done: ${summaryId} — ${chunks.length} chunks (${selectedStrategy}), ` +
-      `${generated} embedded, ${failed} failed, ` +
+      `${generated} embedded, ${failed} failed, ${retried} retried, ` +
       `summary_embed=${summaryEmbedded}, ${elapsed}ms`,
   );
 
@@ -419,6 +481,7 @@ export async function autoChunkAndEmbed(
     chunks_created: chunks.length,
     embeddings_generated: generated,
     embeddings_failed: failed,
+    retried_count: retried,
     strategy_used: chunks[0]?.strategy ?? "recursive",
     summary_embedded: summaryEmbedded,
     skipped_unchanged: false,
