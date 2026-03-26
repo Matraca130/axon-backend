@@ -342,10 +342,9 @@ export async function autoChunkAndEmbed(
     );
   }
 
-  // Step 7: Generate chunk embeddings (batch, with sequential fallback + backoff)
+  // Step 7: Generate chunk embeddings (batch, with sequential fallback)
   let generated = 0;
   let failed = 0;
-  let retried = 0;
 
   try {
     // Task 4.8: Reuse semantic chunker embeddings where chunk matches a paragraph
@@ -369,12 +368,10 @@ export async function autoChunkAndEmbed(
 
     let newEmbeddings: number[][] = [];
     if (textsToEmbed.length > 0) {
-      const batchResult = await withBackoff(
-        () => generateEmbeddings(textsToEmbed),
-        `batch embedding (${textsToEmbed.length} chunks)`,
-      );
-      newEmbeddings = batchResult.data;
-      retried += batchResult.retries;
+      // Call generateEmbeddings directly — it already has internal 3-retry
+      // backoff in openai-embeddings.ts; wrapping with withBackoff would
+      // cause up to 4×3 = 12 retries on 429s.
+      newEmbeddings = await generateEmbeddings(textsToEmbed);
     }
 
     // Merge reused and newly generated embeddings
@@ -419,15 +416,13 @@ export async function autoChunkAndEmbed(
 
     for (let i = 0; i < inserted.length; i++) {
       try {
-        const result = await withBackoff(
-          () => generateEmbedding(chunks[i].content),
-          `chunk ${i}/${inserted.length} (id: ${inserted[i].id})`,
-        );
-        retried += result.retries;
+        // Call generateEmbedding directly — internal retry in
+        // openai-embeddings.ts already handles 429/503.
+        const embedding = await generateEmbedding(chunks[i].content);
 
         const { error: embedErr } = await adminDb
           .from("chunks")
-          .update({ embedding: JSON.stringify(result.data) })
+          .update({ embedding: JSON.stringify(embedding) })
           .eq("id", inserted[i].id);
 
         if (embedErr) {
@@ -447,8 +442,7 @@ export async function autoChunkAndEmbed(
         failed++;
         console.warn(
           `[Auto-Ingest] Embedding generation failed for chunk ${i}/${inserted.length} ` +
-            `(id: ${inserted[i].id}) after ${MAX_RETRIES} retries: ` +
-            (e as Error).message,
+            `(id: ${inserted[i].id}): ${(e as Error).message}`,
         );
       }
     }
@@ -472,7 +466,7 @@ export async function autoChunkAndEmbed(
 
   console.info(
     `[Auto-Ingest] Done: ${summaryId} — ${chunks.length} chunks (${selectedStrategy}), ` +
-      `${generated} embedded, ${failed} failed, ${retried} retried, ` +
+      `${generated} embedded, ${failed} failed, ` +
       `summary_embed=${summaryEmbedded}, ${elapsed}ms`,
   );
 
@@ -481,7 +475,7 @@ export async function autoChunkAndEmbed(
     chunks_created: chunks.length,
     embeddings_generated: generated,
     embeddings_failed: failed,
-    retried_count: retried,
+    retried_count: 0,
     strategy_used: chunks[0]?.strategy ?? "recursive",
     summary_embedded: summaryEmbedded,
     skipped_unchanged: false,
