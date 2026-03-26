@@ -36,6 +36,8 @@ import {
 import { chunkSemantic, type SemanticChunkResult } from "./semantic-chunker.ts";
 import { generateEmbedding, generateEmbeddings } from "./openai-embeddings.ts";
 import { getAdminClient } from "./db.ts";
+import { crypto } from "https://deno.land/std/crypto/mod.ts";
+import { encodeHex } from "https://deno.land/std/encoding/hex.ts";
 
 // ─── Public Types ───────────────────────────────────────────────────
 
@@ -44,8 +46,10 @@ export interface AutoIngestResult {
   chunks_created: number;
   embeddings_generated: number;
   embeddings_failed: number;
+  retried_count: number;
   strategy_used: string;
   summary_embedded: boolean;
+  skipped_unchanged: boolean;
   elapsed_ms: number;
 }
 
@@ -56,6 +60,14 @@ export function truncateAtWord(text: string, maxChars: number): string {
   const cutPoint = text.lastIndexOf(" ", maxChars);
   if (cutPoint <= 0) return text.slice(0, maxChars);
   return text.slice(0, cutPoint);
+}
+
+// ─── Content Hash ───────────────────────────────────────────────────
+
+async function computeContentHash(text: string): Promise<string> {
+  const data = new TextEncoder().encode(text);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  return encodeHex(new Uint8Array(hashBuffer));
 }
 
 // ─── Summary Embedding ──────────────────────────────────────────────
@@ -101,6 +113,52 @@ function advisoryLockKey(summaryId: string): number {
   return hash;
 }
 
+// ─── Retry with Exponential Backoff ─────────────────────────────────
+
+const MAX_RETRIES = 3;
+const BACKOFF_BASE_MS = 1000; // 1s, 2s, 4s
+
+interface RetryResult<T> {
+  data: T;
+  retries: number;
+}
+
+/**
+ * Wraps an async operation with exponential backoff retry logic.
+ * Only retries on HTTP 429 (rate limit) errors; all other errors fail immediately.
+ */
+async function withBackoff<T>(
+  fn: () => Promise<T>,
+  label: string,
+): Promise<RetryResult<T>> {
+  let lastErr: Error | undefined;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const data = await fn();
+      return { data, retries: attempt };
+    } catch (err) {
+      lastErr = err as Error;
+      const is429 =
+        lastErr.message?.includes("429") ||
+        lastErr.message?.toLowerCase().includes("rate limit") ||
+        (lastErr as unknown as { status?: number }).status === 429;
+
+      if (!is429 || attempt >= MAX_RETRIES) {
+        throw lastErr;
+      }
+
+      const delayMs = BACKOFF_BASE_MS * Math.pow(2, attempt); // 1s, 2s, 4s
+      console.warn(
+        `[Auto-Ingest] Rate limited on ${label}, retry ${attempt + 1}/${MAX_RETRIES} in ${delayMs}ms`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  throw lastErr!;
+}
+
 // ─── Entry Point ────────────────────────────────────────────────────
 
 export async function autoChunkAndEmbed(
@@ -127,8 +185,10 @@ export async function autoChunkAndEmbed(
       chunks_created: 0,
       embeddings_generated: 0,
       embeddings_failed: 0,
+      retried_count: 0,
       strategy_used: "skipped_locked",
       summary_embedded: false,
+      skipped_unchanged: false,
       elapsed_ms: Date.now() - t0,
     };
   }
@@ -161,17 +221,45 @@ export async function autoChunkAndEmbed(
       chunks_created: 0,
       embeddings_generated: 0,
       embeddings_failed: 0,
+      retried_count: 0,
       strategy_used: "none",
       summary_embedded: false,
+      skipped_unchanged: false,
       elapsed_ms: Date.now() - t0,
     };
   }
 
-  // Step 3: Chunk the markdown
+  // Step 2b: Content hash check — skip re-chunking if content hasn't changed
   const title = (summary.title as string) ?? "";
   const fullText = title.trim().length > 0
     ? `${title}\n\n${contentMarkdown}`
     : contentMarkdown;
+
+  const newContentHash = await computeContentHash(fullText);
+
+  const { data: existingChunk } = await adminDb
+    .from("chunks")
+    .select("content_hash")
+    .eq("summary_id", summaryId)
+    .limit(1)
+    .single();
+
+  if (existingChunk?.content_hash && existingChunk.content_hash === newContentHash) {
+    console.info(
+      `[Auto-Ingest] Skipping ${summaryId} — content hash unchanged (${newContentHash.slice(0, 8)}...)`,
+    );
+    return {
+      summary_id: summaryId,
+      chunks_created: 0,
+      embeddings_generated: 0,
+      embeddings_failed: 0,
+      retried_count: 0,
+      strategy_used: "skipped_unchanged",
+      summary_embedded: false,
+      skipped_unchanged: true,
+      elapsed_ms: Date.now() - t0,
+    };
+  }
 
   // Step 3a: Select strategy (D41, D42)
   const selectedStrategy = selectChunkStrategy(
@@ -200,8 +288,10 @@ export async function autoChunkAndEmbed(
       chunks_created: 0,
       embeddings_generated: 0,
       embeddings_failed: 0,
+      retried_count: 0,
       strategy_used: "none",
       summary_embedded: false,
+      skipped_unchanged: false,
       elapsed_ms: Date.now() - t0,
     };
   }
@@ -218,12 +308,13 @@ export async function autoChunkAndEmbed(
     );
   }
 
-  // Step 5: Insert new chunks
+  // Step 5: Insert new chunks (with content_hash for change detection)
   const insertData = chunks.map((chunk) => ({
     summary_id: summaryId,
     content: chunk.content,
     order_index: chunk.order_index,
     chunk_strategy: chunk.strategy,
+    content_hash: newContentHash,
   }));
 
   const { data: inserted, error: insertErr } = await adminDb
@@ -277,6 +368,9 @@ export async function autoChunkAndEmbed(
 
     let newEmbeddings: number[][] = [];
     if (textsToEmbed.length > 0) {
+      // Call generateEmbeddings directly — it already has internal 3-retry
+      // backoff in openai-embeddings.ts; wrapping with withBackoff would
+      // cause up to 4×3 = 12 retries on 429s.
       newEmbeddings = await generateEmbeddings(textsToEmbed);
     }
 
@@ -315,13 +409,15 @@ export async function autoChunkAndEmbed(
       }
     }
   } catch (batchErr) {
-    // Fallback: sequential embedding on batch failure
+    // Fallback: sequential embedding on batch failure (with per-chunk backoff)
     console.warn(
       `[Auto-Ingest] Batch embedding failed, falling back to sequential: ${(batchErr as Error).message}`,
     );
 
     for (let i = 0; i < inserted.length; i++) {
       try {
+        // Call generateEmbedding directly — internal retry in
+        // openai-embeddings.ts already handles 429/503.
         const embedding = await generateEmbedding(chunks[i].content);
 
         const { error: embedErr } = await adminDb
@@ -345,8 +441,8 @@ export async function autoChunkAndEmbed(
       } catch (e) {
         failed++;
         console.warn(
-          `[Auto-Ingest] Embedding generation failed for chunk ${inserted[i].id}: ` +
-            (e as Error).message,
+          `[Auto-Ingest] Embedding generation failed for chunk ${i}/${inserted.length} ` +
+            `(id: ${inserted[i].id}): ${(e as Error).message}`,
         );
       }
     }
@@ -379,8 +475,10 @@ export async function autoChunkAndEmbed(
     chunks_created: chunks.length,
     embeddings_generated: generated,
     embeddings_failed: failed,
+    retried_count: 0,
     strategy_used: chunks[0]?.strategy ?? "recursive",
     summary_embedded: summaryEmbedded,
+    skipped_unchanged: false,
     elapsed_ms: elapsed,
   };
 

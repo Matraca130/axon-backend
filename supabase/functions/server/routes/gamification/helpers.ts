@@ -183,7 +183,7 @@ export async function evaluateCountBadge(
 
     const { count, error } = await query;
     if (error) {
-      console.warn(
+      console.error(
         `[Badge Eval] COUNT(*) query on ${config.table} failed:`,
         error.message,
       );
@@ -213,7 +213,7 @@ export async function evaluateCountBadge(
 
     const { data, error } = await query;
     if (error) {
-      console.warn(
+      console.error(
         `[Badge Eval] COUNT(DISTINCT) query on ${config.table} failed:`,
         error.message,
       );
@@ -264,7 +264,7 @@ export async function evaluateCountBadge(
 
     const { data, error } = await query.limit(1);
     if (error) {
-      console.warn(
+      console.error(
         `[Badge Eval] Field query on ${config.table}.${field} failed:`,
         error.message,
       );

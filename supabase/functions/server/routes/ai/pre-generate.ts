@@ -23,6 +23,10 @@
  *        Skipped from the general AI middleware in index.ts.
  *        Rationale: pre-gen is a professor action, not a student action.
  *        It shouldn't consume the student's interactive AI budget.
+ *   D9b: Institution-level rate limit (ai-pregen-institution:{institutionId}, 30/hour).
+ *        Prevents collective quota burn when multiple professors in the
+ *        same institution fire pre-generation requests simultaneously.
+ *        Without this, N professors can make N×10 = N×10 Gemini calls/hour.
  *   D14: CONTENT_WRITE_ROLES — only professors/admins can pre-generate.
  *        Students access AI content via /ai/generate or /ai/generate-smart.
  *   D15: Sequential Claude calls, NOT parallel.
@@ -48,8 +52,11 @@
  *
  * Rate limit architecture:
  *   index.ts middleware → skips /ai/pre-generate (like /ai/report)
- *   This endpoint → calls check_rate_limit() internally with its own key.
- *   Budget: 10 requests/hour × 5 items/request = max 50 Claude calls/hour.
+ *   This endpoint → calls check_rate_limit() internally with its own keys:
+ *     Per-user:        ai-pregen:{userId}        → 10 req/hour
+ *     Per-institution: ai-pregen-institution:{id} → 30 req/hour
+ *   Budget per user: 10 requests/hour × 5 items/request = max 50 Claude calls/hour.
+ *   Budget per institution: 30 requests/hour × 5 items = max 150 Claude calls/hour.
  *
  * SECURITY FIX (Gemini Code Assist review):
  *   Rate limiter changed from fail-open to FAIL-CLOSED.
@@ -82,8 +89,13 @@ const MAX_COUNT = 5;     // Max items per request
 const DEFAULT_COUNT = 3; // Default items if count not provided
 
 // D9: Separate rate limit bucket for pre-generation
-const PREGEN_RATE_LIMIT = 10;           // max requests per window
+const PREGEN_RATE_LIMIT = 10;           // max requests per window (per user)
 const PREGEN_RATE_WINDOW_MS = 3_600_000; // 1 hour
+
+// Institution-level rate limit: prevents collective quota burn
+// across all professors in the same institution
+const PREGEN_INSTITUTION_RATE_LIMIT = 30;           // max requests per window (per institution)
+const PREGEN_INSTITUTION_RATE_WINDOW_MS = 3_600_000; // 1 hour
 
 // ── Types ────────────────────────────────────────────────
 interface GeneratedItem {
@@ -193,6 +205,40 @@ aiPreGenerateRoutes.post(
       // Fail-closed: unexpected exception → deny request.
       console.error(
         `[PreGenerate] Rate limit exception: ${(e as Error).message}. Denying request.`,
+      );
+      return err(c, "Could not verify rate limit status. Please try again later.", 500);
+    }
+
+    // ── Step 4b: Institution-level rate limit ─────────────────
+    // Prevents collective quota burn when many professors in the
+    // same institution fire pre-generation requests simultaneously.
+    try {
+      const adminDb = getAdminClient();
+      const { data: instRlData, error: instRlError } = await adminDb.rpc(
+        "check_rate_limit",
+        {
+          p_key: `ai-pregen-institution:${institutionId}`,
+          p_max_requests: PREGEN_INSTITUTION_RATE_LIMIT,
+          p_window_ms: PREGEN_INSTITUTION_RATE_WINDOW_MS,
+        },
+      );
+
+      if (instRlError) {
+        console.error(
+          `[PreGenerate] Institution rate limit RPC failed: ${instRlError.message}. Denying request.`,
+        );
+        return err(c, "Could not verify rate limit status. Please try again later.", 500);
+      } else if (instRlData && !instRlData.allowed) {
+        return err(
+          c,
+          `Institutional pre-generation quota exceeded: max ${PREGEN_INSTITUTION_RATE_LIMIT} requests per hour across all professors. ` +
+            `Try again in ${Math.ceil((instRlData.retry_after_ms || 0) / 1000)}s.`,
+          429,
+        );
+      }
+    } catch (e) {
+      console.error(
+        `[PreGenerate] Institution rate limit exception: ${(e as Error).message}. Denying request.`,
       );
       return err(c, "Could not verify rate limit status. Please try again later.", 500);
     }
