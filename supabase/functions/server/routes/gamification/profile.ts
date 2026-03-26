@@ -127,27 +127,15 @@ profileRoutes.get(`${PREFIX}/gamification/leaderboard`, async (c: Context) => {
   let fetchError: { message: string } | null = null;
 
   if (period === "weekly") {
-    // Try materialized view first
+    // S3-004: leaderboard_weekly MV was removed — query student_xp directly
     const result = await db
-      .from("leaderboard_weekly")
-      .select("*")
+      .from("student_xp")
+      .select("student_id, xp_this_week, current_level, total_xp")
       .eq("institution_id", institutionId)
       .order("xp_this_week", { ascending: false })
       .limit(limit);
     data = result.data;
     fetchError = result.error;
-
-    // Fallback to student_xp if MV doesn't exist
-    if (fetchError) {
-      const fallback = await db
-        .from("student_xp")
-        .select("student_id, xp_this_week, current_level, total_xp")
-        .eq("institution_id", institutionId)
-        .order("xp_this_week", { ascending: false })
-        .limit(limit);
-      data = fallback.data;
-      fetchError = fallback.error;
-    }
   } else {
     // A-007 FIX: Daily leaderboard now fetches from student_xp
     // Note: display_name requires a join via profiles table.

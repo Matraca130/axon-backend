@@ -55,7 +55,7 @@ const ALLOWED_ORIGINS = [
 const VERCEL_PREVIEW_RE = /^https:\/\/(numero1-sseki-2325-55|axon-frontend)-[a-z0-9-]+\.vercel\.app$/;
 
 function getAllowedOrigin(origin: string): string {
-  if (!origin) return "*";
+  if (!origin) return "";
   if (ALLOWED_ORIGINS.includes(origin)) return origin;
   if (VERCEL_PREVIEW_RE.test(origin)) return origin;
   return "";

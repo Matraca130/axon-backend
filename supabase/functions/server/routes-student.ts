@@ -90,8 +90,8 @@ registerCrud(studentRoutes, {
   softDelete: true,
   hasIsActive: true,
   requiredFields: ["title", "source"],
-  createFields: ["title", "description", "source"],
-  updateFields: ["title", "description", "is_active"],
+  createFields: ["title", "description", "source", "time_limit_seconds"],
+  updateFields: ["title", "description", "is_active", "time_limit_seconds"],
 });
 
 // 3. Videos — Summary -> Video (SACRED, soft-delete, orderable)
