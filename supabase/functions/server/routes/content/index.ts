@@ -23,6 +23,7 @@
  *   content-tree.ts                — GET /content-tree (nested hierarchy)
  *   flashcards-by-topic.ts         — GET /flashcards-by-topic (PERF C1: batch load)
  *   flashcard-mappings.ts          — GET /flashcard-mappings (P0: lightweight id→subtopic mapping)
+ *   flashcard-images.ts            — POST /flashcards/:id/generate-image (FC-02: AI image gen)
  */
 
 import { Hono } from "npm:hono";
@@ -37,6 +38,7 @@ import { contentTreeRoutes } from "./content-tree.ts";
 import { flashcardsByTopicRoutes } from "./flashcards-by-topic.ts";
 import { flashcardMappingRoutes } from "./flashcard-mappings.ts";
 import { publishSummaryRoutes } from "./publish-summary.ts";
+import { flashcardImageRoutes } from "./flashcard-images.ts";
 
 const content = new Hono();
 
@@ -44,6 +46,7 @@ const content = new Hono();
 content.route("/", keywordSearchRoutes);
 content.route("/", subtopicsBatchRoutes);
 content.route("/", kwConnectionsBatchRoutes);
+content.route("/", flashcardImageRoutes);
 content.route("/", contentCrudRoutes);
 content.route("/", keywordConnectionRoutes);
 content.route("/", profNotesRoutes);
