@@ -11,7 +11,7 @@
  */
 
 import { type SupabaseClient } from "npm:@supabase/supabase-js";
-import { generateImage } from "./gemini-image.ts";
+import { generateImage, IMAGE_MODEL } from "./gemini-image.ts";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -102,6 +102,9 @@ export async function generateFlashcardImage(
     referenceImages = await Promise.all(
       request.stylePackUrls.map(async (url) => {
         const res = await fetch(url);
+        if (!res.ok) {
+          throw new Error(`[FlashcardImage] Failed to fetch style reference ${url}: ${res.status}`);
+        }
         return new Uint8Array(await res.arrayBuffer());
       }),
     );
@@ -136,7 +139,7 @@ export async function generateFlashcardImage(
 
   return {
     imageUrl,
-    model: "gemini-2.0-flash-preview-image-generation",
+    model: IMAGE_MODEL,
     promptUsed: prompt,
   };
 }

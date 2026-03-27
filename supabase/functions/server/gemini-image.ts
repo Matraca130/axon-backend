@@ -14,7 +14,7 @@
 import { fetchWithRetry, getApiKey } from "./gemini.ts";
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
-const IMAGE_MODEL = "gemini-2.0-flash-preview-image-generation";
+export const IMAGE_MODEL = "gemini-2.0-flash-preview-image-generation";
 const IMAGE_TIMEOUT_MS = 30_000; // Image generation is slower than text
 const DEFAULT_TEMPERATURE = 0.4;
 
