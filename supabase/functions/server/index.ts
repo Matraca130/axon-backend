@@ -36,6 +36,7 @@ import { aiRoutes } from "./routes/ai/index.ts";
 import { whatsappRoutes } from "./routes/whatsapp/index.ts";
 import { telegramRoutes } from "./routes/telegram/index.ts";
 import { gamificationRoutes } from "./routes/gamification/index.ts";
+import { calendarRoutes } from "./routes/calendar/index.ts";
 
 const app = new Hono();
 
@@ -141,6 +142,7 @@ app.route("/", aiRoutes);
 app.route("/", whatsappRoutes);
 app.route("/", telegramRoutes);
 app.route("/", gamificationRoutes);
+app.route("/", calendarRoutes);
 
 // ─── Catch-all 404 ───────────────────────────────────────────────
 
