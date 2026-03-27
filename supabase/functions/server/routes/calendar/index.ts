@@ -11,9 +11,11 @@
 
 import { Hono } from "npm:hono";
 import { calendarDataRoutes } from "./data.ts";
+import { examEventRoutes } from "./exam-events.ts";
 
 const calendarRoutes = new Hono();
 
 calendarRoutes.route("/", calendarDataRoutes);
+calendarRoutes.route("/", examEventRoutes);
 
 export { calendarRoutes };

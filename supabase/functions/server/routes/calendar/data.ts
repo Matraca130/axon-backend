@@ -67,7 +67,7 @@ async function fetchExamEvents(
 ): Promise<unknown[]> {
   const { data, error } = await db
     .from("exam_events")
-    .select("*")
+    .select("id, student_id, course_id, institution_id, title, date, time, location, is_final, exam_type, created_at, updated_at")
     .eq("student_id", userId)
     .gte("date", from)
     .lte("date", to)
@@ -77,23 +77,41 @@ async function fetchExamEvents(
   return data ?? [];
 }
 
-/** Query 2: fsrs_states for heatmap (cards due in range) */
+/** Query 2: fsrs_states for heatmap — aggregated server-side.
+ *  Returns { date: 'YYYY-MM-DD', minutes: number }[] grouped by day.
+ *  Each flashcard review is estimated at ~2 minutes when no duration field exists.
+ */
+const MINUTES_PER_REVIEW = 2;
+
 async function fetchHeatmapData(
   db: SupabaseClient,
   userId: string,
   from: string,
   to: string,
-): Promise<unknown[]> {
+): Promise<{ date: string; minutes: number }[]> {
   const { data, error } = await db
     .from("fsrs_states")
-    .select("id, flashcard_id, due_at, stability, state")
+    .select("due_at")
     .eq("student_id", userId)
     .gte("due_at", `${from}T00:00:00`)
-    .lte("due_at", `${to}T23:59:59`)
-    .order("due_at", { ascending: true });
+    .lte("due_at", `${to}T23:59:59`);
 
   if (error) throw new Error(error.message);
-  return data ?? [];
+  if (!data || data.length === 0) return [];
+
+  // Aggregate: group by YYYY-MM-DD, count × MINUTES_PER_REVIEW
+  const buckets = new Map<string, number>();
+  for (const row of data) {
+    const dateStr = String(row.due_at).slice(0, 10); // 'YYYY-MM-DD'
+    buckets.set(dateStr, (buckets.get(dateStr) ?? 0) + 1);
+  }
+
+  const result: { date: string; minutes: number }[] = [];
+  for (const [date, count] of buckets) {
+    result.push({ date, minutes: count * MINUTES_PER_REVIEW });
+  }
+  result.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  return result;
 }
 
 /** Query 3: pending study_plan_tasks in the date range */
@@ -138,6 +156,9 @@ calendarDataRoutes.get(`${PREFIX}/calendar/data`, async (c: Context) => {
   if (from > to) {
     return err(c, "'from' must be <= 'to'", 400);
   }
+  const diffMs = new Date(to).getTime() - new Date(from).getTime();
+  const diffDays = diffMs / (1000 * 60 * 60 * 24);
+  if (diffDays > 366) return err(c, "Date range exceeds maximum of 366 days", 400);
   if (!VALID_TYPES.has(types)) {
     return err(c, `Invalid 'types' param. Valid: ${[...VALID_TYPES].join(", ")}`, 400);
   }
