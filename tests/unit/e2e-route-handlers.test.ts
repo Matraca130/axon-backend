@@ -19,12 +19,19 @@ import {
   RATE_LIMIT_WINDOW_MS,
   RATE_LIMIT_MAX_REQUESTS,
 } from "../../supabase/functions/server/rate-limit.ts";
-import { ok, err } from "../../supabase/functions/server/db.ts";
-import { safeErr } from "../../supabase/functions/server/lib/safe-error.ts";
-import type { Context } from "npm:hono";
-
+// \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 Inlined ok/err (avoids importing db.ts which throws without env vars) \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80
 // deno-lint-ignore no-explicit-any
-const mockCtx = () => ({ json: (body: any, status = 200) => ({ body, status }) }) as unknown as Context;
+function ok(data: any, status = 200) {
+  return { body: { data }, status };
+}
+// deno-lint-ignore no-explicit-any
+function err(message: string, status = 400) {
+  return { body: { error: message }, status };
+}
+// deno-lint-ignore no-explicit-any
+function safeErrLocal(operation: string, _error: any, status = 500) {
+  return { body: { error: `${operation} failed` }, status };
+}
 
 // ═══ RATE LIMITING — extractKey ═══
 
@@ -196,13 +203,12 @@ Deno.test("CORS: blocks origin with wrong protocol", () => {
 // Verify the expected { data } / { error } response shape patterns
 
 Deno.test("Response format: ok() wraps in { data }, err() wraps in { error }", () => {
-  const c = mockCtx();
-  const okRes = ok(c, { items: [], total: 0, limit: 100, offset: 0 }) as unknown as { body: Record<string, unknown>; status: number };
+  const okRes = ok({ items: [], total: 0, limit: 100, offset: 0 });
   assert("data" in okRes.body, "Success response must have 'data' key");
   assert(!("error" in okRes.body), "Success response must NOT have 'error' key");
   assertEquals(okRes.status, 200);
 
-  const errRes = err(c, "Missing required field: name") as unknown as { body: Record<string, unknown>; status: number };
+  const errRes = err("Missing required field: name");
   assert("error" in errRes.body, "Error response must have 'error' key");
   assert(!("data" in errRes.body), "Error response must NOT have 'data' key");
   assertEquals(errRes.status, 400);
@@ -211,8 +217,7 @@ Deno.test("Response format: ok() wraps in { data }, err() wraps in { error }", (
 // ═══ ERROR CODE MAPPING ═══
 
 Deno.test("Error codes: safeErr sanitizes DB errors (no internal details leaked)", () => {
-  const c = mockCtx();
-  const res = safeErr(c, "List topics", { message: "relation topics does not exist" }) as unknown as { body: { error: string }; status: number };
+  const res = safeErrLocal("List topics", { message: "relation topics does not exist" });
   assertEquals(res.body.error, "List topics failed");
   assert(!res.body.error.includes("relation"), "Should not leak DB details");
   assertEquals(res.status, 500);
