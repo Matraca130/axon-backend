@@ -19,6 +19,12 @@ import {
   RATE_LIMIT_WINDOW_MS,
   RATE_LIMIT_MAX_REQUESTS,
 } from "../../supabase/functions/server/rate-limit.ts";
+import { ok, err } from "../../supabase/functions/server/db.ts";
+import { safeErr } from "../../supabase/functions/server/lib/safe-error.ts";
+import type { Context } from "npm:hono";
+
+// deno-lint-ignore no-explicit-any
+const mockCtx = () => ({ json: (body: any, status = 200) => ({ body, status }) }) as unknown as Context;
 
 // ═══ RATE LIMITING — extractKey ═══
 
@@ -190,28 +196,24 @@ Deno.test("CORS: blocks origin with wrong protocol", () => {
 // Verify the expected { data } / { error } response shape patterns
 
 Deno.test("Response format: ok() wraps in { data }, err() wraps in { error }", () => {
-  // These are structural contracts verified by examining db.ts exports:
-  // ok(c, data, status) => c.json({ data }, status)
-  // err(c, message, status) => c.json({ error: message }, status)
-  // We verify the contract by testing the wrapper shapes
-  const okShape = { data: { items: [], total: 0, limit: 100, offset: 0 } };
-  assert("data" in okShape, "Success response must have 'data' key");
-  assert(!("error" in okShape), "Success response must NOT have 'error' key");
+  const c = mockCtx();
+  const okRes = ok(c, { items: [], total: 0, limit: 100, offset: 0 }) as unknown as { body: Record<string, unknown>; status: number };
+  assert("data" in okRes.body, "Success response must have 'data' key");
+  assert(!("error" in okRes.body), "Success response must NOT have 'error' key");
+  assertEquals(okRes.status, 200);
 
-  const errShape = { error: "Missing required field: name" };
-  assert("error" in errShape, "Error response must have 'error' key");
-  assert(!("data" in errShape), "Error response must NOT have 'data' key");
+  const errRes = err(c, "Missing required field: name") as unknown as { body: Record<string, unknown>; status: number };
+  assert("error" in errRes.body, "Error response must have 'error' key");
+  assert(!("data" in errRes.body), "Error response must NOT have 'data' key");
+  assertEquals(errRes.status, 400);
 });
 
 // ═══ ERROR CODE MAPPING ═══
 
 Deno.test("Error codes: safeErr sanitizes DB errors (no internal details leaked)", () => {
-  // safeErr(c, operation, error, status) logs full error but returns:
-  // { error: `${operation} failed` }
-  // This ensures internal DB details (table names, constraints) are never exposed.
-  const operation = "List topics";
-  const sanitized = `${operation} failed`;
-  assertEquals(sanitized, "List topics failed");
-  // The actual error message "relation topics does not exist" is NOT in the response
-  assert(!sanitized.includes("relation"), "Should not leak DB details");
+  const c = mockCtx();
+  const res = safeErr(c, "List topics", { message: "relation topics does not exist" }) as unknown as { body: { error: string }; status: number };
+  assertEquals(res.body.error, "List topics failed");
+  assert(!res.body.error.includes("relation"), "Should not leak DB details");
+  assertEquals(res.status, 500);
 });
