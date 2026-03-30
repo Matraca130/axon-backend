@@ -11,6 +11,10 @@
  *   text_annotations   — highlight + notes on summaries
  *   video_notes        — timestamped notes on videos
  *
+ * Student block tools (CRUD via factory with scopeToUser):
+ *   block_bookmarks    — toggle bookmarks on summary blocks (hard delete)
+ *   block_notes        — rich notes on summary blocks (soft-delete)
+ *
  * All routes are authenticated. RLS enforces row-level access.
  * scopeToUser ensures students can only see/edit their own notes.
  */
@@ -166,6 +170,44 @@ registerCrud(studentRoutes, {
   requiredFields: ["note"],
   createFields: ["timestamp_seconds", "note"],
   updateFields: ["timestamp_seconds", "note"],
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// STUDENT BLOCK TOOLS
+// ═══════════════════════════════════════════════════════════════════════
+
+// 7. Block Bookmarks — student bookmarks on summary blocks (create/delete only, no update)
+registerCrud(studentRoutes, {
+  table: "block_bookmarks",
+  slug: "block-bookmarks",
+  parentKey: "summary_id",
+  optionalFilters: ["block_id"],
+  scopeToUser: "student_id",
+  hasCreatedBy: false,
+  hasUpdatedAt: false,
+  hasOrderIndex: false,
+  softDelete: false, // hard delete — bookmark is on/off, no recovery needed
+  hasIsActive: false,
+  requiredFields: ["block_id"],
+  createFields: ["block_id"],
+  updateFields: [], // bookmarks don't update
+});
+
+// 8. Block Notes — student notes on summary blocks
+registerCrud(studentRoutes, {
+  table: "block_notes",
+  slug: "block-notes",
+  parentKey: "summary_id",
+  optionalFilters: ["block_id"],
+  scopeToUser: "student_id",
+  hasCreatedBy: false,
+  hasUpdatedAt: true,
+  hasOrderIndex: false,
+  softDelete: true,
+  hasIsActive: false,
+  requiredFields: ["text"],
+  createFields: ["block_id", "text", "color"],
+  updateFields: ["text", "color"],
 });
 
 export { studentRoutes };
