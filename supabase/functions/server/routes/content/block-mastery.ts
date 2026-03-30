@@ -17,6 +17,7 @@
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
+import { requireInstitutionRole, isDenied, ALL_ROLES } from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
 
 export const blockMasteryRoutes = new Hono();
@@ -116,6 +117,20 @@ blockMasteryRoutes.get(
 
     const summaryId = c.req.param("id");
     if (!summaryId) return err(c, "Missing summary ID", 400);
+
+    // ── Institution membership check ────────────────────────
+    const { data: summary, error: summaryErr } = await db
+      .from("summaries")
+      .select("institution_id")
+      .eq("id", summaryId)
+      .single();
+
+    if (summaryErr || !summary) return err(c, "Summary not found", 404);
+
+    const roleCheck = await requireInstitutionRole(
+      db, user.id, summary.institution_id, ALL_ROLES,
+    );
+    if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
     // ── Q1: Fetch active blocks ─────────────────────────────
     const { data: blocks, error: blocksErr } = await db
