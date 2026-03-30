@@ -65,6 +65,20 @@ export const TestData = {
     };
   },
 
+  /** Generate a unique quiz question payload */
+  quizQuestion(summaryId: string, keywordId: string) {
+    return {
+      summary_id: summaryId,
+      keyword_id: keywordId,
+      question_type: "multiple_choice",
+      question: `__e2e_question_${ts()}__`,
+      options: ["Option A", "Option B", "Option C", "Option D"],
+      correct_answer: "Option A",
+      explanation: "E2E test explanation.",
+      difficulty: 1,
+    };
+  },
+
   /** Test user credentials from ENV */
   credentials() {
     return {
