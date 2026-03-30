@@ -369,23 +369,16 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
           output_modalities: ["audio"],
           instructions: systemPrompt,
           tools: REALTIME_TOOLS,
-          audio: {
-            input: {
-              format: { type: "audio/pcm", rate: 24000 },
-              transcription: { model: "gpt-4o-mini-transcribe" },
-              noise_reduction: { type: "near_field" },
-              turn_detection: {
-                type: "semantic_vad",
-                eagerness: "medium",
-                create_response: true,
-                interrupt_response: true,
-              },
-            },
-            output: {
-              format: { type: "audio/pcm" },
-              voice: "marin",
-            },
+          input_audio_format: "pcm16",
+          output_audio_format: "pcm16",
+          input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
+          turn_detection: {
+            type: "semantic_vad",
+            eagerness: "medium",
+            create_response: true,
+            interrupt_response: true,
           },
+          voice: "marin",
         },
       }),
     });
