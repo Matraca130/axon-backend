@@ -39,6 +39,7 @@ import { flashcardsByTopicRoutes } from "./flashcards-by-topic.ts";
 import { flashcardMappingRoutes } from "./flashcard-mappings.ts";
 import { publishSummaryRoutes } from "./publish-summary.ts";
 import { flashcardImageRoutes } from "./flashcard-images.ts";
+import { blockMasteryRoutes } from "./block-mastery.ts";
 
 const content = new Hono();
 
@@ -47,6 +48,7 @@ content.route("/", keywordSearchRoutes);
 content.route("/", subtopicsBatchRoutes);
 content.route("/", kwConnectionsBatchRoutes);
 content.route("/", flashcardImageRoutes);
+content.route("/", blockMasteryRoutes);
 content.route("/", contentCrudRoutes);
 content.route("/", keywordConnectionRoutes);
 content.route("/", profNotesRoutes);
