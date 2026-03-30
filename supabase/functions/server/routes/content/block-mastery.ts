@@ -18,88 +18,8 @@ import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { requireInstitutionRole, isDenied, ALL_ROLES } from "../../auth-helpers.ts";
+import { extractKeywordsFromBlock } from "../../lib/block-keywords.ts";
 import type { Context } from "npm:hono";
-
-export const blockMasteryRoutes = new Hono();
-
-// ─── Keyword marker regex (same as frontend) ───────────────────────
-const KEYWORD_MARKER_RE = /\{\{([^}]+)\}\}/g;
-
-/**
- * Extract keyword names from a block's content fields based on block type.
- * Mirrors the frontend's extractKeywordsFromBlock logic.
- */
-function extractKeywordsFromBlock(
-  block: { type: string; content: Record<string, unknown> },
-): string[] {
-  const found: string[] = [];
-  const c = block.content;
-
-  /** Scan a string field for {{keyword}} markers */
-  const scan = (value: unknown): void => {
-    if (typeof value !== "string") return;
-    let match: RegExpExecArray | null;
-    // Reset regex state for each field
-    const re = new RegExp(KEYWORD_MARKER_RE.source, KEYWORD_MARKER_RE.flags);
-    while ((match = re.exec(value)) !== null) {
-      found.push(match[1]);
-    }
-  };
-
-  /** Scan an array of objects for specific fields */
-  const scanArray = (arr: unknown, fields: string[]): void => {
-    if (!Array.isArray(arr)) return;
-    for (const item of arr) {
-      if (typeof item !== "object" || item === null) continue;
-      for (const field of fields) {
-        scan((item as Record<string, unknown>)[field]);
-      }
-    }
-  };
-
-  // Scan fields based on block type (matches frontend keyword-block-mapping.ts)
-  switch (block.type) {
-    case "prose":
-    case "text":
-      scan(c.body);
-      break;
-    case "key_point":
-      scan(c.title);
-      scan(c.explanation);
-      break;
-    case "callout":
-      scan(c.title);
-      scan(c.body);
-      break;
-    case "two_column":
-      scan(c.left);
-      scan(c.right);
-      break;
-    case "stages":
-      scanArray(c.stages, ["title", "description"]);
-      break;
-    case "list_detail":
-      scanArray(c.items, ["title", "detail"]);
-      break;
-    case "comparison":
-      scanArray(c.items, ["title", "description"]);
-      break;
-    case "grid":
-      scanArray(c.cells, ["title", "body"]);
-      break;
-    case "heading":
-      scan(c.text);
-      break;
-    default:
-      // Unknown block type — scan common fields as fallback
-      scan(c.body);
-      scan(c.title);
-      scan(c.text);
-      break;
-  }
-
-  return found;
-}
 
 /**
  * GET /server/summaries/:id/block-mastery

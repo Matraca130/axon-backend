@@ -24,6 +24,8 @@
  *   flashcards-by-topic.ts         — GET /flashcards-by-topic (PERF C1: batch load)
  *   flashcard-mappings.ts          — GET /flashcard-mappings (P0: lightweight id→subtopic mapping)
  *   flashcard-images.ts            — POST /flashcards/:id/generate-image (FC-02: AI image gen)
+ *   publish-summary.ts             — POST /summaries/:id/publish (Fase 4: block-based publish)
+ *   block-mastery.ts               — GET /summaries/:id/block-mastery (Fase 3: BKT mastery per block)
  */
 
 import { Hono } from "npm:hono";
