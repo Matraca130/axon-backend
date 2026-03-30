@@ -69,7 +69,7 @@ aiWeeklyReportRoutes.get(`${PREFIX}/ai/weekly-report`, async (c: Context) => {
     const current = all.find((r: { week_start: string }) => r.week_start === weekStart) || null;
     const previousWeeks = all.filter((r: { week_start: string }) => r.week_start !== weekStart).slice(0, limit);
 
-    return ok(c, { current: current ? mapReport(current) : null, history: previousWeeks.map(mapReport) });
+    return c.json({ data: { current: current ? mapReport(current) : null, history: previousWeeks.map(mapReport) } });
   }
 
   // Single latest report for current week
@@ -84,7 +84,7 @@ aiWeeklyReportRoutes.get(`${PREFIX}/ai/weekly-report`, async (c: Context) => {
   if (error) return safeErr(c, "fetch weekly report", error);
 
   if (!report) {
-    return ok(c, { data: null, hint: "generate" });
+    return c.json({ data: null, hint: "generate" });
   }
 
   return ok(c, mapReport(report));
