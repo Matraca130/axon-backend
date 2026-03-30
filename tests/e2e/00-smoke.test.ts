@@ -9,14 +9,21 @@ import { login, api, ENV, assertStatus } from "../helpers/test-client.ts";
 /** True when admin credentials are configured */
 const HAS_CREDS = ENV.ADMIN_EMAIL.length > 0 && ENV.ADMIN_PASSWORD.length > 0;
 
+/** True when Supabase URL is configured (minimum for any API call) */
+const HAS_URL = ENV.SUPABASE_URL.length > 0 && ENV.ANON_KEY.length > 0;
+
 // ═══ 1. HEALTH CHECK ═══
 
-Deno.test("SMOKE-01: GET /health returns 200 with status ok", async () => {
-  const r = await api.get("/health", "");
-  // /health does NOT require auth — uses c.json() directly (no { data } wrapper)
-  assertStatus(r, 200);
-  assertEquals((r.raw as any).status, "ok");
-  assert(typeof (r.raw as any).version === "string", "health must include version");
+Deno.test({
+  name: "SMOKE-01: GET /health returns 200 with status ok",
+  ignore: !HAS_URL,
+  async fn() {
+    const r = await api.get("/health", "");
+    // /health does NOT require auth — uses c.json() directly (no { data } wrapper)
+    assertStatus(r, 200);
+    assertEquals((r.raw as any).status, "ok");
+    assert(typeof (r.raw as any).version === "string", "health must include version");
+  },
 });
 
 // ═══ 2. LOGIN → ACCESS TOKEN ═══
