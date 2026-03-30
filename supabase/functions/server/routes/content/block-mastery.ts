@@ -18,8 +18,10 @@ import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { requireInstitutionRole, isDenied, ALL_ROLES } from "../../auth-helpers.ts";
-import { extractKeywordsFromBlock } from "../../lib/block-keywords.ts";
+import { extractKeywordsFromBlock, calculateBlockMastery } from "../../lib/block-keywords.ts";
 import type { Context } from "npm:hono";
+
+export const blockMasteryRoutes = new Hono();
 
 /**
  * GET /server/summaries/:id/block-mastery
@@ -130,42 +132,8 @@ blockMasteryRoutes.get(
     }
 
     // ── Calculate mastery per block ─────────────────────────
-    const result: Record<string, number> = {};
-
-    for (const block of blocks) {
-      const kwNames = blockKeywords.get(block.id) || [];
-
-      // No keywords → mastery -1
-      if (kwNames.length === 0) {
-        result[block.id] = -1;
-        continue;
-      }
-
-      // Collect all p_know values for this block's keywords' subtopics
-      const pKnowValues: number[] = [];
-
-      for (const kwName of kwNames) {
-        const stIds = kwToSubtopics.get(kwName) || [];
-        for (const stId of stIds) {
-          const pk = subtopicPKnow.get(stId);
-          if (pk !== undefined) {
-            pKnowValues.push(pk);
-          }
-        }
-      }
-
-      // No BKT data for any subtopic → mastery -1
-      if (pKnowValues.length === 0) {
-        result[block.id] = -1;
-        continue;
-      }
-
-      // AVG(p_know) = block mastery
-      const avg =
-        pKnowValues.reduce((sum, v) => sum + v, 0) / pKnowValues.length;
-      // Round to 4 decimal places for clean JSON
-      result[block.id] = Math.round(avg * 10000) / 10000;
-    }
+    // Uses shared lib function (same code tested in block_mastery_test.ts)
+    const result = calculateBlockMastery(blocks, kwToSubtopics, subtopicPKnow);
 
     return ok(c, result);
   },
