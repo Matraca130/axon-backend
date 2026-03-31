@@ -282,6 +282,7 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
 
   // Keyword propagation warnings surfaced in response
   const propagationWarnings: string[] = [];
+  const propagationPromises: Promise<void>[] = [];
 
   // Track successfully created reviews for XP hook
   const successfulReviews: Array<{ item_id: string; grade: number; instrument_type: string }> = [];
@@ -519,12 +520,14 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
             });
           }
 
-          // §4.2: Keyword BKT propagation (fire-and-forget, warnings surfaced)
-          propagateKeywordBkt(
-            db, user.id, item.item_id, item.instrument_type,
-            isCorrect, item.subtopic_id,
-          ).then(warning => { if (warning) propagationWarnings.push(warning); })
-           .catch((e) => { propagationWarnings.push((e as Error).message); });
+          // §4.2: Keyword BKT propagation (async, warnings surfaced in response)
+          propagationPromises.push(
+            propagateKeywordBkt(
+              db, user.id, item.item_id, item.instrument_type,
+              isCorrect, item.subtopic_id,
+            ).then(warning => { if (warning) propagationWarnings.push(warning); })
+             .catch((e) => { propagationWarnings.push((e as Error).message); })
+          );
 
           const lastResult = computedResults[computedResults.length - 1];
           if (lastResult && lastResult.item_id === item.item_id) {
@@ -560,6 +563,12 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     } catch (hookErr) {
       console.error("[XP Hook] batch review setup error:", (hookErr as Error).message);
     }
+  }
+
+  // Wait for all keyword propagations to settle before responding,
+  // so propagation_warnings are populated in the response.
+  if (propagationPromises.length > 0) {
+    await Promise.allSettled(propagationPromises);
   }
 
   return ok(c, {
