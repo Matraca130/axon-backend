@@ -40,6 +40,25 @@ registerCrud(studentRoutes, {
   updateFields: ["front", "back", "source", "subtopic_id", "is_active", "front_image_url", "back_image_url"],
 });
 
+// ── Student-owned flashcards (scopeToUser) ─────────────────
+// Students can CRUD their own flashcards only.
+// Professor flashcards route above remains for read-only access.
+registerCrud(studentRoutes, {
+  table: "flashcards",
+  slug: "my-flashcards",
+  parentKey: "summary_id",
+  optionalFilters: ["keyword_id", "subtopic_id"],
+  scopeToUser: "created_by",
+  hasCreatedBy: true,
+  hasUpdatedAt: true,
+  hasOrderIndex: false,
+  softDelete: true,
+  hasIsActive: true,
+  requiredFields: ["keyword_id", "front", "back"],
+  createFields: ["keyword_id", "subtopic_id", "front", "back", "source", "front_image_url", "back_image_url"],
+  updateFields: ["front", "back", "subtopic_id", "is_active", "front_image_url", "back_image_url"],
+});
+
 // 2. Quiz Questions — Keyword + Summary -> QuizQuestion (SACRED, soft-delete)
 registerCrud(studentRoutes, {
   table: "quiz_questions",
