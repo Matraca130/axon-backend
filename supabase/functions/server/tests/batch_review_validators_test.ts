@@ -2,11 +2,10 @@
  * Tests for batch-review validators
  *
  * Tests cover:
- *   1. mapToFsrsGrade: grade mapping (0-5 -> 1-4)
- *   2. validateReviewItem: PATH A validation (with fsrs_update/bkt_update)
- *   3. validateReviewItem: PATH B validation (minimal, grade only)
+ *   1. Constants
+ *   2. mapToFsrsGrade: grade mapping (0-5 -> 1-4)
+ *   3. validateReviewItem: valid items (grade + optional subtopic_id)
  *   4. validateReviewItem: error cases
- *   5. Constants
  *
  * Run: deno test supabase/functions/server/tests/batch_review_validators_test.ts
  */
@@ -72,10 +71,10 @@ Deno.test("mapToFsrsGrade: 5 -> 4 (legacy SM-2 grade 5 maps to Easy)", () => {
 });
 
 // ═════════════════════════════════════════════════════════
-// 3. validateReviewItem: valid PATH B (minimal)
+// 3. validateReviewItem: valid items
 // ═════════════════════════════════════════════════════════
 
-Deno.test("validateReviewItem: valid minimal PATH B item", () => {
+Deno.test("validateReviewItem: valid minimal item", () => {
   const result = validateReviewItem({
     item_id: VALID_UUID,
     instrument_type: "flashcard",
@@ -84,8 +83,6 @@ Deno.test("validateReviewItem: valid minimal PATH B item", () => {
   assertEquals(result.error, null);
   assertEquals(result.valid!.item_id, VALID_UUID);
   assertEquals(result.valid!.grade, 3);
-  assertEquals(result.valid!.fsrs_update, undefined);
-  assertEquals(result.valid!.bkt_update, undefined);
 });
 
 Deno.test("validateReviewItem: with optional subtopic_id", () => {
@@ -110,61 +107,8 @@ Deno.test("validateReviewItem: with optional response_time_ms", () => {
   assertEquals(result.valid!.response_time_ms, 5000);
 });
 
-Deno.test("validateReviewItem: valid PATH A with full bkt_update", () => {
-  const result = validateReviewItem({
-    item_id: VALID_UUID,
-    instrument_type: "quiz",
-    grade: 4,
-    bkt_update: {
-      subtopic_id: VALID_UUID_2,
-      p_know: 0.75,
-      p_transit: 0.18,
-      p_slip: 0.10,
-      p_guess: 0.25,
-      delta: 0.05,
-      total_attempts: 10,
-      correct_attempts: 7,
-      last_attempt_at: "2026-03-13T12:00:00Z",
-    },
-  }, 0);
-  assertEquals(result.error, null);
-  assertEquals(result.valid!.bkt_update!.subtopic_id, VALID_UUID_2);
-  assertEquals(result.valid!.bkt_update!.p_know, 0.75);
-  assertEquals(result.valid!.bkt_update!.p_transit, 0.18);
-  assertEquals(result.valid!.bkt_update!.p_slip, 0.10);
-  assertEquals(result.valid!.bkt_update!.p_guess, 0.25);
-  assertEquals(result.valid!.bkt_update!.delta, 0.05);
-  assertEquals(result.valid!.bkt_update!.total_attempts, 10);
-  assertEquals(result.valid!.bkt_update!.correct_attempts, 7);
-  assertEquals(result.valid!.bkt_update!.last_attempt_at, "2026-03-13T12:00:00Z");
-});
-
 // ═════════════════════════════════════════════════════════
-// 4. validateReviewItem: valid PATH A (with fsrs_update)
-// ═════════════════════════════════════════════════════════
-
-Deno.test("validateReviewItem: valid PATH A with fsrs_update", () => {
-  const result = validateReviewItem({
-    item_id: VALID_UUID,
-    instrument_type: "flashcard",
-    grade: 3,
-    fsrs_update: {
-      stability: 5.0,
-      difficulty: 4.5,
-      due_at: "2026-03-14T12:00:00Z",
-      last_review_at: "2026-03-13T12:00:00Z",
-      reps: 3,
-      lapses: 1,
-      state: "review",
-    },
-  }, 0);
-  assertEquals(result.error, null);
-  assertEquals(result.valid!.fsrs_update!.stability, 5.0);
-  assertEquals(result.valid!.fsrs_update!.state, "review");
-});
-
-// ═════════════════════════════════════════════════════════
-// 5. validateReviewItem: error cases
+// 4. validateReviewItem: error cases
 // ═════════════════════════════════════════════════════════
 
 Deno.test("validateReviewItem: missing item_id", () => {
@@ -224,25 +168,6 @@ Deno.test("validateReviewItem: invalid subtopic_id", () => {
   }, 0);
   assertEquals(result.valid, null);
   assertEquals(result.error!.includes("subtopic_id"), true);
-});
-
-Deno.test("validateReviewItem: invalid fsrs_update.state", () => {
-  const result = validateReviewItem({
-    item_id: VALID_UUID,
-    instrument_type: "flashcard",
-    grade: 3,
-    fsrs_update: {
-      stability: 5.0,
-      difficulty: 4.5,
-      due_at: "2026-03-14T12:00:00Z",
-      last_review_at: "2026-03-13T12:00:00Z",
-      reps: 3,
-      lapses: 1,
-      state: "invalid_state",
-    },
-  }, 0);
-  assertEquals(result.valid, null);
-  assertEquals(result.error!.includes("state"), true);
 });
 
 Deno.test("validateReviewItem: error prefix includes index", () => {

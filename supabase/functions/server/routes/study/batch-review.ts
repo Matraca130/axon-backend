@@ -1,22 +1,17 @@
 /**
  * routes/study/batch-review.ts — Atomic batch review persistence
  *
- * DUAL PATH (Camino B, spec v4.2, plan v3.7 Fase 3):
+ * Server-side compute (spec v4.2, plan v3.7 Fase 3):
  *
- *   PATH A (legacy): Frontend sends fsrs_update + bkt_update pre-computed
- *     → Server stores values as-is (current behavior, zero changes)
- *
- *   PATH B (new): Frontend sends only grade (+ optional subtopic_id)
+ *   Frontend sends only grade (+ optional subtopic_id)
  *     → Server computes FSRS v4 Petrick + BKT v4 Recovery using lib/
  *     → Server stores computed values
- *     → Server returns computed values in `results` array (v4.5)
- *
- *   Detection: if item has fsrs_update → PATH A; else → PATH B
- *             if item has bkt_update → PATH A; else if subtopic_id → PATH B
+ *     → Server returns computed values in `results` array
  *
  * v4.2 ADDITIONS:
  *   - Leech detection: tracks consecutive_lapses on fsrs_states
  *   - is_leech flag when consecutive_lapses >= leech_threshold
+ *   - Keyword BKT propagation warnings surfaced in response
  *
  * PR #104: Extracted validators/types to batch-review-validators.ts
  *
@@ -31,7 +26,7 @@ import { isUuid } from "../../validate.ts";
 import { atomicUpsert } from "./progress.ts";
 import type { Context } from "npm:hono";
 
-// ── PATH B imports: server-side FSRS + BKT compute ──────────
+// ── Server-side FSRS + BKT compute ──────────────────────────
 import { computeFsrsV4Update } from "../../lib/fsrs-v4.ts";
 import { computeBktV4Update } from "../../lib/bkt-v4.ts";
 import { THRESHOLDS, BKT_WEIGHTS } from "../../lib/types.ts";
@@ -285,25 +280,20 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   const errors: { index: number; step: string; message: string }[] = [];
   const computedResults: ComputedResult[] = [];
 
-  // Stats accumulator for fire-and-forget keyword propagation diagnostics
-  const stats: Record<string, string> = {};
+  // Keyword propagation warnings surfaced in response
+  const propagationWarnings: string[] = [];
+  const propagationPromises: Promise<void>[] = [];
 
   // Track successfully created reviews for XP hook
   const successfulReviews: Array<{ item_id: string; grade: number; instrument_type: string }> = [];
 
   // ── 2.4: Batch pre-load FSRS and BKT states ──────────────────
   const allFlashcardIds = validatedItems
-    .filter(i => !i.fsrs_update && i.item_id)
+    .filter(i => i.item_id)
     .map(i => i.item_id);
-  const allSubtopicIds = validatedItems
-    .filter(i => !i.bkt_update && i.subtopic_id)
-    .map(i => i.subtopic_id as string);
-
-  // Also collect subtopic_ids used for FSRS recovery cross-signal
-  const crossSignalSubtopicIds = validatedItems
-    .filter(i => !i.fsrs_update && (i.subtopic_id || i.bkt_update?.subtopic_id))
-    .map(i => (i.subtopic_id || i.bkt_update?.subtopic_id) as string);
-  const allBktSubtopicIds = [...new Set([...allSubtopicIds, ...crossSignalSubtopicIds])];
+  const allBktSubtopicIds = [...new Set(
+    validatedItems.filter(i => i.subtopic_id).map(i => i.subtopic_id as string)
+  )];
 
   const { data: allFsrs } = allFlashcardIds.length > 0
     ? await db.from("fsrs_states")
@@ -359,45 +349,16 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
       errors.push({ index: i, step: "review", message: (e as Error).message });
     }
 
-    // ── Step B: UPSERT fsrs_states ──
-    if (item.fsrs_update) {
-      // ════════ PATH A (legacy) ════════
-      try {
-        const fsrsRow = {
-          student_id: user.id,
-          flashcard_id: item.item_id,
-          stability: item.fsrs_update.stability,
-          difficulty: item.fsrs_update.difficulty,
-          due_at: item.fsrs_update.due_at,
-          last_review_at: item.fsrs_update.last_review_at,
-          reps: item.fsrs_update.reps,
-          lapses: item.fsrs_update.lapses,
-          state: item.fsrs_update.state,
-        };
-
-        const { error: fsrsErr } = await atomicUpsert(
-          db, "fsrs_states", "student_id,flashcard_id", fsrsRow,
-        );
-
-        if (fsrsErr) {
-          errors.push({ index: i, step: "fsrs", message: fsrsErr.message });
-        } else {
-          fsrsUpdated++;
-        }
-      } catch (e) {
-        errors.push({ index: i, step: "fsrs", message: (e as Error).message });
-      }
-    } else {
-      // ════════ PATH B (server-side FSRS v4 Petrick) ════════
+    // ── Step B: UPSERT fsrs_states (server-side FSRS v4 Petrick) ──
+    {
       try {
         // 1. Read current FSRS state (from pre-loaded map)
         const existingFsrs = fsrsMap.get(item.item_id) ?? null;
 
         // 2. Read BKT for recovery cross-signal (from pre-loaded map)
         let isRecovering = false;
-        const resolvedSubtopicId = item.subtopic_id || item.bkt_update?.subtopic_id;
-        if (resolvedSubtopicId) {
-          const existingBkt = bktMap.get(resolvedSubtopicId) ?? null;
+        if (item.subtopic_id) {
+          const existingBkt = bktMap.get(item.subtopic_id) ?? null;
 
           if (existingBkt) {
             const maxPKnow = existingBkt.max_p_know ?? 0;
@@ -452,7 +413,7 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         );
 
         if (fsrsErr) {
-          errors.push({ index: i, step: "fsrs_pathb", message: fsrsErr.message });
+          errors.push({ index: i, step: "fsrs", message: fsrsErr.message });
         } else {
           fsrsUpdated++;
 
@@ -471,69 +432,13 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           });
         }
       } catch (e) {
-        errors.push({ index: i, step: "fsrs_pathb", message: (e as Error).message });
+        errors.push({ index: i, step: "fsrs", message: (e as Error).message });
       }
     }
 
     // ── Step C: UPSERT bkt_states + atomic counter increment ──
-    if (item.bkt_update) {
-      // ════════ PATH A (legacy) ════════
-      try {
-        const bkt = item.bkt_update;
-
-        // FIX: Upsert BKT state fields WITHOUT attempt counters first.
-        // Attempt counters are incremented atomically via RPC below to
-        // prevent the read-then-write race between concurrent requests.
-        const bktRow = {
-          student_id: user.id,
-          subtopic_id: bkt.subtopic_id,
-          p_know: bkt.p_know,
-          p_transit: bkt.p_transit,
-          p_slip: bkt.p_slip,
-          p_guess: bkt.p_guess,
-          delta: bkt.delta,
-          total_attempts: 0,                          // seed for INSERT; RPC increments atomically
-          correct_attempts: 0,                        // seed for INSERT; RPC increments atomically
-          last_attempt_at: bkt.last_attempt_at,
-        };
-
-        const { error: bktErr } = await atomicUpsert(
-          db, "bkt_states", "student_id,subtopic_id", bktRow,
-        );
-
-        // FIX: Atomically increment attempt counters via SQL arithmetic
-        // to avoid the read-then-write race condition on concurrent batches.
-        if (!bktErr) {
-          const { error: rpcErr } = await db.rpc("increment_bkt_attempts", {
-            p_student_id: user.id,
-            p_subtopic_id: bkt.subtopic_id,
-            p_total_delta: bkt.total_attempts,
-            p_correct_delta: bkt.correct_attempts,
-          });
-          if (rpcErr) {
-            console.error("[BKT] Atomic increment failed, counters may be stale:", rpcErr.message);
-          }
-        }
-
-        if (bktErr) {
-          errors.push({ index: i, step: "bkt", message: bktErr.message });
-        } else {
-          bktUpdated++;
-
-          // §4.2: Fire-and-forget keyword BKT propagation (PATH A)
-          const pathAGrade = mapToFsrsGrade(item.grade);
-          const pathAIsCorrect = pathAGrade >= THRESHOLDS.BKT_CORRECT_MIN_GRADE;
-          propagateKeywordBkt(
-            db, user.id, item.item_id, item.instrument_type,
-            pathAIsCorrect, bkt.subtopic_id,
-          ).then(err => { if (err) stats.keyword_propagation_error = err; })
-           .catch((e) => { stats.keyword_propagation_error = (e as Error).message; });
-        }
-      } catch (e) {
-        errors.push({ index: i, step: "bkt", message: (e as Error).message });
-      }
-    } else if (item.subtopic_id) {
-      // ════════ PATH B (server-side BKT v4 Recovery) ════════
+    if (item.subtopic_id) {
+      // ════════ Server-side BKT v4 Recovery ════════
       try {
         const fsrsGrade = mapToFsrsGrade(item.grade);
         const isCorrect = fsrsGrade >= THRESHOLDS.BKT_CORRECT_MIN_GRADE;
@@ -596,7 +501,7 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
         }
 
         if (bktErr) {
-          errors.push({ index: i, step: "bkt_pathb", message: bktErr.message });
+          errors.push({ index: i, step: "bkt", message: bktErr.message });
         } else {
           bktUpdated++;
 
@@ -615,12 +520,14 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
             });
           }
 
-          // §4.2: Fire-and-forget keyword BKT propagation (PATH B)
-          propagateKeywordBkt(
-            db, user.id, item.item_id, item.instrument_type,
-            isCorrect, item.subtopic_id,
-          ).then(err => { if (err) stats.keyword_propagation_error = err; })
-           .catch((e) => { stats.keyword_propagation_error = (e as Error).message; });
+          // §4.2: Keyword BKT propagation (async, warnings surfaced in response)
+          propagationPromises.push(
+            propagateKeywordBkt(
+              db, user.id, item.item_id, item.instrument_type,
+              isCorrect, item.subtopic_id,
+            ).then(warning => { if (warning) propagationWarnings.push(warning); })
+             .catch((e) => { propagationWarnings.push((e as Error).message); })
+          );
 
           const lastResult = computedResults[computedResults.length - 1];
           if (lastResult && lastResult.item_id === item.item_id) {
@@ -643,7 +550,7 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           }
         }
       } catch (e) {
-        errors.push({ index: i, step: "bkt_pathb", message: (e as Error).message });
+        errors.push({ index: i, step: "bkt", message: (e as Error).message });
       }
     }
   }
@@ -658,6 +565,12 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     }
   }
 
+  // Wait for all keyword propagations to settle before responding,
+  // so propagation_warnings are populated in the response.
+  if (propagationPromises.length > 0) {
+    await Promise.allSettled(propagationPromises);
+  }
+
   return ok(c, {
     processed: validatedItems.length,
     reviews_created: reviewsCreated,
@@ -665,5 +578,6 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     bkt_updated: bktUpdated,
     errors: errors.length > 0 ? errors : undefined,
     results: computedResults.length > 0 ? computedResults : undefined,
+    propagation_warnings: propagationWarnings.length > 0 ? propagationWarnings : undefined,
   });
 });
