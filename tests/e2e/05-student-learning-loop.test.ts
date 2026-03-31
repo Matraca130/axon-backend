@@ -245,18 +245,21 @@ Deno.test({
   ignore: !HAS_INST,
   async fn() {
     assert(quizQuestionId.length > 0, "quizQuestionId must be set");
+    // NOTE: Do NOT send is_correct — let the backend compute it from answer vs correct_answer.
+    // If the backend blindly trusts client-supplied is_correct, that's a security bug (BUG: quiz-attempts
+    // endpoint should validate is_correct server-side, not trust the client).
     const payload = {
       quiz_question_id: quizQuestionId,
       answer: "Option A",
-      is_correct: true,
       time_taken_ms: 5000,
     };
     const r = await api.post("/quiz-attempts", STUDENT_TOKEN, payload);
     assertStatus(r, 201);
     const attempt = assertOk(r) as Record<string, unknown>;
     assert(typeof attempt.id === "string", "quiz attempt must have id");
-    assertEquals(attempt.is_correct, true, "is_correct must be true");
     assertEquals(attempt.student_id, STUDENT_ID, "student_id must match");
+    // Verify the backend returned an is_correct field (regardless of value — server should compute it)
+    assert(typeof attempt.is_correct === "boolean", "is_correct must be a boolean (server-computed)");
   },
 });
 

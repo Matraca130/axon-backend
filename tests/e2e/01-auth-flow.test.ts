@@ -138,20 +138,17 @@ Deno.test({
     assert(Array.isArray(list), "/institutions must return an array");
     assert(list.length > 0, "admin user must belong to at least one institution");
 
-    // Each item should have membership fields + nested institution
+    // Backend spreads institution fields flat alongside membership_id and role
     const first = list[0] as Record<string, unknown>;
-    assert(typeof first.id === "string", "membership must have id");
-    assert(typeof first.role === "string", "membership must have role");
-    assert(typeof first.institution === "object", "membership must have nested institution");
-
-    const inst = first.institution as Record<string, unknown>;
-    assert(typeof inst.id === "string", "institution must have id");
-    assert(typeof inst.name === "string", "institution must have name");
+    assert(typeof first.id === "string", "institution must have id (flat shape)");
+    assert(typeof first.name === "string", "institution must have name (flat shape)");
+    assert(typeof first.role === "string", "must have role");
+    assert(typeof first.membership_id === "string", "must have membership_id");
 
     // If TEST_INSTITUTION_ID is set, verify it appears in the list
     if (ENV.INSTITUTION_ID) {
       const match = list.find(
-        (m: any) => m.institution?.id === ENV.INSTITUTION_ID,
+        (m: any) => m.id === ENV.INSTITUTION_ID,
       );
       assert(match, `institution ${ENV.INSTITUTION_ID} must appear in user's list`);
     }

@@ -461,13 +461,22 @@ Deno.test({
     const deleteR = await api.delete(`/institution-plans/${planId}`, access_token);
     assertStatus(deleteR, 200);
 
-    // ASSERT: Verify plan was deleted (GET should 404 or return empty)
+    // ASSERT: Verify plan was deleted (GET should 404 for hard-delete, or 200 with deleted_at for soft-delete)
     const getR = await api.get(`/institution-plans/${planId}`, access_token);
-    // crud-factory soft-delete or hard-delete — either 404 or deleted flag
-    assert(
-      getR.status === 404 || getR.status === 200,
-      `GET after DELETE should return 404 or 200, got ${getR.status}`,
-    );
+    if (getR.status === 200) {
+      // Soft-delete: entity returned but must have deleted_at set
+      const deleted = assertOk(getR) as Record<string, unknown>;
+      assert(
+        deleted.deleted_at !== null && deleted.deleted_at !== undefined,
+        `GET after DELETE returned 200 but deleted_at is not set — DELETE may not have worked`,
+      );
+    } else {
+      // Hard-delete: entity no longer exists
+      assert(
+        getR.status === 404,
+        `GET after DELETE should return 404 (hard-delete) or 200 (soft-delete), got ${getR.status}`,
+      );
+    }
 
     resetTracking();
   },

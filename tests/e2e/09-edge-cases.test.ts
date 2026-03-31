@@ -24,7 +24,7 @@
  *   - No explicit UUID format validation in crud-factory — Supabase/PostgREST rejects bad UUIDs
  */
 import { assert } from "https://deno.land/std@0.224.0/assert/assert.ts";
-import { login, api, ENV, apiBase } from "../helpers/test-client.ts";
+import { login, api, ENV, apiBase, assertOk } from "../helpers/test-client.ts";
 
 // ═══ CREDENTIAL FLAGS ═══
 
@@ -197,15 +197,12 @@ Deno.test({
     // So it should return 200 with the default limit applied
     assertOneOf(r.status, [200], "GET /courses limit=0");
 
-    const body = r.raw as Record<string, unknown>;
-    const data = body?.data as Record<string, unknown> | undefined;
-    if (data) {
-      // Verify limit was defaulted (backend sets limit to 100 when < 1)
-      assert(
-        (data.limit as number) === 100,
-        `EDGE-04: expected limit=100 (default), got limit=${data.limit}`,
-      );
-    }
+    const data = assertOk(r) as Record<string, unknown>;
+    // Verify limit was defaulted (backend sets limit to 100 when < 1)
+    assert(
+      (data.limit as number) === 100,
+      `EDGE-04: expected limit=100 (default), got limit=${data.limit}`,
+    );
   },
 });
 
@@ -227,14 +224,11 @@ Deno.test({
     assertNot5xx(r.status, "GET /courses limit=99999");
     assertOneOf(r.status, [200], "GET /courses limit=99999");
 
-    const body = r.raw as Record<string, unknown>;
-    const data = body?.data as Record<string, unknown> | undefined;
-    if (data) {
-      assert(
-        (data.limit as number) === 500,
-        `EDGE-05: expected limit=500 (max cap), got limit=${data.limit}`,
-      );
-    }
+    const data = assertOk(r) as Record<string, unknown>;
+    assert(
+      (data.limit as number) === 500,
+      `EDGE-05: expected limit=500 (max cap), got limit=${data.limit}`,
+    );
   },
 });
 
