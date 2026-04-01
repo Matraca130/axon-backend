@@ -128,12 +128,13 @@ export interface TriggerConfig {
  * S3-002: Added fsrs_states for xp_collector badges.
  * S3-004: Removed ai_conversations & leaderboard_weekly (tables don't exist).
  *
- * TODO: When ai_conversations and leaderboard_weekly tables are created,
+ * NOTE: When ai_conversations and leaderboard_weekly tables are created,
  *       re-add them here and reactivate the 4 deactivated badges:
  *         - ai_conversations: curioso_1, investigador_1
  *         - leaderboard_weekly: campeon_semanal, socializador
  *       Verify the correct student column name (student_id vs user_id)
  *       before adding.
+ * @see BH-ERR-008
  */
 const ALLOWED_TABLES: Record<string, string> = {
   study_sessions: "student_id",
