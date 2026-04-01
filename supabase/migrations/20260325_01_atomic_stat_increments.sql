@@ -20,6 +20,7 @@ CREATE OR REPLACE FUNCTION increment_student_stat(
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 BEGIN
   -- Validate field name to prevent SQL injection
@@ -54,6 +55,7 @@ CREATE OR REPLACE FUNCTION decrement_streak_freezes(
 RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 BEGIN
   UPDATE student_xp
