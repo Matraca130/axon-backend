@@ -72,13 +72,15 @@ function maskPhone(phone: string): string {
 async function verifyMetaSignature(
   rawBody: string,
   signatureHeader: string | null,
-): Promise<boolean> {
-  if (!signatureHeader) return false;
+): Promise<"valid" | "invalid" | "misconfigured"> {
+  if (!signatureHeader) return "invalid";
 
+  // AS-04 FIX: Fail with "misconfigured" (→ 500) instead of "invalid" (→ 401)
+  // when the env var is missing. Never fall through to a hardcoded secret.
   const secret = Deno.env.get("WHATSAPP_APP_SECRET");
   if (!secret) {
-    console.error("[WA-Webhook] WHATSAPP_APP_SECRET not configured");
-    return false;
+    console.error("[WA-Webhook] WHATSAPP_APP_SECRET not configured — refusing to verify");
+    return "misconfigured";
   }
 
   const expectedHex = signatureHeader.startsWith("sha256=")
@@ -87,7 +89,7 @@ async function verifyMetaSignature(
 
   if (!expectedHex || expectedHex.length !== 64) {
     console.warn("[WA-Webhook] Invalid signature format (expected 64-char hex)");
-    return false;
+    return "invalid";
   }
 
   try {
@@ -103,10 +105,10 @@ async function verifyMetaSignature(
     const computedHex = Array.from(new Uint8Array(signature))
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
-    return timingSafeEqual(computedHex, expectedHex);
+    return timingSafeEqual(computedHex, expectedHex) ? "valid" : "invalid";
   } catch (e) {
     console.error(`[WA-Webhook] HMAC error: ${(e as Error).message}`);
-    return false;
+    return "invalid";
   }
 }
 
@@ -230,6 +232,10 @@ export async function handleVerification(c: Context): Promise<Response> {
   const token = c.req.query("hub.verify_token");
   const challenge = c.req.query("hub.challenge");
   const expectedToken = Deno.env.get("WHATSAPP_VERIFY_TOKEN");
+  if (!expectedToken) {
+    console.error("[WA-Webhook] WHATSAPP_VERIFY_TOKEN not configured");
+    return err(c, "Server misconfigured", 500);
+  }
 
   if (mode === "subscribe" && token && token === expectedToken) {
     console.warn("[WA-Webhook] Verification challenge accepted");
@@ -247,8 +253,11 @@ export async function handleIncoming(c: Context): Promise<Response> {
   const signatureHeader = c.req.header("x-hub-signature-256") ?? null;
   const rawBody = await c.req.text();
 
-  const valid = await verifyMetaSignature(rawBody, signatureHeader);
-  if (!valid) {
+  const sigResult = await verifyMetaSignature(rawBody, signatureHeader);
+  if (sigResult === "misconfigured") {
+    return err(c, "Server misconfigured", 500);
+  }
+  if (sigResult === "invalid") {
     console.warn("[WA-Webhook] HMAC validation failed");
     return err(c, "Invalid signature", 401);
   }
