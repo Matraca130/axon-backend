@@ -93,16 +93,16 @@ function buildSystemPrompt(ctx: StudentContext): string {
   const parts: string[] = [];
 
   parts.push(
-    `Voce e o tutor de voz do Axon, uma plataforma educacional. ` +
-    `Voce fala em portugues brasileiro de forma calorosa, amigavel e motivadora. ` +
-    `Seja conciso nas respostas de voz (maximo 3-4 frases por turno). ` +
-    `Adapte sua explicacao ao nivel do aluno.`
+    `Sos el tutor de voz de Axon, una plataforma educativa. ` +
+    `Hablás en español rioplatense de forma cálida, amigable y motivadora. ` +
+    `Sé conciso en las respuestas de voz (máximo 3-4 oraciones por turno). ` +
+    `Adaptá tu explicación al nivel del alumno.`
   );
 
   // Current topic context
   if (ctx.summaryTitle || ctx.courseName) {
     const topic = [ctx.courseName, ctx.summaryTitle].filter(Boolean).join(" → ");
-    parts.push(`\nTema atual do aluno: ${topic}`);
+    parts.push(`\nTema actual del alumno: ${topic}`);
   }
 
   // Knowledge profile
@@ -114,59 +114,59 @@ function buildSystemPrompt(ctx: StudentContext): string {
       const weakList = kp.weak
         .map((w: Record<string, unknown>) => `${sanitizeForPrompt(String(w.sub), 100)} (dominio: ${w.p})`)
         .join(", ");
-      sections.push(`Areas fracas: ${weakList}`);
+      sections.push(`Áreas débiles: ${weakList}`);
     }
 
     if (Array.isArray(kp.strong) && kp.strong.length > 0) {
       const strongList = kp.strong
         .map((s: Record<string, unknown>) => `${sanitizeForPrompt(String(s.sub), 100)} (dominio: ${s.p})`)
         .join(", ");
-      sections.push(`Pontos fortes: ${strongList}`);
+      sections.push(`Puntos fuertes: ${strongList}`);
     }
 
     if (Array.isArray(kp.lapsing) && kp.lapsing.length > 0) {
       const lapsingList = kp.lapsing
-        .map((l: Record<string, unknown>) => `"${sanitizeForPrompt(String(l.card), 100)}" (${l.lapses} erros)`)
+        .map((l: Record<string, unknown>) => `"${sanitizeForPrompt(String(l.card), 100)}" (${l.lapses} errores)`)
         .join(", ");
-      sections.push(`Flashcards problematicos: ${lapsingList}`);
+      sections.push(`Flashcards problemáticas: ${lapsingList}`);
     }
 
     if (Array.isArray(kp.quiz_fail) && kp.quiz_fail.length > 0) {
       const failList = kp.quiz_fail
         .map((q: Record<string, unknown>) => `"${sanitizeForPrompt(String(q.q), 100)}"`)
         .join(", ");
-      sections.push(`Quiz errados recentemente: ${failList}`);
+      sections.push(`Quizzes fallados recientemente: ${failList}`);
     }
 
     if (sections.length > 0) {
-      parts.push(`\n${wrapXml("student_profile", `PERFIL ACADEMICO DO ALUNO:\n- ${sections.join("\n- ")}`)}`);
+      parts.push(`\n${wrapXml("student_profile", `PERFIL ACADÉMICO DEL ALUMNO:\n- ${sections.join("\n- ")}`)}`);
     }
   }
 
   // Stats & XP
   const statParts: string[] = [];
   if (ctx.stats) {
-    if (ctx.stats.current_streak > 0) statParts.push(`sequencia de ${ctx.stats.current_streak} dias`);
-    if (ctx.stats.total_reviews > 0) statParts.push(`${ctx.stats.total_reviews} revisoes totais`);
+    if (ctx.stats.current_streak > 0) statParts.push(`racha de ${ctx.stats.current_streak} días`);
+    if (ctx.stats.total_reviews > 0) statParts.push(`${ctx.stats.total_reviews} repasos totales`);
   }
   if (ctx.xp) {
     statParts.push(`nivel ${ctx.xp.current_level}`);
     statParts.push(`${ctx.xp.total_xp} XP`);
-    if (ctx.xp.xp_today > 0) statParts.push(`${ctx.xp.xp_today} XP hoje`);
+    if (ctx.xp.xp_today > 0) statParts.push(`${ctx.xp.xp_today} XP hoy`);
   }
   if (statParts.length > 0) {
-    parts.push(`\nProgresso: ${statParts.join(", ")}`);
+    parts.push(`\nProgreso: ${statParts.join(", ")}`);
   }
 
   // Behavioral instructions
   parts.push(
-    `\nINSTRUCOES DE COMPORTAMENTO:` +
-    `\n- Se o aluno tem areas fracas, ofereca-se para explica-las proativamente.` +
-    `\n- Parabenize conquistas (sequencia, nivel, XP do dia).` +
-    `\n- Se perguntar o que estudar, use a ferramenta get_study_queue.` +
-    `\n- Se perguntar sobre o conteudo do curso, use search_course_content.` +
-    `\n- Seja breve e natural — e uma conversa de voz, nao um ensaio.` +
-    `\n- Nao repita as informacoes do perfil literalmente, use-as para contextualizar.`
+    `\nINSTRUCCIONES DE COMPORTAMIENTO:` +
+    `\n- Si el alumno tiene áreas débiles, ofrecé explicarlas proactivamente.` +
+    `\n- Felicitá los logros (racha, nivel, XP del día).` +
+    `\n- Si pregunta qué estudiar, usá la herramienta get_study_queue.` +
+    `\n- Si pregunta sobre el contenido del curso, usá search_course_content.` +
+    `\n- Sé breve y natural — es una conversación de voz, no un ensayo.` +
+    `\n- No repitas la información del perfil literalmente, usala para contextualizar.`
   );
 
   return parts.join("\n");
@@ -193,13 +193,13 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
     });
     if (rlError) {
       console.error(`[Realtime] Rate limit RPC failed: ${rlError.message}. Denying request.`);
-      return err(c, "Nao foi possivel verificar o limite de uso. Tente novamente.", 500);
+      return err(c, "No se pudo verificar el límite de uso. Intentá de nuevo.", 500);
     }
     if (rlData && !rlData.allowed) {
       return err(
         c,
-        `Limite de sessoes de voz excedido: maximo 10 por hora. ` +
-        `Tente novamente em ${Math.ceil((rlData.retry_after_ms || 0) / 1000)}s.`,
+        `Límite de sesiones de voz excedido: máximo 10 por hora. ` +
+        `Intentá de nuevo en ${Math.ceil((rlData.retry_after_ms || 0) / 1000)}s.`,
         429,
       );
     }
@@ -225,7 +225,7 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
     institutionId = membership?.institution_id || null;
   }
   if (!institutionId) {
-    return err(c, "Nao foi possivel resolver a instituicao. O usuario nao tem membresias ativas.", 400);
+    return err(c, "No se pudo resolver la institución. El usuario no tiene membresías activas.", 400);
   }
 
   // 2. Verify role
@@ -348,7 +348,7 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
   // 5. Request ephemeral token from OpenAI
   const openaiKey = Deno.env.get("OPENAI_API_KEY");
   if (!openaiKey) {
-    return err(c, "Chave da API OpenAI nao configurada", 500);
+    return err(c, "Clave de API OpenAI no configurada", 500);
   }
 
   let sessionResponse: Response;
@@ -384,7 +384,7 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
     });
   } catch (fetchErr) {
     console.error("[Realtime] OpenAI session request failed:", (fetchErr as Error).message);
-    return err(c, "Erro ao criar sessao de voz. Tente novamente.", 502);
+    return err(c, "Error al crear sesión de voz. Intentá de nuevo.", 502);
   } finally {
     clearTimeout(timeout);
   }
@@ -392,14 +392,14 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
   if (!sessionResponse.ok) {
     const errorBody = await sessionResponse.text().catch(() => "");
     console.error("[Realtime] OpenAI error:", sessionResponse.status, errorBody.slice(0, 500));
-    return err(c, "Erro ao criar sessao de voz. Tente novamente.", 502);
+    return err(c, "Error al crear sesión de voz. Intentá de nuevo.", 502);
   }
 
   let session: Record<string, unknown>;
   try {
     session = await sessionResponse.json();
   } catch {
-    return err(c, "Resposta invalida da OpenAI", 502);
+    return err(c, "Respuesta inválida de OpenAI", 502);
   }
 
   // GA response shape: { value: "ek_...", expires_at: 123, session: {...} }
@@ -408,7 +408,7 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
     ?? session.client_secret;
   if (!clientSecret || typeof clientSecret !== "string") {
     console.error("[Realtime] Missing client_secret in OpenAI response:", JSON.stringify(session).slice(0, 300));
-    return err(c, "OpenAI nao retornou um token de sessao valido", 502);
+    return err(c, "OpenAI no devolvió un token de sesión válido", 502);
   }
 
   // 6. Log session creation for cost tracking (fire-and-forget)
@@ -434,6 +434,6 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
     const msg = (handlerErr as Error).message || String(handlerErr);
     const stack = (handlerErr as Error).stack || "";
     console.error("[Realtime] Unhandled error:", msg, "\n", stack);
-    return err(c, "Erro interno ao criar sessao de voz. Tente novamente.", 500);
+    return err(c, "Error interno al crear sesión de voz. Intentá de nuevo.", 500);
   }
 });
