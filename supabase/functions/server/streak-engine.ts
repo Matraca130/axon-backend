@@ -286,26 +286,18 @@ export async function performDailyCheckIn(
 
     // A-014 FIX: Awaited atomic update instead of fire-and-forget .then() chain
     const consumed = decision.freezeIdsToConsume.length;
+    // BH-ERR-016 FIX: Atomic decrement via RPC replaces race-prone SELECT→UPDATE
     try {
-      const { data: xp } = await db
-        .from("student_xp")
-        .select("streak_freezes_owned")
-        .eq("student_id", studentId)
-        .eq("institution_id", institutionId)
-        .maybeSingle();
+      const { error } = await db.rpc("decrement_streak_freezes", {
+        p_student_id: studentId,
+        p_institution_id: institutionId,
+        p_amount: consumed,
+      });
+      if (error) throw error;
 
-      if (xp) {
-        const newCount = Math.max(0, (xp.streak_freezes_owned ?? 0) - consumed);
-        await db
-          .from("student_xp")
-          .update({ streak_freezes_owned: newCount })
-          .eq("student_id", studentId)
-          .eq("institution_id", institutionId);
-
-        console.warn(
-          `[Streak Engine] Decremented streak_freezes_owned by ${consumed} for ${studentId}`,
-        );
-      }
+      console.warn(
+        `[Streak Engine] Decremented streak_freezes_owned by ${consumed} for ${studentId}`,
+      );
     } catch (e) {
       console.warn(
         "[Streak Engine] Failed to decrement streak_freezes_owned:",

@@ -145,33 +145,13 @@ async function _incrementStudentStat(
 ): Promise<void> {
   const db = getAdminClient();
   try {
-    const { data } = await db
-      .from("student_stats")
-      .select(field)
-      .eq("student_id", studentId)
-      .maybeSingle();
-
-    if (data) {
-      const current = (data as Record<string, unknown>)[field] as number ?? 0;
-      await db
-        .from("student_stats")
-        .update({
-          [field]: current + amount,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("student_id", studentId);
-    } else {
-      // Student hasn't onboarded yet — create stats row with defaults
-      await db.from("student_stats").insert({
-        student_id: studentId,
-        current_streak: 0,
-        longest_streak: 0,
-        total_reviews: field === "total_reviews" ? amount : 0,
-        total_sessions: field === "total_sessions" ? amount : 0,
-        total_time_seconds: 0,
-        last_study_date: null,
-      });
-    }
+    // BH-ERR-016 FIX: Atomic upsert via RPC replaces race-prone SELECT→UPDATE
+    const { error } = await db.rpc("increment_student_stat", {
+      p_student_id: studentId,
+      p_field: field,
+      p_amount: amount,
+    });
+    if (error) throw error;
   } catch (e) {
     // Non-critical: badge evaluation still works, just counters won't update
     console.warn(
