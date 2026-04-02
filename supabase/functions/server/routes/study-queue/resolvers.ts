@@ -10,6 +10,7 @@
  */
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
+import { getAdminClient } from "../../db.ts";
 
 // ─── Course → Summary IDs resolution ───────────────────────────
 
@@ -17,7 +18,8 @@ export async function resolveSummaryIdsForCourse(
   db: SupabaseClient,
   courseId: string,
 ): Promise<Set<string> | null> {
-  const { data: rpcData, error: rpcError } = await db.rpc(
+  // SEC-S9B: Use admin client for SECURITY DEFINER RPCs
+  const { data: rpcData, error: rpcError } = await getAdminClient().rpc(
     "get_course_summary_ids",
     { p_course_id: courseId },
   );

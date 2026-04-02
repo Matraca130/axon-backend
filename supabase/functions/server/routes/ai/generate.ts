@@ -31,7 +31,7 @@
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
-import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { authenticate, ok, err, safeJson, PREFIX, getAdminClient } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid, isOneOf } from "../../validate.ts";
 import {
@@ -161,7 +161,8 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
 
   // ── Fetch student profile ────────────────────────────────
   let profileContext = "";
-  const { data: profile } = await db.rpc("get_student_knowledge_context", {
+  // SEC-S9B: Use admin client for SECURITY DEFINER RPCs
+  const { data: profile } = await getAdminClient().rpc("get_student_knowledge_context", {
     p_student_id: user.id,
     p_institution_id: instId as string,
   });

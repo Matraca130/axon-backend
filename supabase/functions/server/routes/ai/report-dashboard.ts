@@ -39,7 +39,7 @@
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
-import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { authenticate, ok, err, PREFIX, getAdminClient } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid, isOneOf } from "../../validate.ts";
 import {
@@ -151,7 +151,8 @@ aiReportDashboardRoutes.get(
     if (from) rpcParams.p_from = from;
     if (to) rpcParams.p_to = to;
 
-    const { data, error } = await db.rpc(
+    // SEC-S9B: Use admin client for SECURITY DEFINER RPCs
+    const { data, error } = await getAdminClient().rpc(
       "get_ai_report_stats",
       rpcParams,
     );
