@@ -56,11 +56,13 @@ SELECT cron.schedule(
   DECLARE
     r RECORD;
     v_badge_id UUID;
+    v_xp_reward INT;
+    v_inserted_id UUID;
   BEGIN
     PERFORM set_config('search_path', 'public, pg_temp', true);
 
-    -- Find the badge definition
-    SELECT id INTO v_badge_id
+    -- Find the badge definition (including xp_reward for XP awarding)
+    SELECT id, xp_reward INTO v_badge_id, v_xp_reward
     FROM badge_definitions
     WHERE name = 'Maraton de Estudio'
       AND is_active = true
@@ -83,7 +85,22 @@ SELECT cron.schedule(
       -- Award badge (skip if already earned)
       INSERT INTO student_badges (student_id, badge_id, institution_id)
       VALUES (r.student_id, v_badge_id, r.institution_id)
-      ON CONFLICT DO NOTHING;
+      ON CONFLICT DO NOTHING
+      RETURNING id INTO v_inserted_id;
+
+      -- Award XP only if badge was newly inserted (not a duplicate)
+      IF v_inserted_id IS NOT NULL AND COALESCE(v_xp_reward, 0) > 0 THEN
+        PERFORM award_xp(
+          p_student_id     := r.student_id,
+          p_institution_id := r.institution_id,
+          p_action         := 'badge_maraton_de_estudio',
+          p_xp_base        := v_xp_reward,
+          p_multiplier     := 1.0,
+          p_bonus_type     := NULL,
+          p_source_type    := 'badge',
+          p_source_id      := v_badge_id::TEXT
+        );
+      END IF;
     END LOOP;
   END $body$;
   $$
