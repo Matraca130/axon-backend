@@ -20,7 +20,7 @@
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
-import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { authenticate, ok, err, PREFIX, getAdminClient } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import {
@@ -77,7 +77,8 @@ aiAnalyticsRoutes.get(`${PREFIX}/ai/rag-analytics`, async (c: Context) => {
   if (from) rpcParams.p_from = from;
   if (to) rpcParams.p_to = to;
 
-  const { data, error } = await db.rpc("rag_analytics_summary", rpcParams);
+  // SEC-S9B: Use admin client for SECURITY DEFINER RPCs
+  const { data, error } = await getAdminClient().rpc("rag_analytics_summary", rpcParams);
 
   if (error)
     return safeErr(c, "Analytics query", error);
@@ -121,7 +122,8 @@ aiAnalyticsRoutes.get(`${PREFIX}/ai/embedding-coverage`, async (c: Context) => {
     return err(c, roleCheck.message, roleCheck.status);
 
   // ── Call RPC ──────────────────────────────────────────────
-  const { data, error } = await db.rpc("rag_embedding_coverage", {
+  // SEC-S9B: Use admin client for SECURITY DEFINER RPCs
+  const { data, error } = await getAdminClient().rpc("rag_embedding_coverage", {
     p_institution_id: institutionId,
   });
 

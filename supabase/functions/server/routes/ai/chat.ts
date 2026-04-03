@@ -488,7 +488,8 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
 
   let profileContext = "";
   try {
-    const { data: profile } = await db.rpc("get_student_knowledge_context", {
+    // SEC-S9B: Use admin client for SECURITY DEFINER RPCs
+    const { data: profile } = await getAdminClient().rpc("get_student_knowledge_context", {
       p_student_id: user.id,
       p_institution_id: institutionId,
     });

@@ -9,14 +9,15 @@
  *   resolveSummaryIdsForStudent — Via memberships → courses → summaries
  */
 
-import type { SupabaseClient } from "npm:@supabase/supabase-js";
+import { getAdminClient } from "../../db.ts";
 
 // ─── Course → Summary IDs resolution ───────────────────────────
 
 export async function resolveSummaryIdsForCourse(
-  db: SupabaseClient,
   courseId: string,
 ): Promise<Set<string> | null> {
+  const db = getAdminClient();
+  // SEC-S9B: Use admin client for SECURITY DEFINER RPCs
   const { data: rpcData, error: rpcError } = await db.rpc(
     "get_course_summary_ids",
     { p_course_id: courseId },
@@ -49,9 +50,9 @@ export async function resolveSummaryIdsForCourse(
 // ─── Student → Summary IDs resolution ──────────────────────────
 
 export async function resolveSummaryIdsForStudent(
-  db: SupabaseClient,
   userId: string,
 ): Promise<Set<string> | null> {
+  const db = getAdminClient();
   // Step 1: Get user's institution memberships (needed for both RPC and fallback)
   const { data: memberships } = await db
     .from("memberships")

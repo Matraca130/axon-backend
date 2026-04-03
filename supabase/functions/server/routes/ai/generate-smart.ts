@@ -47,7 +47,7 @@
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
-import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { authenticate, ok, err, safeJson, PREFIX, getAdminClient } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { isUuid, isOneOf, isNonNegInt } from "../../validate.ts";
@@ -390,7 +390,7 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
     );
 
     let profileContext = "";
-    const { data: profile } = await db.rpc("get_student_knowledge_context", {
+    const { data: profile } = await getAdminClient().rpc("get_student_knowledge_context", {
       p_student_id: user.id,
       p_institution_id: resolvedInstId as string,
     });
@@ -494,7 +494,7 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
   let sharedProfileContext = "";
   const firstInstId = institutionIdCache.values().next().value;
   if (firstInstId) {
-    const { data: profile } = await db.rpc("get_student_knowledge_context", {
+    const { data: profile } = await getAdminClient().rpc("get_student_knowledge_context", {
       p_student_id: user.id,
       p_institution_id: firstInstId,
     });
