@@ -9,6 +9,7 @@
  */
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
+import { getAdminClient } from "./db.ts";
 
 // --- Types ---
 
@@ -140,8 +141,10 @@ export async function awardXP(
   }
 
   // --- RPC path (primary) ---
+  // SEC: Use service_role client — award_xp revoked from authenticated
+  // to prevent students self-awarding XP via PostgREST.
   try {
-    const { data, error } = await db.rpc("award_xp", {
+    const { data, error } = await getAdminClient().rpc("award_xp", {
       p_student_id: studentId,
       p_institution_id: institutionId,
       p_action: action,
