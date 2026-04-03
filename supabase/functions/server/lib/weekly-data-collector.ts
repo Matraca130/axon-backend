@@ -71,6 +71,21 @@ export function getCurrentWeekEnd(): Date {
   return sunday;
 }
 
+/** Start of a rolling 7-day window (6 days ago at 00:00 UTC). */
+export function getRolling7DaysStart(): Date {
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0);
+  d.setUTCDate(d.getUTCDate() - 6);
+  return d;
+}
+
+/** End of a rolling 7-day window (today at 23:59:59.999 UTC). */
+export function getRolling7DaysEnd(): Date {
+  const d = new Date();
+  d.setUTCHours(23, 59, 59, 999);
+  return d;
+}
+
 /** Format Date as YYYY-MM-DD. */
 export function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10);
@@ -136,34 +151,39 @@ export function mapKnowledgeProfile(profile: KnowledgeProfile | null): {
  * @param studentId - The student's auth.users id
  * @param institutionId - Optional; when present, fetches knowledge
  *   context via RPC and XP data
+ * @param useRollingWindow - Optional; when true, uses a rolling 7-day
+ *   window (today − 6 days) instead of calendar week boundaries.
+ *   Bots should pass true to preserve the original rolling behavior.
  */
 export async function collectWeeklyData(
   db: SupabaseClient,
   studentId: string,
   institutionId?: string,
+  useRollingWindow?: boolean,
 ): Promise<WeeklyRawData> {
-  // Use week boundary (Mon 00:00 – Sun 23:59 UTC) instead of rolling 7 days.
-  // This aligns data collection with the week_start/week_end stored in weekly_reports.
-  const weekStart = getCurrentWeekStart();
-  const weekStartDate = formatDate(weekStart);
-  const weekEndDate = formatDate(getCurrentWeekEnd());
-  // Next Monday = weekStart + 7 days. Used as exclusive upper bound for timestamps.
-  const nextMonday = new Date(weekStart);
-  nextMonday.setUTCDate(nextMonday.getUTCDate() + 7);
-  const nextMondayDate = formatDate(nextMonday);
+  // When useRollingWindow is true, use a rolling 7-day window (today - 6 days to today).
+  // Otherwise use calendar week boundaries (Mon 00:00 – Sun 23:59 UTC).
+  const rangeStart = useRollingWindow ? getRolling7DaysStart() : getCurrentWeekStart();
+  const rangeEnd = useRollingWindow ? getRolling7DaysEnd() : getCurrentWeekEnd();
+  const weekStartDate = formatDate(rangeStart);
+  const weekEndDate = formatDate(rangeEnd);
+  // Exclusive upper bound for timestamp-based queries (day after rangeEnd).
+  const dayAfterEnd = new Date(rangeEnd);
+  dayAfterEnd.setUTCDate(dayAfterEnd.getUTCDate() + 1);
+  const dayAfterEndDate = formatDate(dayAfterEnd);
 
   // Build parallel queries — always run sessions, activities, stats
   const queries: Promise<unknown>[] = [
-    // Q1: study_sessions within current week (Mon 00:00 – next Mon 00:00, exclusive)
+    // Q1: study_sessions within date range (exclusive upper bound)
     db.from("study_sessions")
       .select("id, total_reviews, correct_reviews")
       .eq("student_id", studentId)
       .gte("created_at", `${weekStartDate}T00:00:00Z`)
-      .lt("created_at", `${nextMondayDate}T00:00:00Z`),
+      .lt("created_at", `${dayAfterEndDate}T00:00:00Z`),
 
-    // Q2: daily_activities within current week — count distinct days + sum time
+    // Q2: daily_activities within date range — count distinct days + sum time
     db.from("daily_activities")
-      .select("*")
+      .select("activity_date, total_time_seconds")
       .eq("student_id", studentId)
       .gte("activity_date", weekStartDate)
       .lte("activity_date", weekEndDate),

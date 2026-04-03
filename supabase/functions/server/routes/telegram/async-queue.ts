@@ -261,7 +261,8 @@ async function executeWeeklyReport(payload: TelegramJobPayload): Promise<void> {
   const { user_id, chat_id } = payload;
 
   // Data collection via shared lib (no institutionId in bot payloads)
-  const data = await collectWeeklyData(db, user_id);
+  // Use rolling 7-day window to preserve original bot behavior
+  const data = await collectWeeklyData(db, user_id, undefined, true);
   const { totalSessions, totalReviews, accuracyPercent: accuracy } = data;
   const weakTopics = data.weakTopics.slice(0, 3).map((t) => t.topicName);
 
