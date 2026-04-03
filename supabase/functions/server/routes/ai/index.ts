@@ -23,6 +23,8 @@
  *   student-weak-points.ts — GET   /ai/student-weak-points     (Mindmap AI)
  *   schedule-agent.ts     — POST  /ai/schedule-agent          (Study Schedule AI)
  *                            GET   /ai/schedule-logs           (Schedule Agent Logs)
+ *   weekly-report.ts      — GET   /ai/weekly-report           (Weekly Classification)
+ *                            POST  /ai/weekly-report           (Weekly Classification)
  *
  * PHASE-A2 CLEANUP: Removed temporary routes:
  *   - list-models.ts     (diagnostic, no longer needed)
@@ -56,6 +58,7 @@ import { aiAnalyzeGraphRoutes } from "./analyze-graph.ts";
 import { aiSuggestConnectionsRoutes } from "./suggest-connections.ts";
 import { aiWeakPointsRoutes } from "./student-weak-points.ts";
 import { aiScheduleAgentRoutes } from "./schedule-agent.ts";
+import { aiWeeklyReportRoutes } from "./weekly-report.ts";
 import { authenticate, err, getAdminClient, PREFIX } from "../../db.ts";
 
 const aiRoutes = new Hono();
@@ -132,5 +135,6 @@ aiRoutes.route("/", aiAnalyzeGraphRoutes);         // Mindmap AI (Knowledge Grap
 aiRoutes.route("/", aiSuggestConnectionsRoutes);   // Mindmap AI (Suggest Connections)
 aiRoutes.route("/", aiWeakPointsRoutes);           // Mindmap AI (Student Weak Points)
 aiRoutes.route("/", aiScheduleAgentRoutes);        // Study Schedule AI Agent
+aiRoutes.route("/", aiWeeklyReportRoutes);         // Weekly Classification Report
 
 export { aiRoutes };

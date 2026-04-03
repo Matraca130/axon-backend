@@ -17,6 +17,7 @@
  */
 
 import { getAdminClient } from "../../db.ts";
+import { collectWeeklyData } from "../../lib/weekly-data-collector.ts";
 import { generateText } from "../../claude-ai.ts";
 import { sendTextPlain } from "./tg-client.ts";
 
@@ -259,31 +260,11 @@ async function executeWeeklyReport(payload: TelegramJobPayload): Promise<void> {
   const db = getAdminClient();
   const { user_id, chat_id } = payload;
 
-  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-
-  const [sessionsRes, progressRes] = await Promise.all([
-    db.from("study_sessions")
-      .select("id, session_type, completed_at, total_reviews, correct_reviews")
-      .eq("student_id", user_id)
-      .gte("created_at", weekAgo),
-
-    db.from("topic_progress")
-      .select("topic_name, mastery_level")
-      .eq("student_id", user_id)
-      .order("mastery_level", { ascending: true })
-      .limit(10),
-  ]);
-
-  const sessions = sessionsRes.data || [];
-  const totalSessions = sessions.length;
-  const totalReviews = sessions.reduce((sum, s) => sum + (s.total_reviews || 0), 0);
-  const correctReviews = sessions.reduce((sum, s) => sum + (s.correct_reviews || 0), 0);
-  const accuracy = totalReviews > 0 ? Math.round((correctReviews / totalReviews) * 100) : 0;
-
-  const weakTopics = (progressRes.data || [])
-    .filter((t) => (t.mastery_level || 0) < 0.5)
-    .slice(0, 3)
-    .map((t) => t.topic_name);
+  // Data collection via shared lib (no institutionId in bot payloads)
+  // Use rolling 7-day window to preserve original bot behavior
+  const data = await collectWeeklyData(db, user_id, undefined, true);
+  const { totalSessions, totalReviews, accuracyPercent: accuracy } = data;
+  const weakTopics = data.weakTopics.slice(0, 3).map((t) => t.topicName);
 
   const { text: analysis } = await generateText({
     prompt:
