@@ -33,16 +33,7 @@ async function awardBadgeBySlug(
 
   if (!badge) return false;
 
-  // Check if already earned
-  const { count } = await db
-    .from("student_badges")
-    .select("badge_id", { count: "exact", head: true })
-    .eq("student_id", studentId)
-    .eq("badge_id", badge.id);
-
-  if ((count ?? 0) > 0) return false;
-
-  // Award
+  // Award (23505 duplicate handling below covers already-earned case)
   const { error } = await db
     .from("student_badges")
     .insert({
@@ -144,6 +135,7 @@ export function xpHookForFinalsBadges(params: AfterWriteParams): void {
         if (examEvent?.date) {
           const examDate = new Date(examEvent.date);
           const now = new Date();
+          now.setHours(0, 0, 0, 0);
           const daysBeforeExam = Math.floor(
             (examDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24),
           );

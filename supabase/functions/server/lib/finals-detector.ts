@@ -16,7 +16,10 @@ export async function isInFinalsPeriod(
   institutionId: string,
   date: Date = new Date(),
 ): Promise<boolean> {
-  const dateStr = date.toISOString().split("T")[0];
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  const dateStr = `${yyyy}-${mm}-${dd}`;
   const { data } = await db
     .from("finals_periods")
     .select("id")

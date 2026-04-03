@@ -9,3 +9,7 @@ ALTER TABLE study_plans
 
 ALTER TABLE study_plans
   ADD COLUMN IF NOT EXISTS exam_event_id UUID REFERENCES exam_events(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_study_plans_finals
+  ON study_plans(student_id)
+  WHERE is_finals_plan = true;

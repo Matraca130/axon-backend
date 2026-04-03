@@ -36,7 +36,7 @@ AS $$
   FROM study_sessions ss
   JOIN courses c ON c.id = ss.course_id
   WHERE ss.completed_at IS NOT NULL
-    AND ss.created_at::date = p_date
+    AND ss.created_at >= p_date AND ss.created_at < p_date + interval '1 day'
   GROUP BY ss.student_id, c.institution_id
   HAVING COALESCE(
     SUM(EXTRACT(EPOCH FROM (ss.completed_at - ss.created_at))::BIGINT),
@@ -57,6 +57,8 @@ SELECT cron.schedule(
     r RECORD;
     v_badge_id UUID;
   BEGIN
+    PERFORM set_config('search_path', 'public, pg_temp', true);
+
     -- Find the badge definition
     SELECT id INTO v_badge_id
     FROM badge_definitions
