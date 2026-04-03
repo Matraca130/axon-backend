@@ -3,8 +3,8 @@
 
 CREATE TABLE IF NOT EXISTS weekly_reports (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  student_id UUID NOT NULL REFERENCES auth.users(id),
-  institution_id UUID NOT NULL REFERENCES institutions(id),
+  student_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  institution_id UUID NOT NULL REFERENCES institutions(id) ON DELETE CASCADE,
   week_start DATE NOT NULL,
   week_end DATE NOT NULL,
 
