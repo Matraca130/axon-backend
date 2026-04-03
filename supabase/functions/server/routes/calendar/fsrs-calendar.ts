@@ -61,6 +61,10 @@ fsrsCalendarRoutes.get(
       return err(c, `Timeliness RPC failed: ${error.message}`, 500);
     }
 
+    if (!data || (Array.isArray(data) && data.length === 0)) {
+      return c.json({ data: null, hint: "no_reviews_in_last_90_days" });
+    }
+
     // RPC returns a single row as an array — unwrap
     const profile = Array.isArray(data) && data.length > 0 ? data[0] : data;
     return ok(c, profile);

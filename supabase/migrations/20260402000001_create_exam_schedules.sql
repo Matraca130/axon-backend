@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS exam_schedules (
   flashcard_id    UUID NOT NULL,
   forced_due_at   TIMESTAMPTZ NOT NULL,
   original_due_at TIMESTAMPTZ NOT NULL,
-  priority_weight NUMERIC(3, 2) DEFAULT 1.0,
+  priority_weight NUMERIC(3, 2) DEFAULT 1.0 CHECK (priority_weight >= 0),
   reason          TEXT DEFAULT 'exam_prep',
   created_at      TIMESTAMPTZ DEFAULT now(),
   UNIQUE(exam_event_id, flashcard_id)
@@ -28,8 +28,7 @@ CREATE POLICY exam_schedules_student_all ON exam_schedules
   );
 
 -- ─── Indexes ─────────────────────────────────────────────────────
-CREATE INDEX IF NOT EXISTS idx_exam_schedules_exam_event
-  ON exam_schedules(exam_event_id);
+-- idx_exam_schedules_exam_event removed: redundant with UNIQUE(exam_event_id, flashcard_id)
 
 CREATE INDEX IF NOT EXISTS idx_exam_schedules_flashcard
   ON exam_schedules(flashcard_id);

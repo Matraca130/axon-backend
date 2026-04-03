@@ -22,13 +22,19 @@ RETURNS TABLE (
   p95_delay        NUMERIC,
   total_review_count BIGINT
 )
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
+BEGIN
+  IF p_student_id != auth.uid() THEN
+    RAISE EXCEPTION 'unauthorized: cannot access other student data';
+  END IF;
+
+  RETURN QUERY
   WITH review_gaps AS (
     SELECT
-      r.created_at::date - fs.due_at::date AS days_late
+      GREATEST(r.created_at::date - fs.due_at::date, 0) AS days_late
     FROM reviews r
     JOIN study_sessions ss ON ss.id = r.session_id
     JOIN fsrs_states fs ON fs.flashcard_id = r.item_id
@@ -39,13 +45,14 @@ AS $$
       AND fs.due_at IS NOT NULL
   )
   SELECT
-    ROUND(AVG(days_late)::numeric, 1),
-    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY days_late),
-    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY days_late),
-    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY days_late),
-    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY days_late),
+    ROUND(AVG(rg.days_late)::numeric, 1),
+    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY rg.days_late),
+    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY rg.days_late),
+    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY rg.days_late),
+    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY rg.days_late),
     COUNT(*)
-  FROM review_gaps;
+  FROM review_gaps rg;
+END;
 $$;
 
 REVOKE ALL ON FUNCTION get_student_timeliness_profile(UUID) FROM PUBLIC;
@@ -64,13 +71,19 @@ RETURNS TABLE (
   earliest_due          TIMESTAMPTZ,
   latest_due            TIMESTAMPTZ
 )
-LANGUAGE sql
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
+BEGIN
+  IF p_student_id != auth.uid() THEN
+    RAISE EXCEPTION 'unauthorized: cannot access other student data';
+  END IF;
+
+  RETURN QUERY
   WITH timeliness AS (
     SELECT COALESCE(
-      (SELECT ROUND(AVG(r.created_at::date - fs.due_at::date)::numeric, 0)
+      (SELECT ROUND(AVG(GREATEST(r.created_at::date - fs.due_at::date, 0))::numeric, 0)
        FROM reviews r
        JOIN study_sessions ss ON ss.id = r.session_id
        JOIN fsrs_states fs ON fs.flashcard_id = r.item_id
@@ -90,9 +103,10 @@ AS $$
   CROSS JOIN timeliness t
   WHERE fs.student_id = p_student_id
     AND fs.due_at > NOW()
-    AND fs.due_at < NOW() + (p_days_ahead || ' days')::INTERVAL
+    AND fs.due_at < NOW() + p_days_ahead * INTERVAL '1 day'
   GROUP BY DATE(fs.due_at + INTERVAL '1 day' * t.avg_days_late)
   ORDER BY projected_review_date;
+END;
 $$;
 
 REVOKE ALL ON FUNCTION get_projected_daily_workload(UUID, INT) FROM PUBLIC;
