@@ -39,7 +39,7 @@ async function ensureBucket(): Promise<void> {
   const exists = buckets?.some((b: { name: string }) => b.name === BUCKET_NAME);
   if (!exists) {
     const { error } = await admin.storage.createBucket(BUCKET_NAME, {
-      public: false,
+      public: true,
       fileSizeLimit: MAX_FILE_SIZE,
       allowedMimeTypes: ALLOWED_MIME_TYPES,
     });
