@@ -10,6 +10,7 @@
  * PR #102: Renamed .tsx → .ts (no JSX), deduplicated calculateLevel.
  * PR #103: Modularized billing → routes/billing/, study-queue → routes/study-queue/.
  *   CORS restricted to Vercel + localhost origins (BUG-004).
+ * Phase 1: Added scheduleRoutes (momentum, exam-prep) + adminRoutes (finals-periods CRUD).
  */
 
 import { Hono } from "npm:hono";
@@ -37,6 +38,8 @@ import { whatsappRoutes } from "./routes/whatsapp/index.ts";
 import { telegramRoutes } from "./routes/telegram/index.ts";
 import { gamificationRoutes } from "./routes/gamification/index.ts";
 import { calendarRoutes } from "./routes/calendar/index.ts";
+import { scheduleRoutes } from "./routes/schedule/index.ts";
+import { adminRoutes } from "./routes/admin/index.ts";
 
 const app = new Hono();
 
@@ -143,6 +146,8 @@ app.route("/", whatsappRoutes);
 app.route("/", telegramRoutes);
 app.route("/", gamificationRoutes);
 app.route("/", calendarRoutes);
+app.route("/", scheduleRoutes);
+app.route("/", adminRoutes);
 
 // ─── Catch-all 404 ───────────────────────────────────────────────
 
