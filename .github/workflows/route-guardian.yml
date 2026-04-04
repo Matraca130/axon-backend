@@ -1,0 +1,184 @@
+# Route Guardian — Blocks PRs that silently drop existing code from main
+#
+# Detects 3 patterns that caused production incidents:
+#   1. Existing file loses >40% of its lines (squash merge overwrote it)
+#   2. Named exports disappear from a file
+#   3. Route registrations (.route() or registerCrud()) are removed
+#
+# If any pattern is detected, the PR is blocked with a detailed report.
+
+name: "Route Guardian"
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "supabase/functions/server/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  route-guardian:
+    name: "Route Guardian — Detect Lost Code"
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect lost code
+        id: check
+        run: |
+          set -euo pipefail
+
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          REPORT=""
+          FAILED=false
+
+          echo "Comparing $BASE_SHA (main) → $HEAD_SHA (PR)"
+          echo ""
+
+          # ─── CHECK 1: Line count drops >40% on existing files ───────
+          echo "=== Check 1: Significant line count drops ==="
+
+          for file in $(git diff --name-only --diff-filter=M "$BASE_SHA" "$HEAD_SHA" -- 'supabase/functions/server/**/*.ts'); do
+            # Skip test files
+            [[ "$file" == *test* ]] && continue
+            [[ "$file" == *spec* ]] && continue
+
+            OLD_LINES=$(git show "$BASE_SHA:$file" 2>/dev/null | wc -l || echo 0)
+            NEW_LINES=$(git show "$HEAD_SHA:$file" 2>/dev/null | wc -l || echo 0)
+
+            # Skip small files (< 20 lines)
+            [ "$OLD_LINES" -lt 20 ] && continue
+
+            if [ "$NEW_LINES" -gt 0 ] && [ "$OLD_LINES" -gt 0 ]; then
+              DROP=$(( (OLD_LINES - NEW_LINES) * 100 / OLD_LINES ))
+              if [ "$DROP" -ge 40 ]; then
+                MSG="⚠️ **$file**: $OLD_LINES → $NEW_LINES lines (${DROP}% reduction)"
+                echo "$MSG"
+                REPORT="${REPORT}\n${MSG}"
+                FAILED=true
+              fi
+            fi
+          done
+
+          # ─── CHECK 2: Lost named exports ────────────────────────────
+          echo ""
+          echo "=== Check 2: Lost named exports ==="
+
+          for file in $(git diff --name-only --diff-filter=M "$BASE_SHA" "$HEAD_SHA" -- 'supabase/functions/server/**/*.ts'); do
+            [[ "$file" == *test* ]] && continue
+            [[ "$file" == *spec* ]] && continue
+
+            OLD_EXPORTS=$(git show "$BASE_SHA:$file" 2>/dev/null | grep -oP '(?<=export\s+(const|function|class|type|interface|enum)\s+)\w+' | sort -u || true)
+            NEW_EXPORTS=$(git show "$HEAD_SHA:$file" 2>/dev/null | grep -oP '(?<=export\s+(const|function|class|type|interface|enum)\s+)\w+' | sort -u || true)
+
+            LOST=$(comm -23 <(echo "$OLD_EXPORTS") <(echo "$NEW_EXPORTS") | grep -v '^$' || true)
+
+            if [ -n "$LOST" ]; then
+              for exp in $LOST; do
+                MSG="⚠️ **$file**: export \`$exp\` was removed"
+                echo "$MSG"
+                REPORT="${REPORT}\n${MSG}"
+                FAILED=true
+              done
+            fi
+          done
+
+          # ─── CHECK 3: Lost route registrations ──────────────────────
+          echo ""
+          echo "=== Check 3: Lost route/CRUD registrations ==="
+
+          for file in $(git diff --name-only --diff-filter=M "$BASE_SHA" "$HEAD_SHA" -- 'supabase/functions/server/**/*.ts'); do
+            [[ "$file" == *test* ]] && continue
+            [[ "$file" == *spec* ]] && continue
+
+            # Count .route() calls
+            OLD_ROUTES=$(git show "$BASE_SHA:$file" 2>/dev/null | grep -c '\.route(' || echo 0)
+            NEW_ROUTES=$(git show "$HEAD_SHA:$file" 2>/dev/null | grep -c '\.route(' || echo 0)
+            if [ "$OLD_ROUTES" -gt "$NEW_ROUTES" ]; then
+              LOST_COUNT=$((OLD_ROUTES - NEW_ROUTES))
+              MSG="⚠️ **$file**: lost $LOST_COUNT .route() registration(s) ($OLD_ROUTES → $NEW_ROUTES)"
+              echo "$MSG"
+              REPORT="${REPORT}\n${MSG}"
+              FAILED=true
+            fi
+
+            # Count registerCrud() calls
+            OLD_CRUD=$(git show "$BASE_SHA:$file" 2>/dev/null | grep -c 'registerCrud(' || echo 0)
+            NEW_CRUD=$(git show "$HEAD_SHA:$file" 2>/dev/null | grep -c 'registerCrud(' || echo 0)
+            if [ "$OLD_CRUD" -gt "$NEW_CRUD" ]; then
+              LOST_COUNT=$((OLD_CRUD - NEW_CRUD))
+              MSG="⚠️ **$file**: lost $LOST_COUNT registerCrud() call(s) ($OLD_CRUD → $NEW_CRUD)"
+              echo "$MSG"
+              REPORT="${REPORT}\n${MSG}"
+              FAILED=true
+            fi
+          done
+
+          # ─── CHECK 4: Deleted route files ───────────────────────────
+          echo ""
+          echo "=== Check 4: Deleted route files ==="
+
+          for file in $(git diff --name-only --diff-filter=D "$BASE_SHA" "$HEAD_SHA" -- 'supabase/functions/server/routes/**/*.ts' 'supabase/functions/server/routes-*.ts'); do
+            [[ "$file" == *test* ]] && continue
+            MSG="🚨 **$file**: route file DELETED"
+            echo "$MSG"
+            REPORT="${REPORT}\n${MSG}"
+            FAILED=true
+          done
+
+          # ─── OUTPUT ─────────────────────────────────────────────────
+          echo ""
+          if [ "$FAILED" = true ]; then
+            echo "::error::Route Guardian detected potential code loss. See report below."
+            {
+              echo "report<<GUARDIAN_EOF"
+              echo -e "$REPORT"
+              echo "GUARDIAN_EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ All checks passed — no code loss detected."
+            echo "failed=false" >> "$GITHUB_OUTPUT"
+            echo "report=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment on PR if issues found
+        if: steps.check.outputs.failed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const report = `${{ steps.check.outputs.report }}`;
+            const body = `## 🛡️ Route Guardian — Code Loss Detected
+
+            This PR modifies existing files in ways that may silently drop functionality.
+            **Review each item below** before merging.
+
+            ${report}
+
+            ---
+
+            ### What to do
+            - If these changes are **intentional** (refactoring, deprecation), add a comment explaining why and a reviewer will approve.
+            - If these changes are **accidental** (bad conflict resolution), fix them before merging.
+
+            > This check exists because PRs #186 and #193 silently dropped production routes during squash merges.`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+      - name: Fail if issues found
+        if: steps.check.outputs.failed == 'true'
+        run: |
+          echo "::error::Route Guardian blocked this PR. See the PR comment for details."
+          exit 1
