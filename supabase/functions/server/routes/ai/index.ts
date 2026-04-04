@@ -56,6 +56,7 @@ import { aiAnalyzeGraphRoutes } from "./analyze-graph.ts";
 import { aiSuggestConnectionsRoutes } from "./suggest-connections.ts";
 import { aiWeakPointsRoutes } from "./student-weak-points.ts";
 import { aiScheduleAgentRoutes } from "./schedule-agent.ts";
+import { aiWeeklyReportRoutes } from "./weekly-report.ts";
 import { authenticate, err, getAdminClient, PREFIX } from "../../db.ts";
 
 const aiRoutes = new Hono();
@@ -132,5 +133,6 @@ aiRoutes.route("/", aiAnalyzeGraphRoutes);         // Mindmap AI (Knowledge Grap
 aiRoutes.route("/", aiSuggestConnectionsRoutes);   // Mindmap AI (Suggest Connections)
 aiRoutes.route("/", aiWeakPointsRoutes);           // Mindmap AI (Student Weak Points)
 aiRoutes.route("/", aiScheduleAgentRoutes);        // Study Schedule AI Agent
+aiRoutes.route("/", aiWeeklyReportRoutes);         // Weekly Study Report
 
 export { aiRoutes };
