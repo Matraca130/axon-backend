@@ -9,20 +9,20 @@
 -- ============================================================================
 
 INSERT INTO badge_definitions
-  (name, description, icon, category, rarity, xp_reward, trigger_type, trigger_config, criteria, is_active)
+  (slug, name, description, icon, category, rarity, xp_reward, trigger_type, trigger_config, criteria, is_active)
 VALUES
-  ('Sobreviviente de Finales',
+  ('sobreviviente_de_finales', 'Sobreviviente de Finales',
    'Crea 3 o mas planes de estudio durante el periodo de finales',
    'Shield', 'consistency', 'rare', 150, 'custom',
    '{}', 'finals_plans_count >= 3', true),
 
-  ('Maraton de Estudio',
+  ('maraton_de_estudio', 'Maraton de Estudio',
    '4 o mas horas de estudio en un dia durante el periodo de finales',
    'Timer', 'study', 'epic', 200, 'custom',
    '{}', 'finals_day_study_seconds >= 14400', true),
 
-  ('Cero Panico',
+  ('cero_panico', 'Cero Panico',
    'Crea un plan de estudio 15 o mas dias antes de tu examen',
    'Calendar', 'consistency', 'rare', 100, 'custom',
    '{}', 'days_before_exam >= 15', true)
-ON CONFLICT DO NOTHING;
+ON CONFLICT (slug) DO NOTHING;

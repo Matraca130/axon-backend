@@ -44,8 +44,9 @@ AS $$
   ) >= p_min_seconds
 $$;
 
--- Revoke from anon, keep authenticated for Edge Function usage
-REVOKE EXECUTE ON FUNCTION get_heavy_studiers_today(DATE, INTEGER) FROM anon;
+-- Revoke from PUBLIC (blocks all direct access), keep authenticated for Edge Function usage
+REVOKE ALL ON FUNCTION get_heavy_studiers_today(DATE, INTEGER) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION get_heavy_studiers_today(DATE, INTEGER) TO authenticated;
 
 -- Daily cron: Award Maraton badge at 02:00 UTC (23:00 ART)
 SELECT cron.schedule(
@@ -64,7 +65,7 @@ SELECT cron.schedule(
     -- Find the badge definition (including xp_reward for XP awarding)
     SELECT id, xp_reward INTO v_badge_id, v_xp_reward
     FROM badge_definitions
-    WHERE name = 'Maraton de Estudio'
+    WHERE slug = 'maraton_de_estudio'
       AND is_active = true
     LIMIT 1;
 
