@@ -285,6 +285,7 @@ function mapReport(row: any) {
     weakTopics: row.weak_topics,
     strongTopics: row.strong_topics,
     lapsingCards: row.lapsing_cards,
+    // Full AI analysis (original field names)
     aiSummary: row.ai_summary,
     aiStrengths: row.ai_strengths,
     aiWeaknesses: row.ai_weaknesses,
@@ -292,5 +293,13 @@ function mapReport(row: any) {
     aiRecommendedFocus: row.ai_recommended_focus,
     aiModel: row.ai_model,
     createdAt: row.created_at,
+    // Frontend aliases (used by WeeklyReportViewer component)
+    summary: row.ai_summary,
+    strengths: row.ai_strengths,
+    weaknesses: row.ai_weaknesses,
+    recommendations: (row.ai_recommended_focus || []).map(
+      // deno-lint-ignore no-explicit-any
+      (f: any) => typeof f === "string" ? f : `${f.topicName}: ${f.reason} (${f.suggestedMethod})`,
+    ),
   };
 }
