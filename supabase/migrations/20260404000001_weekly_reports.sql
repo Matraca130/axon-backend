@@ -23,7 +23,8 @@ BEGIN
     ALTER TABLE weekly_reports ADD COLUMN ai_strengths_new TEXT[] DEFAULT '{}';
     UPDATE weekly_reports SET ai_strengths_new = ARRAY(
       SELECT jsonb_array_elements_text(COALESCE(ai_strengths, '[]'::jsonb))
-    ) WHERE ai_strengths IS NOT NULL;
+    ) WHERE ai_strengths IS NOT NULL
+      AND jsonb_typeof(COALESCE(ai_strengths, '[]'::jsonb)) = 'array';
     ALTER TABLE weekly_reports DROP COLUMN ai_strengths;
     ALTER TABLE weekly_reports RENAME COLUMN ai_strengths_new TO ai_strengths;
   END IF;
@@ -40,7 +41,8 @@ BEGIN
     ALTER TABLE weekly_reports ADD COLUMN ai_weaknesses_new TEXT[] DEFAULT '{}';
     UPDATE weekly_reports SET ai_weaknesses_new = ARRAY(
       SELECT jsonb_array_elements_text(COALESCE(ai_weaknesses, '[]'::jsonb))
-    ) WHERE ai_weaknesses IS NOT NULL;
+    ) WHERE ai_weaknesses IS NOT NULL
+      AND jsonb_typeof(COALESCE(ai_weaknesses, '[]'::jsonb)) = 'array';
     ALTER TABLE weekly_reports DROP COLUMN ai_weaknesses;
     ALTER TABLE weekly_reports RENAME COLUMN ai_weaknesses_new TO ai_weaknesses;
   END IF;

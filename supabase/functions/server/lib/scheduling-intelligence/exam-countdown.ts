@@ -76,11 +76,24 @@ export async function planExamCountdown(
   // Path: topics → keywords (topic_id) → flashcards (keyword_id) → fsrs_states (flashcard_id)
   const topicIds = topics.map((t: { id: string }) => t.id);
 
+  // Defense-in-depth: filter by student_id alongside RLS
   const { data: fsrsData } = await db
     .from("fsrs_states")
     .select("flashcard_id, stability, difficulty, retrievability, flashcards!inner(keyword_id, keywords!inner(topic_id))")
     .in("flashcards.keywords.topic_id", topicIds)
     .eq("student_id", userId);
+
+  if (!fsrsData || fsrsData.length === 0) {
+    // No FSRS data yet — return topics with default priority (no review history)
+    return topics.map((topic: { id: string; name: string }) => ({
+      topicName: topic.name,
+      topicId: topic.id,
+      difficulty: 5,
+      peakRetrievability: 0.5,
+      reviewDates: [],
+      priority: 50,
+    }));
+  }
 
   // Group FSRS states by topic
   const topicStats: Record<string, { totalR: number; totalD: number; count: number }> = {};
