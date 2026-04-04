@@ -384,13 +384,14 @@ Responde en JSON con este schema exacto:
         // NORM-1 FIX: Use shared normalizers for type safety
         // AI-001 FIX: Validate + sanitize LLM output before insert
         if (action === "quiz_question") {
-          const validated = validateQuizQuestion(g);
+          const qType = normalizeQuestionType(g.question_type);
+          const validated = validateQuizQuestion(g, qType);  // AXO-119 FIX
           const { data: inserted, error: insertErr } = await db
             .from("quiz_questions")
             .insert({
               summary_id: summaryId,
               keyword_id: kw.id,
-              question_type: normalizeQuestionType(g.question_type),
+              question_type: qType,
               question: validated.question,
               options: validated.options,
               correct_answer: validated.correct_answer,
