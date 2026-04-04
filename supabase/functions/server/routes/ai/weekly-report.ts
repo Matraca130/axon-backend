@@ -160,16 +160,12 @@ aiWeeklyReportRoutes.post(`${PREFIX}/ai/weekly-report`, async (c: Context) => {
   const weekEnd = getWeekEnd(weekStart);
 
   // Collect raw stats for the week
-  const [sessionsRes, reviewsRes, xpRes, streakRes] = await Promise.all([
+  // First fetch sessions to get IDs for defense-in-depth review filtering
+  const [sessionsRes, xpRes, streakRes] = await Promise.all([
     db
       .from("study_sessions")
       .select("id, created_at", { count: "exact" })
       .eq("student_id", user.id)
-      .gte("created_at", `${weekStart}T00:00:00Z`)
-      .lte("created_at", `${weekEnd}T23:59:59Z`),
-    db
-      .from("reviews")
-      .select("grade")
       .gte("created_at", `${weekStart}T00:00:00Z`)
       .lte("created_at", `${weekEnd}T23:59:59Z`),
     db
@@ -185,6 +181,17 @@ aiWeeklyReportRoutes.post(`${PREFIX}/ai/weekly-report`, async (c: Context) => {
       .limit(1)
       .single(),
   ]);
+
+  // Defense-in-depth: filter reviews by user's own session IDs (alongside RLS)
+  const sessionIds = (sessionsRes.data ?? []).map((s: { id: string }) => s.id);
+  const reviewsRes = sessionIds.length > 0
+    ? await db
+        .from("reviews")
+        .select("grade")
+        .in("session_id", sessionIds)
+        .gte("created_at", `${weekStart}T00:00:00Z`)
+        .lte("created_at", `${weekEnd}T23:59:59Z`)
+    : { data: [] };
 
   const totalSessions = sessionsRes.count ?? 0;
   const reviews = reviewsRes.data ?? [];
