@@ -297,24 +297,40 @@ progressRoutes.get(`${PREFIX}/study-intelligence`, async (c: Context) => {
   }
 
   try {
-    // Step 1: Get all topics for this course via semesters → sections → topics
+    // Step 1: Get all section IDs for this course (semesters → sections)
+    const { data: sections, error: secErr } = await db
+      .from("sections")
+      .select("id, title, semesters!inner(course_id)")
+      .eq("semesters.course_id", courseId)
+      .is("deleted_at", null);
+
+    if (secErr) {
+      return safeErr(c, "Fetch sections for course", secErr);
+    }
+
+    if (!sections || sections.length === 0) {
+      return ok(c, {
+        topics: [],
+        course_stats: {
+          avg_difficulty: 0,
+          total_estimated_minutes: 0,
+          topics_analyzed: 0,
+          topics_pending_analysis: 0,
+        },
+      });
+    }
+
+    const sectionIds = sections.map((s: any) => s.id);
+    const sectionMap: Record<string, string> = {};
+    for (const s of sections) {
+      sectionMap[s.id] = s.title;
+    }
+
+    // Step 2: Get topics for these sections
     const { data: topics, error: topicErr } = await db
       .from("topics")
-      .select(`
-        id,
-        title,
-        section_id,
-        sections!inner (
-          id,
-          title,
-          semester_id,
-          semesters!inner (
-            id,
-            course_id
-          )
-        )
-      `)
-      .eq("sections.semesters.course_id", courseId)
+      .select("id, title, section_id")
+      .in("section_id", sectionIds)
       .is("deleted_at", null)
       .order("order_index", { ascending: true });
 
@@ -329,37 +345,43 @@ progressRoutes.get(`${PREFIX}/study-intelligence`, async (c: Context) => {
           avg_difficulty: 0,
           total_estimated_minutes: 0,
           topics_analyzed: 0,
-          topics_pending_analysis: topics?.length ?? 0,
+          topics_pending_analysis: 0,
         },
       });
     }
 
     const topicIds = topics.map((t: any) => t.id);
 
-    // Step 2: Get summaries for these topics
-    const { data: summaries, error: sumErr } = await db
-      .from("summaries")
-      .select("id, topic_id, estimated_study_minutes")
-      .in("topic_id", topicIds)
-      .eq("status", "published")
-      .eq("is_active", true)
-      .is("deleted_at", null);
+    // Step 3: Fetch summaries + keywords in parallel (both depend only on topicIds)
+    const [summariesResult, keywordsViaResult] = await Promise.all([
+      db
+        .from("summaries")
+        .select("id, topic_id, estimated_study_minutes")
+        .in("topic_id", topicIds)
+        .eq("status", "published")
+        .eq("is_active", true)
+        .is("deleted_at", null),
+      // Get keywords via summaries (we need summary_id for the topic lookup)
+      db
+        .from("keywords")
+        .select("id, summary_id, is_foundation, prerequisite_keyword_ids, summaries!inner(topic_id)")
+        .in("summaries.topic_id", topicIds)
+        .eq("is_active", true)
+        .is("deleted_at", null),
+    ]);
 
-    if (sumErr) {
-      return safeErr(c, "Fetch summaries for intelligence", sumErr);
+    if (summariesResult.error) {
+      return safeErr(c, "Fetch summaries for intelligence", summariesResult.error);
     }
+    const summaries = summariesResult.data || [];
 
     // Build summary → topic lookup
     const summaryToTopic: Record<string, string> = {};
-    const summaryIds: string[] = [];
-    if (summaries) {
-      for (const s of summaries) {
-        summaryToTopic[s.id] = s.topic_id;
-        summaryIds.push(s.id);
-      }
+    for (const s of summaries) {
+      summaryToTopic[s.id] = s.topic_id;
     }
 
-    // Step 3: Get keywords with prerequisite data
+    // Process keywords — group by topic
     let keywordsByTopic: Record<string, Array<{
       id: string;
       is_foundation: boolean;
@@ -367,21 +389,12 @@ progressRoutes.get(`${PREFIX}/study-intelligence`, async (c: Context) => {
       summary_id: string;
     }>> = {};
 
-    if (summaryIds.length > 0) {
-      const { data: keywords, error: kwErr } = await db
-        .from("keywords")
-        .select("id, summary_id, is_foundation, prerequisite_keyword_ids")
-        .in("summary_id", summaryIds)
-        .eq("is_active", true)
-        .is("deleted_at", null);
-
-      if (!kwErr && keywords) {
-        for (const kw of keywords) {
-          const topicId = summaryToTopic[kw.summary_id];
-          if (topicId) {
-            if (!keywordsByTopic[topicId]) keywordsByTopic[topicId] = [];
-            keywordsByTopic[topicId].push(kw);
-          }
+    if (!keywordsViaResult.error && keywordsViaResult.data) {
+      for (const kw of keywordsViaResult.data) {
+        const topicId = (kw as any).summaries?.topic_id ?? summaryToTopic[kw.summary_id];
+        if (topicId) {
+          if (!keywordsByTopic[topicId]) keywordsByTopic[topicId] = [];
+          keywordsByTopic[topicId].push(kw);
         }
       }
     }
@@ -414,8 +427,7 @@ progressRoutes.get(`${PREFIX}/study-intelligence`, async (c: Context) => {
     // Step 6: Build response
     let totalEstimatedMinutes = 0;
     const topicData = topics.map((t: any) => {
-      const section = t.sections;
-      const topicSummaries = summaries?.filter((s: any) => s.topic_id === t.id) || [];
+      const topicSummaries = summaries.filter((s: any) => s.topic_id === t.id);
       const estMinutes = topicSummaries.reduce(
         (sum: number, s: any) => sum + (s.estimated_study_minutes || 0), 0
       );
@@ -424,7 +436,7 @@ progressRoutes.get(`${PREFIX}/study-intelligence`, async (c: Context) => {
       return {
         id: t.id,
         name: t.title,
-        section_name: section?.title || '',
+        section_name: sectionMap[t.section_id] || '',
         // Difficulty fields — null until DB columns exist
         difficulty_estimate: null,
         estimated_study_minutes: estMinutes || null,
