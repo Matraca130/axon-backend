@@ -57,7 +57,7 @@ import {
   ALL_ROLES,
 } from "../../auth-helpers.ts";
 import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.ts";
-import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
+import { normalizeDifficulty, normalizeQuestionType, reconcileQuestionType } from "../../ai-normalizers.ts";
 import { sanitizeForPrompt } from "../../prompt-sanitize.ts";
 import { validateQuizQuestion, validateFlashcard } from "../../lib/validate-llm-output.ts";
 import { checkPlanLimit } from "../plans/access.ts";
@@ -169,7 +169,7 @@ async function generateAndInsert(
         summary_id: target.summary_id,
         keyword_id: target.keyword_id,
         subtopic_id: target.subtopic_id,
-        question_type: normalizeQuestionType(generated.question_type),
+        question_type: reconcileQuestionType(normalizeQuestionType(generated.question_type), generated),
         question: validated.question,
         options: validated.options,
         correct_answer: validated.correct_answer,

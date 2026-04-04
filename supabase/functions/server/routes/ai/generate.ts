@@ -40,7 +40,7 @@ import {
   ALL_ROLES,
 } from "../../auth-helpers.ts";
 import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.ts";
-import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
+import { normalizeDifficulty, normalizeQuestionType, reconcileQuestionType } from "../../ai-normalizers.ts";
 import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
 import { truncateForPrompt } from "./generate-smart-helpers.ts";
 import { validateQuizQuestion, validateFlashcard } from "../../lib/validate-llm-output.ts";
@@ -263,7 +263,7 @@ Responde en JSON con este schema exacto:
           summary_id: summaryId,
           keyword_id: keywordId,
           subtopic_id: subtopicId,
-          question_type: normalizeQuestionType(g.question_type),
+          question_type: reconcileQuestionType(normalizeQuestionType(g.question_type), g),
           question: validated.question,
           options: validated.options,
           correct_answer: validated.correct_answer,

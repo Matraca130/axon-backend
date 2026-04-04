@@ -93,6 +93,88 @@ export function normalizeQuestionType(qt: unknown): DbQuestionType {
   return QUESTION_TYPE_MAP[normalized] ?? "mcq";
 }
 
+// ── Question type ↔ structure validation (P1 FIX AXO-124) ───
+
+const TRUE_FALSE_VALUES = new Set([
+  "true", "false", "verdadero", "falso", "v", "f", "t", "si", "no",
+]);
+
+/**
+ * Infer the actual question type from the structure of the LLM output.
+ *
+ * Rules:
+ *   - No options (or empty) → "open" or "fill_blank" (keep declared type if compatible)
+ *   - Exactly 2 options that look like true/false → "true_false"
+ *   - 3+ options → "mcq"
+ *
+ * P1 FIX (AXO-124): The LLM may declare question_type: "mcq" but provide a
+ * true/false structure (or vice versa). This function detects the mismatch
+ * and returns the type that matches the actual data.
+ */
+export function inferQuestionTypeFromStructure(
+  g: Record<string, unknown>,
+): DbQuestionType | null {
+  const options = g.options;
+  if (!Array.isArray(options) || options.length === 0) {
+    // No options → compatible with open, fill_blank
+    return null; // can't infer, let declared type stand
+  }
+
+  const validOptions = options.filter(
+    (o) => typeof o === "string" && o.trim() !== "",
+  );
+
+  if (validOptions.length === 0) return null;
+
+  // Check if it looks like true/false
+  if (validOptions.length === 2) {
+    const bothTrueFalse = validOptions.every(
+      (o) => TRUE_FALSE_VALUES.has((o as string).toLowerCase().trim()),
+    );
+    if (bothTrueFalse) return "true_false";
+  }
+
+  // 2+ options with non-true/false content → mcq
+  return "mcq";
+}
+
+/**
+ * Validate that question_type matches the structure. If there's a mismatch,
+ * return the corrected type. If consistent, return the declared type.
+ */
+export function reconcileQuestionType(
+  declaredType: DbQuestionType,
+  g: Record<string, unknown>,
+): DbQuestionType {
+  const inferred = inferQuestionTypeFromStructure(g);
+
+  // If we can't infer from structure, trust the declared type
+  if (inferred === null) {
+    // But if declared type is "mcq" or "true_false" and there are no options,
+    // that's a mismatch — downgrade to "open"
+    const options = g.options;
+    const hasOptions = Array.isArray(options) && options.some(
+      (o) => typeof o === "string" && o.trim() !== "",
+    );
+    if ((declaredType === "mcq" || declaredType === "true_false") && !hasOptions) {
+      console.warn(
+        `[ai-normalizers] question_type "${declaredType}" but no options provided. Correcting to "open".`,
+      );
+      return "open";
+    }
+    return declaredType;
+  }
+
+  // If inferred matches declared, all good
+  if (inferred === declaredType) return declaredType;
+
+  // Mismatch: trust the structure over the declared type
+  console.warn(
+    `[ai-normalizers] question_type mismatch: declared "${declaredType}" but structure looks like "${inferred}". Correcting to "${inferred}".`,
+  );
+  return inferred;
+}
+
 // ── High-level sanitizer ─────────────────────────────────
 
 export interface SanitizedQuizFields {
@@ -104,6 +186,8 @@ export interface SanitizedQuizFields {
  * Sanitize all AI-generated quiz question fields that need normalization.
  * Call this on the parsed LLM JSON before DB insert.
  *
+ * P1 FIX (AXO-124): Now also reconciles question_type against actual structure.
+ *
  * Usage:
  *   const g = parseClaudeJson(result.text);
  *   const safe = sanitizeQuizFields(g);
@@ -114,8 +198,9 @@ export interface SanitizedQuizFields {
  *   });
  */
 export function sanitizeQuizFields(g: Record<string, unknown>): SanitizedQuizFields {
+  const declaredType = normalizeQuestionType(g.question_type);
   return {
-    question_type: normalizeQuestionType(g.question_type),
+    question_type: reconcileQuestionType(declaredType, g),
     difficulty: normalizeDifficulty(g.difficulty),
   };
 }
