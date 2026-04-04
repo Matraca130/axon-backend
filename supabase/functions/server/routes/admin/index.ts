@@ -2,14 +2,14 @@
  * routes/admin/index.ts — Admin module combiner
  *
  * Sub-modules:
- *   finals-periods.ts — CRUD for finals_periods table (admin/owner/professor)
+ *   finals-periods.ts — GET/POST/PATCH/DELETE /admin/finals-periods
  */
 
 import { Hono } from "npm:hono";
-import { finalsPeriodsCrudRoutes } from "./finals-periods.ts";
+import { finalsPeriodsRoutes } from "./finals-periods.ts";
 
 const adminRoutes = new Hono();
 
-adminRoutes.route("/", finalsPeriodsCrudRoutes);
+adminRoutes.route("/", finalsPeriodsRoutes);
 
 export { adminRoutes };
