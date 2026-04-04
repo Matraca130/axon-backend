@@ -162,14 +162,15 @@ async function generateAndInsert(
   const generated = parseClaudeJson(result.text) as Record<string, unknown>;
 
   if (action === "quiz_question") {
-    const validated = validateQuizQuestion(generated);  // AI-001 FIX: sanitize LLM output
+    const questionType = normalizeQuestionType(generated.question_type);
+    const validated = validateQuizQuestion(generated, questionType);  // AI-001 + AXO-126 FIX
     const { data: inserted, error: insertErr } = await db
       .from("quiz_questions")
       .insert({
         summary_id: target.summary_id,
         keyword_id: target.keyword_id,
         subtopic_id: target.subtopic_id,
-        question_type: normalizeQuestionType(generated.question_type),
+        question_type: validated.question_type,
         question: validated.question,
         options: validated.options,
         correct_answer: validated.correct_answer,
