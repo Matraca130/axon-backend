@@ -269,6 +269,188 @@ progressRoutes.get(`${PREFIX}/topics-overview`, async (c: Context) => {
   }
 });
 
+// ═════════════════════════════════════════════════════════════════
+// STUDY INTELLIGENCE: topic difficulty & prerequisite data
+//
+// GET /study-intelligence?course_id=xxx
+//
+// Returns per-topic structural data for the scheduling pipeline:
+//   - Topic names, sections, summary counts
+//   - Prerequisite relationships (aggregated from keywords)
+//   - Difficulty fields (null until DB columns are added)
+//
+// The frontend scheduling pipeline (runSchedulingPipeline) uses
+// this data for prerequisite ordering, cognitive load balancing,
+// and adaptive interleaving. Null difficulty fields default to 0.5.
+//
+// Max ~200 topics per course (safety: Supabase default limit).
+// ═════════════════════════════════════════════════════════════════
+
+progressRoutes.get(`${PREFIX}/study-intelligence`, async (c: Context) => {
+  const auth = await authenticate(c);
+  if (auth instanceof Response) return auth;
+  const { db } = auth;
+
+  const courseId = c.req.query("course_id");
+  if (!isUuid(courseId)) {
+    return err(c, "course_id must be a valid UUID", 400);
+  }
+
+  try {
+    // Step 1: Get all topics for this course via semesters → sections → topics
+    const { data: topics, error: topicErr } = await db
+      .from("topics")
+      .select(`
+        id,
+        title,
+        section_id,
+        sections!inner (
+          id,
+          title,
+          semester_id,
+          semesters!inner (
+            id,
+            course_id
+          )
+        )
+      `)
+      .eq("sections.semesters.course_id", courseId)
+      .is("deleted_at", null)
+      .order("order_index", { ascending: true });
+
+    if (topicErr) {
+      return safeErr(c, "Fetch topics for course", topicErr);
+    }
+
+    if (!topics || topics.length === 0) {
+      return ok(c, {
+        topics: [],
+        course_stats: {
+          avg_difficulty: 0,
+          total_estimated_minutes: 0,
+          topics_analyzed: 0,
+          topics_pending_analysis: topics?.length ?? 0,
+        },
+      });
+    }
+
+    const topicIds = topics.map((t: any) => t.id);
+
+    // Step 2: Get summaries for these topics
+    const { data: summaries, error: sumErr } = await db
+      .from("summaries")
+      .select("id, topic_id, estimated_study_minutes")
+      .in("topic_id", topicIds)
+      .eq("status", "published")
+      .eq("is_active", true)
+      .is("deleted_at", null);
+
+    if (sumErr) {
+      return safeErr(c, "Fetch summaries for intelligence", sumErr);
+    }
+
+    // Build summary → topic lookup
+    const summaryToTopic: Record<string, string> = {};
+    const summaryIds: string[] = [];
+    if (summaries) {
+      for (const s of summaries) {
+        summaryToTopic[s.id] = s.topic_id;
+        summaryIds.push(s.id);
+      }
+    }
+
+    // Step 3: Get keywords with prerequisite data
+    let keywordsByTopic: Record<string, Array<{
+      id: string;
+      is_foundation: boolean;
+      prerequisite_keyword_ids: string[];
+      summary_id: string;
+    }>> = {};
+
+    if (summaryIds.length > 0) {
+      const { data: keywords, error: kwErr } = await db
+        .from("keywords")
+        .select("id, summary_id, is_foundation, prerequisite_keyword_ids")
+        .in("summary_id", summaryIds)
+        .eq("is_active", true)
+        .is("deleted_at", null);
+
+      if (!kwErr && keywords) {
+        for (const kw of keywords) {
+          const topicId = summaryToTopic[kw.summary_id];
+          if (topicId) {
+            if (!keywordsByTopic[topicId]) keywordsByTopic[topicId] = [];
+            keywordsByTopic[topicId].push(kw);
+          }
+        }
+      }
+    }
+
+    // Step 4: Build keyword → topic reverse lookup (for prerequisite aggregation)
+    const keywordToTopic: Record<string, string> = {};
+    for (const [topicId, kws] of Object.entries(keywordsByTopic)) {
+      for (const kw of kws) {
+        keywordToTopic[kw.id] = topicId;
+      }
+    }
+
+    // Step 5: Aggregate prerequisite_keyword_ids → prerequisite_topic_ids
+    // For each topic, collect the topics that its keywords depend on
+    const topicPrereqs: Record<string, Set<string>> = {};
+    for (const [topicId, kws] of Object.entries(keywordsByTopic)) {
+      topicPrereqs[topicId] = new Set();
+      for (const kw of kws) {
+        if (kw.prerequisite_keyword_ids?.length) {
+          for (const prereqKwId of kw.prerequisite_keyword_ids) {
+            const prereqTopicId = keywordToTopic[prereqKwId];
+            if (prereqTopicId && prereqTopicId !== topicId) {
+              topicPrereqs[topicId].add(prereqTopicId);
+            }
+          }
+        }
+      }
+    }
+
+    // Step 6: Build response
+    let totalEstimatedMinutes = 0;
+    const topicData = topics.map((t: any) => {
+      const section = t.sections;
+      const topicSummaries = summaries?.filter((s: any) => s.topic_id === t.id) || [];
+      const estMinutes = topicSummaries.reduce(
+        (sum: number, s: any) => sum + (s.estimated_study_minutes || 0), 0
+      );
+      totalEstimatedMinutes += estMinutes;
+
+      return {
+        id: t.id,
+        name: t.title,
+        section_name: section?.title || '',
+        // Difficulty fields — null until DB columns exist
+        difficulty_estimate: null,
+        estimated_study_minutes: estMinutes || null,
+        bloom_level: null,
+        abstraction_level: null,
+        concept_density: null,
+        interrelation_score: null,
+        cohort_difficulty: null,
+        prerequisite_topic_ids: [...(topicPrereqs[t.id] || [])],
+      };
+    });
+
+    return ok(c, {
+      topics: topicData,
+      course_stats: {
+        avg_difficulty: 0, // No difficulty data yet
+        total_estimated_minutes: totalEstimatedMinutes,
+        topics_analyzed: 0,
+        topics_pending_analysis: topicData.length,
+      },
+    });
+  } catch (e: any) {
+    return safeErr(c, "Study intelligence", e);
+  }
+});
+
 // ─── Reading States ─────────────────────────────────────────────────────
 
 progressRoutes.get(`${PREFIX}/reading-states`, async (c: Context) => {
