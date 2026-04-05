@@ -265,6 +265,7 @@ Responde en JSON con este schema exacto:
           summary_id: summaryId,
           keyword_id: keywordId,
           subtopic_id: subtopicId,
+          block_id: blockId,
           question_type: validated.question_type,
           question: validated.question,
           options: validated.options,
