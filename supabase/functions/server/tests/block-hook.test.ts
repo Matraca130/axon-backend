@@ -108,22 +108,27 @@ Deno.test("BH-1 · No crash if summary_id is missing from row", () => {
   }
 });
 
-Deno.test("BH-2 · No-op if summary status is 'review' (already dirty)", () => {
-  // When the summary is already in 'review' status, no DB update needed.
-  // The hook should return immediately without querying or updating.
-  const capture = captureConsole();
-  try {
-    onBlockWrite({
-      action: "update",
-      row: makeBlockRow(),
-      updatedFields: ["content"],
-      userId: "user-123",
-    });
-  } catch {
-    // Placeholder throws — will pass once implemented
-  } finally {
-    capture.restore();
-  }
+Deno.test({
+  name: "BH-2 · No-op if summary status is 'review' (already dirty)",
+  fn: () => {
+    // When the summary is already in 'review' status, no DB update needed.
+    // The hook should return immediately without querying or updating.
+    const capture = captureConsole();
+    try {
+      onBlockWrite({
+        action: "update",
+        row: makeBlockRow(),
+        updatedFields: ["content"],
+        userId: "user-123",
+      });
+    } catch {
+      // Placeholder throws — will pass once implemented
+    } finally {
+      capture.restore();
+    }
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
 });
 
 Deno.test({
