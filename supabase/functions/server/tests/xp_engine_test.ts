@@ -158,7 +158,7 @@ Deno.test("XP_TABLE: complete_plan is the highest-value action", () => {
 // 2. awardXP — RPC Success Path
 // ═══════════════════════════════════════════════════════════════
 
-Deno.test("awardXP: returns AwardResult on successful RPC", async () => {
+Deno.test({ name: "awardXP: returns AwardResult on successful RPC", sanitizeOps: false, sanitizeResources: false, fn: async () => {
   // Note: awardXP uses getAdminClient().rpc() which hits 127.0.0.1:1 (ECONNREFUSED),
   // so the RPC path always fails in tests and falls back to JS calculation.
   // We test the fallback path by providing selectResult with existing XP.
@@ -187,7 +187,7 @@ Deno.test("awardXP: returns AwardResult on successful RPC", async () => {
   } finally {
     Math.random = origRandom;
   }
-});
+}});
 
 Deno.test("awardXP: on-time bonus adds +0.5 to multiplier", async () => {
   // Provide fsrsDueAt within 24h of now
