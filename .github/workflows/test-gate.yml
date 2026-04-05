@@ -40,9 +40,13 @@ jobs:
           key: deno-${{ runner.os }}-${{ hashFiles('**/deno.lock', '**/deno.json') }}
           restore-keys: deno-${{ runner.os }}-
       - name: Run unit tests
+        env:
+          SUPABASE_URL: "http://localhost:54321"
+          SUPABASE_ANON_KEY: "test-anon-key"
+          SUPABASE_SERVICE_ROLE_KEY: "test-service-role-key"
         run: |
           echo "=== tests/unit/ ==="
-          deno test tests/unit/ --no-check
+          deno test tests/unit/ --no-check --allow-env
 
   # ──────────────────────────────────────────────
   # JOB 2: Server-side tests (no network, fast)

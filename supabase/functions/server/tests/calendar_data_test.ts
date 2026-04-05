@@ -100,7 +100,7 @@ Deno.test("calendar/data: validates date format YYYY-MM-DD", () => {
   const validDates = ["2026-04-01", "2026-12-31", "2026-01-01"];
   const invalidDates = ["04-01-2026", "2026/04/01", "not-a-date", "2026-13-01", ""];
 
-  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  const dateRegex = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 
   for (const d of validDates) {
     assertEquals(dateRegex.test(d), true, `${d} should be valid`);
@@ -258,43 +258,50 @@ Deno.test("RLS: professor policy is SELECT only — no write access", () => {
 
 Deno.test("circuit breaker: timeout returns fallback array", async () => {
   // Simulate a slow query that exceeds timeout
+  let slowId: number, timerId: number;
   const slowQuery = new Promise<string[]>((resolve) => {
-    setTimeout(() => resolve(["late data"]), 500);
+    slowId = setTimeout(() => resolve(["late data"]), 500);
   });
 
   const fallback: string[] = [];
-  const timer = new Promise<string[]>((resolve) =>
-    setTimeout(() => resolve(fallback), 50), // 50ms timeout (fast for test)
-  );
+  const timer = new Promise<string[]>((resolve) => {
+    timerId = setTimeout(() => resolve(fallback), 50); // 50ms timeout (fast for test)
+  });
 
   const result = await Promise.race([slowQuery, timer]);
+  clearTimeout(slowId!);
+  clearTimeout(timerId!);
   assertEquals(result, fallback, "Should return empty fallback on timeout");
 });
 
 Deno.test("circuit breaker: fast query returns actual data", async () => {
+  let fastId: number, timerId: number;
   const fastQuery = new Promise<string[]>((resolve) => {
-    setTimeout(() => resolve(["real data"]), 10);
+    fastId = setTimeout(() => resolve(["real data"]), 10);
   });
 
   const fallback: string[] = [];
-  const timer = new Promise<string[]>((resolve) =>
-    setTimeout(() => resolve(fallback), 500),
-  );
+  const timer = new Promise<string[]>((resolve) => {
+    timerId = setTimeout(() => resolve(fallback), 500);
+  });
 
   const result = await Promise.race([fastQuery, timer]);
+  clearTimeout(fastId!);
+  clearTimeout(timerId!);
   assertEquals(result.length, 1, "Should return actual data when fast");
   assertEquals(result[0], "real data");
 });
 
 Deno.test("circuit breaker: Promise.all with mixed results", async () => {
   // Simulate: events ok, heatmap timeout, tasks ok
+  let heatmapId: number, heatmapTimerId: number;
   const eventsQuery = Promise.resolve([{ id: 1 }]);
-  const heatmapQuery = new Promise<unknown[]>((resolve) =>
-    setTimeout(() => resolve(["late"]), 500),
-  );
-  const heatmapTimer = new Promise<unknown[]>((resolve) =>
-    setTimeout(() => resolve([]), 50),
-  );
+  const heatmapQuery = new Promise<unknown[]>((resolve) => {
+    heatmapId = setTimeout(() => resolve(["late"]), 500);
+  });
+  const heatmapTimer = new Promise<unknown[]>((resolve) => {
+    heatmapTimerId = setTimeout(() => resolve([]), 50);
+  });
   const tasksQuery = Promise.resolve([{ id: 2 }]);
 
   const [events, heatmap, tasks] = await Promise.all([
@@ -303,6 +310,8 @@ Deno.test("circuit breaker: Promise.all with mixed results", async () => {
     tasksQuery,
   ]);
 
+  clearTimeout(heatmapId!);
+  clearTimeout(heatmapTimerId!);
   assertEquals(events.length, 1, "Events should have data");
   assertEquals(heatmap.length, 0, "Heatmap should be empty (timeout)");
   assertEquals(tasks.length, 1, "Tasks should have data");
