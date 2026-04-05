@@ -106,3 +106,8 @@ export function assertError(r: ApiResponse, expectedStatus: number): void {
     throw new Error(`Expected error ${expectedStatus}, got ${r.status}`);
   }
 }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function isUuid(s: unknown): boolean {
+  return typeof s === "string" && UUID_RE.test(s);
+}

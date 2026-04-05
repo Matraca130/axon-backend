@@ -158,7 +158,7 @@ app.all("*", (c) => {
       error: "Route not found",
       path: c.req.path,
       method: c.req.method,
-      hint: "Check that the route path and HTTP method are correct.",
+      hint: "Verify the route path and HTTP method are correct.",
     },
     404,
   );
