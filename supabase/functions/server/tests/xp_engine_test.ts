@@ -155,41 +155,43 @@ Deno.test("XP_TABLE: complete_plan is the highest-value action", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// Stub Math.random for all awardXP tests
+// The 10% variable reward (Math.random < 0.1) makes tests flaky.
+// Stub globally before awardXP section; restore after last test.
+// ═══════════════════════════════════════════════════════════════
+const _origRandom = Math.random;
+Math.random = () => 0.5; // > 0.1, variable reward never triggers
+
+// ═══════════════════════════════════════════════════════════════
 // 2. awardXP — RPC Success Path
+// Note: awardXP uses getAdminClient().rpc() which hits 127.0.0.1:1
+// (ECONNREFUSED), so the RPC always fails and falls to JS fallback.
+// sanitizeOps/Resources: false needed because Supabase client
+// starts an autoRefreshToken interval.
 // ═══════════════════════════════════════════════════════════════
 
 Deno.test({ name: "awardXP: returns AwardResult on successful RPC", sanitizeOps: false, sanitizeResources: false, fn: async () => {
-  // Note: awardXP uses getAdminClient().rpc() which hits 127.0.0.1:1 (ECONNREFUSED),
-  // so the RPC path always fails in tests and falls back to JS calculation.
-  // We test the fallback path by providing selectResult with existing XP.
-  // Stub Math.random to avoid non-deterministic variable reward bonus.
-  const origRandom = Math.random;
-  Math.random = () => 0.5; // > 0.1, so variable reward won't trigger
-  try {
-    const db = mockDb({
-      selectResult: {
-        data: { total_xp: 90, xp_today: 0, xp_this_week: 0 },
-        error: null,
-      },
-    });
+  const db = mockDb({
+    selectResult: {
+      data: { total_xp: 90, xp_today: 0, xp_this_week: 0 },
+      error: null,
+    },
+  });
 
-    const result = await awardXP({
-      db,
-      studentId: "student-123",
-      institutionId: "inst-456",
-      action: "review_correct",
-      xpBase: 10,
-    });
+  const result = await awardXP({
+    db,
+    studentId: "student-123",
+    institutionId: "inst-456",
+    action: "review_correct",
+    xpBase: 10,
+  });
 
-    assertExists(result);
-    assertEquals(result!.xp_awarded, 10);
-    assertEquals(result!.level, 2); // 90 + 10 = 100 XP → level 2
-  } finally {
-    Math.random = origRandom;
-  }
+  assertExists(result);
+  assertEquals(result!.xp_awarded, 10);
+  assertEquals(result!.level, 2); // 90 + 10 = 100 XP → level 2
 }});
 
-Deno.test("awardXP: on-time bonus adds +0.5 to multiplier", async () => {
+Deno.test({ name: "awardXP: on-time bonus adds +0.5 to multiplier", sanitizeOps: false, sanitizeResources: false, fn: async () => {
   // Provide fsrsDueAt within 24h of now
   const now = new Date();
   const dueAt = new Date(now.getTime() - 1 * 60 * 60 * 1000); // 1h ago
@@ -223,9 +225,9 @@ Deno.test("awardXP: on-time bonus adds +0.5 to multiplier", async () => {
   // The RPC was called with multiplier >= 1.5 (on_time adds 0.5)
   // We can't verify the exact RPC params, but the mock returns what we set
   assertEquals(result!.xp_awarded, 15);
-});
+}});
 
-Deno.test("awardXP: flow zone bonus for BKT p_know in [0.3, 0.7]", async () => {
+Deno.test({ name: "awardXP: flow zone bonus for BKT p_know in [0.3, 0.7]", sanitizeOps: false, sanitizeResources: false, fn: async () => {
   const db = mockDb({
     rpcResult: {
       data: {
@@ -253,9 +255,9 @@ Deno.test("awardXP: flow zone bonus for BKT p_know in [0.3, 0.7]", async () => {
 
   assertExists(result);
   assertEquals(result!.bonus_type, "flow_zone");
-});
+}});
 
-Deno.test("awardXP: BKT p_know outside flow zone (0.9) gets no flow bonus", async () => {
+Deno.test({ name: "awardXP: BKT p_know outside flow zone (0.9) gets no flow bonus", sanitizeOps: false, sanitizeResources: false, fn: async () => {
   const db = mockDb({
     rpcResult: {
       data: {
@@ -283,9 +285,9 @@ Deno.test("awardXP: BKT p_know outside flow zone (0.9) gets no flow bonus", asyn
 
   assertExists(result);
   // No flow_zone bonus in the bonus_type
-});
+}});
 
-Deno.test("awardXP: streak multiplier at 7+ days adds +0.5", async () => {
+Deno.test({ name: "awardXP: streak multiplier at 7+ days adds +0.5", sanitizeOps: false, sanitizeResources: false, fn: async () => {
   const db = mockDb({
     rpcResult: {
       data: {
@@ -312,9 +314,9 @@ Deno.test("awardXP: streak multiplier at 7+ days adds +0.5", async () => {
   });
 
   assertExists(result);
-});
+}});
 
-Deno.test("awardXP: streak at 6 days gets NO streak bonus", async () => {
+Deno.test({ name: "awardXP: streak at 6 days gets NO streak bonus", sanitizeOps: false, sanitizeResources: false, fn: async () => {
   const db = mockDb({
     rpcResult: {
       data: {
@@ -341,13 +343,13 @@ Deno.test("awardXP: streak at 6 days gets NO streak bonus", async () => {
   });
 
   assertExists(result);
-});
+}});
 
 // ═══════════════════════════════════════════════════════════════
 // 3. awardXP — RPC Failure → JS Fallback
 // ═══════════════════════════════════════════════════════════════
 
-Deno.test("awardXP: returns null on total failure (RPC + fallback both fail)", async () => {
+Deno.test({ name: "awardXP: returns null on total failure (RPC + fallback both fail)", sanitizeOps: false, sanitizeResources: false, fn: async () => {
   // Mock where RPC fails AND fallback insert fails
   const db = mockDb({
     rpcResult: { data: null, error: { message: "RPC not found" } },
@@ -374,7 +376,7 @@ Deno.test("awardXP: returns null on total failure (RPC + fallback both fail)", a
     console.warn = origWarn;
     console.log = origLog;
   }
-});
+}});
 
 Deno.test("awardXP: returns null for zero xpBase (G-005 validation)", async () => {
   const db = mockDb({ rpcResult: { data: null, error: null } });
@@ -463,7 +465,7 @@ Deno.test("Bonus math: variable reward is +1.0 (2x), not *2.0 (multiplicative)",
 // 5. Edge Cases
 // ═══════════════════════════════════════════════════════════════
 
-Deno.test("awardXP: fsrsDueAt more than 24h ago gets no on-time bonus", async () => {
+Deno.test({ name: "awardXP: fsrsDueAt more than 24h ago gets no on-time bonus", sanitizeOps: false, sanitizeResources: false, fn: async () => {
   const twoDaysAgo = new Date(
     Date.now() - 48 * 60 * 60 * 1000,
   ).toISOString();
@@ -495,9 +497,9 @@ Deno.test("awardXP: fsrsDueAt more than 24h ago gets no on-time bonus", async ()
 
   assertExists(result);
   // No on_time bonus should be applied
-});
+}});
 
-Deno.test("awardXP: null bktPKnow gets no flow zone bonus", async () => {
+Deno.test({ name: "awardXP: null bktPKnow gets no flow zone bonus", sanitizeOps: false, sanitizeResources: false, fn: async () => {
   const db = mockDb({
     rpcResult: {
       data: {
@@ -524,9 +526,9 @@ Deno.test("awardXP: null bktPKnow gets no flow zone bonus", async () => {
   });
 
   assertExists(result);
-});
+}});
 
-Deno.test("awardXP: bktPKnow at boundary 0.3 IS in flow zone", async () => {
+Deno.test({ name: "awardXP: bktPKnow at boundary 0.3 IS in flow zone", sanitizeOps: false, sanitizeResources: false, fn: async () => {
   const db = mockDb({
     rpcResult: {
       data: {
@@ -553,9 +555,9 @@ Deno.test("awardXP: bktPKnow at boundary 0.3 IS in flow zone", async () => {
   });
 
   assertExists(result);
-});
+}});
 
-Deno.test("awardXP: bktPKnow at boundary 0.7 IS in flow zone", async () => {
+Deno.test({ name: "awardXP: bktPKnow at boundary 0.7 IS in flow zone", sanitizeOps: false, sanitizeResources: false, fn: async () => {
   const db = mockDb({
     rpcResult: {
       data: {
@@ -582,9 +584,9 @@ Deno.test("awardXP: bktPKnow at boundary 0.7 IS in flow zone", async () => {
   });
 
   assertExists(result);
-});
+}});
 
-Deno.test("awardXP: bktPKnow at 0.29 is NOT in flow zone", async () => {
+Deno.test({ name: "awardXP: bktPKnow at 0.29 is NOT in flow zone", sanitizeOps: false, sanitizeResources: false, fn: async () => {
   const db = mockDb({
     rpcResult: {
       data: {
@@ -611,4 +613,7 @@ Deno.test("awardXP: bktPKnow at 0.29 is NOT in flow zone", async () => {
   });
 
   assertExists(result);
-});
+}});
+
+// Restore Math.random after all awardXP tests
+Math.random = _origRandom;
