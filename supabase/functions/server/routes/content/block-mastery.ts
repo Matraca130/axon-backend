@@ -1,24 +1,21 @@
 /**
  * block-mastery.ts — GET /server/summaries/:id/block-mastery
  *
- * Returns mastery level (0–1) per summary block based on BKT p_know values.
+ * Returns mastery level (0–1) per summary block from block_mastery_states.
  *
- * Algorithm (3 DB queries max):
- *   Q1: Fetch active summary_blocks (id, type, content)
- *   Q2: Fetch keywords (name) + their subtopics (id) for the summary
- *   Q3: Fetch bkt_states (p_know) for all relevant subtopics for the student
+ * Algorithm (2 DB queries):
+ *   Q1: Fetch active summary_block IDs for the summary
+ *   Q2: Fetch block_mastery_states (p_know) for all blocks for the student
  *
- * Client-side computation:
- *   - Regex-scan each block's content fields for {{keyword_name}} markers
- *   - Map keywords → subtopics → AVG(p_know) = block mastery
- *   - Blocks without keywords or without BKT data → mastery = -1
+ * Blocks without a block_mastery_states row → mastery = -1 (no data).
+ * This is independent from keyword-based BKT — uses the per-block mastery
+ * updated by POST /block-review after block quizzes.
  */
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { requireInstitutionRole, isDenied, ALL_ROLES } from "../../auth-helpers.ts";
-import { extractKeywordsFromBlock, calculateBlockMastery } from "../../lib/block-keywords.ts";
 import type { Context } from "npm:hono";
 
 export const blockMasteryRoutes = new Hono();
@@ -27,7 +24,7 @@ export const blockMasteryRoutes = new Hono();
  * GET /server/summaries/:id/block-mastery
  *
  * Returns a map of block_id → mastery (0–1, or -1 if no data).
- * Uses the authenticated user's BKT states (RLS-safe, no admin client).
+ * Uses the authenticated user's block_mastery_states (RLS-safe).
  */
 blockMasteryRoutes.get(
   `${PREFIX}/summaries/:id/block-mastery`,
@@ -54,86 +51,40 @@ blockMasteryRoutes.get(
     );
     if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
-    // ── Q1: Fetch active blocks ─────────────────────────────
+    // ── Q1: Fetch active block IDs ──────────────────────────
     const { data: blocks, error: blocksErr } = await db
       .from("summary_blocks")
-      .select("id, type, content")
+      .select("id")
       .eq("summary_id", summaryId)
       .eq("is_active", true);
 
     if (blocksErr) return safeErr(c, "Fetch blocks", blocksErr);
     if (!blocks || blocks.length === 0) return ok(c, {});
 
-    // ── Client-side: extract keywords per block ─────────────
-    // Map<block_id, keyword_name[]> (lowercased for matching)
-    const blockKeywords = new Map<string, string[]>();
-    const allKeywordNamesSet = new Set<string>();
+    const blockIds = blocks.map((b: { id: string }) => b.id);
 
-    for (const block of blocks) {
-      const keywords = extractKeywordsFromBlock(block);
-      const lowered = keywords.map((k) => k.toLowerCase());
-      blockKeywords.set(block.id, lowered);
-      for (const kw of lowered) {
-        allKeywordNamesSet.add(kw);
+    // ── Q2: Fetch block mastery states ──────────────────────
+    const { data: masteryData, error: masteryErr } = await db
+      .from("block_mastery_states")
+      .select("block_id, p_know")
+      .eq("student_id", user.id)
+      .in("block_id", blockIds);
+
+    if (masteryErr) return safeErr(c, "Fetch block mastery", masteryErr);
+
+    // Build lookup from fetched data
+    const masteryMap = new Map<string, number>();
+    if (masteryData) {
+      for (const row of masteryData) {
+        masteryMap.set(row.block_id, row.p_know);
       }
     }
 
-    // If no blocks have keywords, all mastery = -1
-    if (allKeywordNamesSet.size === 0) {
-      const result: Record<string, number> = {};
-      for (const block of blocks) {
-        result[block.id] = -1;
-      }
-      return ok(c, result);
+    // ── Build result: blocks with data → p_know, without → -1
+    const result: Record<string, number> = {};
+    for (const blockId of blockIds) {
+      result[blockId] = masteryMap.get(blockId) ?? -1;
     }
-
-    // ── Q2: Fetch keywords + their subtopic IDs ─────────────
-    // Join keywords → subtopics for this summary
-    const { data: keywordsData, error: kwErr } = await db
-      .from("keywords")
-      .select("id, name, subtopics(id)")
-      .eq("summary_id", summaryId)
-      .eq("is_active", true);
-
-    if (kwErr) return safeErr(c, "Fetch keywords", kwErr);
-
-    // Build Map<keyword_name_lowercase, subtopic_id[]>
-    const kwToSubtopics = new Map<string, string[]>();
-    const allSubtopicIds: string[] = [];
-
-    if (keywordsData) {
-      for (const kw of keywordsData) {
-        const name = (kw.name as string).toLowerCase();
-        const subtopics = (kw.subtopics as { id: string }[]) || [];
-        const stIds = subtopics.map((st) => st.id);
-        kwToSubtopics.set(name, stIds);
-        allSubtopicIds.push(...stIds);
-      }
-    }
-
-    // ── Q3: Fetch BKT states for all subtopics ──────────────
-    // Uses authenticated user client (RLS) — only returns this student's data
-    const subtopicPKnow = new Map<string, number>();
-
-    if (allSubtopicIds.length > 0) {
-      const { data: bktData, error: bktErr } = await db
-        .from("bkt_states")
-        .select("subtopic_id, p_know")
-        .in("subtopic_id", allSubtopicIds)
-        .eq("student_id", user.id);
-
-      if (bktErr) return safeErr(c, "Fetch BKT states", bktErr);
-
-      if (bktData) {
-        for (const state of bktData) {
-          subtopicPKnow.set(state.subtopic_id, state.p_know);
-        }
-      }
-    }
-
-    // ── Calculate mastery per block ─────────────────────────
-    // Uses shared lib function (same code tested in block_mastery_test.ts)
-    const result = calculateBlockMastery(blocks, kwToSubtopics, subtopicPKnow);
 
     return ok(c, result);
   },
