@@ -101,6 +101,19 @@ All routes are flat: `/things?parent_id=xxx`. Never `/parents/:id/things`.
 - Playback: `@mux/mux-player-react` with signed JWTs
 - Anti-patterns: `<input placeholder="URL del video">`, `platform: "youtube"`, `detectPlatform()`
 
+### Quiz Domain — Table Map (DO NOT CONFUSE)
+
+| Table | What it stores | `block_id`? | Key columns |
+|---|---|---|---|
+| **`quiz_questions`** | Individual questions (text, options, answer, difficulty) | **YES** — per-block filtering | `summary_id`, `keyword_id`, `block_id`, `quiz_id` |
+| **`quizzes`** | Container/grouper with title + time limit (optional) | **NO** — summary-scoped only | `summary_id` |
+| **`quiz_attempts`** | Each student answer to a question | No | `quiz_question_id`, `student_id` |
+| **`study_sessions`** | Study session (groups attempts) | No | `student_id`, `course_id` |
+
+- **Per-block filtering = `quiz_questions.block_id`**. The `quizzes` table has NO `block_id`.
+- AI endpoints (`generate.ts`) MUST include `block_id` in INSERT when provided.
+- `generate-smart.ts` / `pre-generate.ts` generate by keyword, not block — intentional.
+
 ### AI / RAG Rules
 
 - **Model constant:** NEVER hardcode model names in route files. Import `GENERATE_MODEL` from `gemini.ts` (single source of truth, fix D-18)
