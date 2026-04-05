@@ -171,7 +171,7 @@ registerCrud(studentRoutes, {
   softDelete: true,
   hasIsActive: false,
   requiredFields: ["start_offset", "end_offset"],
-  createFields: ["start_offset", "end_offset", "color", "note"],
+  createFields: ["start_offset", "end_offset", "color", "note", "block_id"],
   updateFields: ["color", "note"],
 });
 
