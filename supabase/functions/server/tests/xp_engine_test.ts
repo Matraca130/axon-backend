@@ -162,24 +162,31 @@ Deno.test("awardXP: returns AwardResult on successful RPC", async () => {
   // Note: awardXP uses getAdminClient().rpc() which hits 127.0.0.1:1 (ECONNREFUSED),
   // so the RPC path always fails in tests and falls back to JS calculation.
   // We test the fallback path by providing selectResult with existing XP.
-  const db = mockDb({
-    selectResult: {
-      data: { total_xp: 90, xp_today: 0, xp_this_week: 0 },
-      error: null,
-    },
-  });
+  // Stub Math.random to avoid non-deterministic variable reward bonus.
+  const origRandom = Math.random;
+  Math.random = () => 0.5; // > 0.1, so variable reward won't trigger
+  try {
+    const db = mockDb({
+      selectResult: {
+        data: { total_xp: 90, xp_today: 0, xp_this_week: 0 },
+        error: null,
+      },
+    });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "review_correct",
-    xpBase: 10,
-  });
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "review_correct",
+      xpBase: 10,
+    });
 
-  assertExists(result);
-  assertEquals(result!.xp_awarded, 10);
-  assertEquals(result!.level, 2); // 90 + 10 = 100 XP → level 2
+    assertExists(result);
+    assertEquals(result!.xp_awarded, 10);
+    assertEquals(result!.level, 2); // 90 + 10 = 100 XP → level 2
+  } finally {
+    Math.random = origRandom;
+  }
 });
 
 Deno.test("awardXP: on-time bonus adds +0.5 to multiplier", async () => {
