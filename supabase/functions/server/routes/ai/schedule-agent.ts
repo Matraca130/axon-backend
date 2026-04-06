@@ -282,7 +282,9 @@ Responde con JSON:
 // The AI returns an array of operations (delete, reorder, reschedule, update).
 // We execute each one, verifying ownership through the study_plans join.
 
-const MAX_OPS = 50; // Safety cap
+// Safety cap: prevents DoS via large AI-generated operation batches.
+// 50 ops ≈ ~10s at ~200ms/op (ownership check + update per op).
+const MAX_OPS = 50;
 
 interface AiOperation {
   op: string;
@@ -390,6 +392,10 @@ async function executeAiOperations(
     }
   }
 
+  const truncated = operations.length > MAX_OPS;
+  if (truncated) {
+    console.warn(`[Schedule Agent] Organize: truncated ${operations.length} ops to ${MAX_OPS}`);
+  }
   console.log(`[Schedule Agent] Organize: ${results.filter((r) => r.success).length}/${results.length} ops succeeded`);
   return results;
 }
@@ -477,11 +483,13 @@ aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => 
 
   // -- Fetch real student context from DB (tasks, mastery, activity)
   let dbContext: DbStudentContext;
+  let degradedMode = false;
   try {
     dbContext = await fetchStudentContext(db, user.id);
   } catch (e) {
     console.warn("[Schedule Agent] DB context fetch failed, proceeding with empty context:", e);
     dbContext = { pendingTasks: [], completedTodayCount: 0, blockMastery: [], recentActivity: [], weakTopics: [] };
+    degradedMode = true;
   }
 
   // -- Build prompt and call Claude
@@ -538,6 +546,7 @@ aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => 
         tokensUsed,
         latencyMs,
         action,
+        degradedMode,
       },
     });
   } catch (e) {
