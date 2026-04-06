@@ -301,25 +301,29 @@ async function executeAiOperations(
   const results: Array<{ op: string; taskId: string; success: boolean; error?: string }> = [];
   const ops = operations.slice(0, MAX_OPS);
 
-  // Pre-fetch all task IDs the student owns for security validation
-  const taskIds = [...new Set(ops.map((o) => o.taskId).filter(Boolean))];
-  if (taskIds.length === 0) return results;
-
-  const { data: ownedTasks } = await db
-    .from("study_plan_tasks")
-    .select("id, study_plans!inner(student_id)")
-    .in("id", taskIds)
-    .eq("study_plans.student_id", userId);
-
-  const ownedIds = new Set((ownedTasks ?? []).map((t: any) => t.id));
+  // Helper: builds a query scoped to tasks owned by this user (atomic ownership check).
+  // RLS also enforces this, but the explicit join is defense-in-depth.
+  const ownedTask = (taskId: string) =>
+    db.from("study_plan_tasks")
+      .select("id, study_plan_id, study_plans!inner(student_id)")
+      .eq("id", taskId)
+      .eq("study_plans.student_id", userId)
+      .maybeSingle();
 
   for (const op of ops) {
-    if (!op.taskId || !ownedIds.has(op.taskId)) {
-      results.push({ op: op.op, taskId: op.taskId, success: false, error: "Task not found or not owned" });
+    if (!op.taskId) {
+      results.push({ op: op.op, taskId: op.taskId, success: false, error: "Missing taskId" });
       continue;
     }
 
     try {
+      // Verify ownership atomically per operation
+      const { data: task } = await ownedTask(op.taskId);
+      if (!task) {
+        results.push({ op: op.op, taskId: op.taskId, success: false, error: "Task not found or not owned" });
+        continue;
+      }
+
       switch (op.op) {
         case "delete": {
           const { error: delErr } = await db
@@ -361,8 +365,7 @@ async function executeAiOperations(
             results.push({ op: "update", taskId: op.taskId, success: false, error: "fields required" });
             break;
           }
-          // Only allow safe fields
-          const allowedFields = ["estimated_minutes", "original_method", "task_kind", "scheduled_date"];
+          const allowedFields = ["estimated_minutes", "original_method", "task_kind", "scheduled_date", "order_index"];
           const safeFields: Record<string, unknown> = {};
           for (const key of allowedFields) {
             if (key in op.fields) safeFields[key] = op.fields[key];
