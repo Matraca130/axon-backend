@@ -8,12 +8,17 @@
  *   completedTaskId?: string (for reschedule action)
  *   model?: ClaudeModel (default: sonnet)
  *
+ * ENRICHMENT (v2): The backend now queries the database for the student's
+ * actual tasks, mastery states, and recent activity — the AI sees the REAL
+ * state, not just what the frontend sends.
+ *
  * Uses Claude to generate personalized study schedules for medical students.
  * Logs every invocation to ai_schedule_logs for analytics.
  */
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
+import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { authenticate, ok, err, safeJson, getAdminClient, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import {
@@ -32,6 +37,115 @@ const SCHEDULE_RATE_WINDOW_MS = 3600000;
 const VALID_ACTIONS = ["distribute", "recommend-today", "reschedule", "weekly-insight"] as const;
 type ScheduleAction = typeof VALID_ACTIONS[number];
 
+// ── DB context fetcher ─────────────────────────────────────────────
+// Queries the student's REAL state from the database so the AI sees
+// actual tasks, mastery, and activity — not just the frontend payload.
+
+interface DbStudentContext {
+  pendingTasks: Array<{
+    id: string;
+    item_type: string;
+    status: string;
+    original_method: string | null;
+    scheduled_date: string | null;
+    estimated_minutes: number | null;
+    task_kind: string | null;
+    plan_name: string;
+    plan_status: string;
+  }>;
+  completedTodayCount: number;
+  blockMastery: Array<{ block_id: string; p_know: number }>;
+  recentActivity: Array<{
+    date: string;
+    study_minutes: number;
+    sessions_count: number;
+  }>;
+  weakTopics: string[];
+}
+
+async function fetchStudentContext(
+  db: SupabaseClient,
+  userId: string,
+): Promise<DbStudentContext> {
+  const today = new Date().toISOString().slice(0, 10);
+  const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+
+  // Run all queries in parallel
+  const [tasksRes, completedRes, masteryRes, activityRes, weakRes] = await Promise.all([
+    // 1. Pending tasks from all active plans (max 100)
+    db
+      .from("study_plan_tasks")
+      .select("id, item_type, status, original_method, scheduled_date, estimated_minutes, task_kind, study_plans!inner(name, status)")
+      .eq("status", "pending")
+      .eq("study_plans.student_id", userId)
+      .in("study_plans.status", ["active", "in_progress"])
+      .order("scheduled_date", { ascending: true, nullsFirst: false })
+      .limit(100),
+
+    // 2. Tasks completed today
+    db
+      .from("study_plan_tasks")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "completed")
+      .gte("completed_at", `${today}T00:00:00`)
+      .lte("completed_at", `${today}T23:59:59`),
+
+    // 3. Block mastery states (latest per block)
+    db
+      .from("block_mastery_states")
+      .select("block_id, p_know")
+      .eq("student_id", userId)
+      .order("last_attempt_at", { ascending: false })
+      .limit(50),
+
+    // 4. Daily activity last 7 days
+    db
+      .from("daily_activities")
+      .select("date, study_minutes, sessions_count")
+      .eq("student_id", userId)
+      .gte("date", sevenDaysAgo)
+      .order("date", { ascending: false }),
+
+    // 5. Weak topics via BKT (p_know < 0.4)
+    db
+      .from("bkt_states")
+      .select("subtopic_id, p_know, subtopics!inner(name)")
+      .eq("student_id", userId)
+      .lt("p_know", 0.4)
+      .order("p_know", { ascending: true })
+      .limit(20),
+  ]);
+
+  const pendingTasks = (tasksRes.data ?? []).map((t: any) => ({
+    id: t.id,
+    item_type: t.item_type,
+    status: t.status,
+    original_method: t.original_method,
+    scheduled_date: t.scheduled_date,
+    estimated_minutes: t.estimated_minutes,
+    task_kind: t.task_kind,
+    plan_name: t.study_plans?.name ?? "Sin nombre",
+    plan_status: t.study_plans?.status ?? "unknown",
+  }));
+
+  return {
+    pendingTasks,
+    completedTodayCount: completedRes.count ?? 0,
+    blockMastery: (masteryRes.data ?? []).map((m: any) => ({
+      block_id: m.block_id,
+      p_know: m.p_know,
+    })),
+    recentActivity: (activityRes.data ?? []).map((a: any) => ({
+      date: a.date,
+      study_minutes: a.study_minutes ?? 0,
+      sessions_count: a.sessions_count ?? 0,
+    })),
+    weakTopics: (weakRes.data ?? []).map(
+      (w: any) => `${w.subtopics?.name ?? "Tema desconocido"} (p_know: ${w.p_know})`,
+    ),
+  };
+}
+
 const SYSTEM_PROMPT = `Eres un tutor medico experto en optimizacion de estudio y repeticion espaciada. Analizas el perfil de un estudiante de medicina y generas planes de estudio personalizados.
 
 REGLAS:
@@ -41,16 +155,45 @@ REGLAS:
 4. Respeta weeklyHours del alumno
 5. Temas needsReview=true van primero
 6. Estima tiempos del historial del alumno, no promedios generales
+7. ANALIZA LAS TAREAS PENDIENTES del alumno — no recomiendes lo que ya esta programado
+8. Considera los temas debiles (weakTopics con bajo p_know) como prioridad alta
+9. Si el alumno ya completo tareas hoy, ajusta las recomendaciones al tiempo restante
+10. Usa la actividad reciente (7 dias) para detectar patrones de estudio del alumno
 
 RESPONDE EXCLUSIVAMENTE en JSON valido sin markdown.`;
 
 function buildUserMessage(
   action: ScheduleAction,
   studentProfile: Record<string, unknown>,
+  dbContext: DbStudentContext,
   planContext?: Record<string, unknown>,
   completedTaskId?: string,
 ): string {
   const profileStr = JSON.stringify(studentProfile);
+
+  const contextBlock = `
+== DATOS REALES DEL ESTUDIANTE (base de datos) ==
+
+Tareas pendientes (${dbContext.pendingTasks.length}):
+${dbContext.pendingTasks.length > 0
+    ? JSON.stringify(dbContext.pendingTasks.slice(0, 30))
+    : "Ninguna tarea pendiente en planes activos."}
+
+Tareas completadas hoy: ${dbContext.completedTodayCount}
+
+Temas debiles (bajo dominio):
+${dbContext.weakTopics.length > 0 ? dbContext.weakTopics.join(", ") : "Sin datos de temas debiles."}
+
+Actividad ultimos 7 dias:
+${dbContext.recentActivity.length > 0
+    ? dbContext.recentActivity.map((a) => `${a.date}: ${a.study_minutes}min, ${a.sessions_count} sesiones`).join("\n")
+    : "Sin actividad registrada."}
+
+Dominio por bloque (${dbContext.blockMastery.length} bloques con datos):
+${dbContext.blockMastery.length > 0
+    ? `Promedio p_know: ${(dbContext.blockMastery.reduce((s, m) => s + m.p_know, 0) / dbContext.blockMastery.length).toFixed(3)}`
+    : "Sin datos de mastery por bloque."}
+`;
 
   switch (action) {
     case "distribute":
@@ -59,7 +202,9 @@ function buildUserMessage(
 Plan y tareas pendientes:
 ${JSON.stringify(planContext ?? {})}
 
-Perfil del alumno:
+${contextBlock}
+
+Perfil del alumno (frontend):
 ${profileStr}
 
 Responde con JSON: { "schedule": [ { "day": "lunes", "blocks": [ { "startTime": "08:00", "duration_min": 30, "taskType": "flashcard"|"quiz"|"read"|"review", "topicId": "...", "topicName": "...", "reason": "..." } ] } ], "totalHours": number, "tips": ["..."] }`;
@@ -67,8 +212,12 @@ Responde con JSON: { "schedule": [ { "day": "lunes", "blocks": [ { "startTime": 
     case "recommend-today":
       return `Recomienda que estudiar hoy para este alumno de medicina.
 
-Perfil del alumno:
+${contextBlock}
+
+Perfil del alumno (frontend):
 ${profileStr}
+
+IMPORTANTE: Toma en cuenta las tareas que YA tiene pendientes para hoy. No dupliques lo que ya esta programado. Si tiene tareas para hoy, prioriza esas. Si ya completo algunas, sugiere las siguientes. Si no tiene plan, recomienda basandote en sus temas debiles y mastery.
 
 Responde con JSON: { "recommendations": [ { "priority": 1, "taskType": "flashcard"|"quiz"|"read"|"review", "topicId": "...", "topicName": "...", "estimatedMinutes": number, "reason": "..." } ], "totalMinutes": number, "motivationalNote": "..." }`;
 
@@ -78,7 +227,9 @@ Responde con JSON: { "recommendations": [ { "priority": 1, "taskType": "flashcar
 Tareas y plan actual:
 ${JSON.stringify(planContext ?? {})}
 
-Perfil del alumno:
+${contextBlock}
+
+Perfil del alumno (frontend):
 ${profileStr}
 
 Responde con JSON: { "updatedSchedule": [ { "day": "...", "blocks": [ { "startTime": "...", "duration_min": number, "taskType": "...", "topicId": "...", "topicName": "...", "reason": "..." } ] } ], "adjustmentReason": "...", "nextPriority": "..." }`;
@@ -86,7 +237,9 @@ Responde con JSON: { "updatedSchedule": [ { "day": "...", "blocks": [ { "startTi
     case "weekly-insight":
       return `Genera un analisis semanal del progreso de este alumno de medicina.
 
-Perfil del alumno:
+${contextBlock}
+
+Perfil del alumno (frontend):
 ${profileStr}
 
 Responde con JSON: { "weekSummary": "...", "strengths": ["..."], "weaknesses": ["..."], "masteryTrend": "improving"|"stable"|"declining", "recommendedFocus": [ { "topicName": "...", "reason": "...", "suggestedMethod": "..." } ], "estimatedWeeklyProgress": number }`;
@@ -174,10 +327,20 @@ aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => 
     }
   }
 
+  // -- Fetch real student context from DB (tasks, mastery, activity)
+  let dbContext: DbStudentContext;
+  try {
+    dbContext = await fetchStudentContext(db, user.id);
+  } catch (e) {
+    console.warn("[Schedule Agent] DB context fetch failed, proceeding with empty context:", e);
+    dbContext = { pendingTasks: [], completedTodayCount: 0, blockMastery: [], recentActivity: [], weakTopics: [] };
+  }
+
   // -- Build prompt and call Claude
   const userMessage = buildUserMessage(
     action as ScheduleAction,
     studentProfile,
+    dbContext,
     planContext,
     completedTaskId,
   );
