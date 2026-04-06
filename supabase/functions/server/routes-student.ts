@@ -191,4 +191,38 @@ registerCrud(studentRoutes, {
   updateFields: ["timestamp_seconds", "note"],
 });
 
+// 7. Block Bookmarks — student bookmarks on summary blocks
+registerCrud(studentRoutes, {
+  table: "block_bookmarks",
+  slug: "block-bookmarks",
+  parentKey: "summary_id",
+  optionalFilters: ["block_id"],
+  scopeToUser: "student_id",
+  hasCreatedBy: false,
+  hasUpdatedAt: false,
+  hasOrderIndex: false,
+  softDelete: false,
+  hasIsActive: false,
+  requiredFields: ["block_id"],
+  createFields: ["block_id"],
+  updateFields: [],
+});
+
+// 8. Block Notes — student notes on summary blocks
+registerCrud(studentRoutes, {
+  table: "block_notes",
+  slug: "block-notes",
+  parentKey: "summary_id",
+  optionalFilters: ["block_id"],
+  scopeToUser: "student_id",
+  hasCreatedBy: false,
+  hasUpdatedAt: true,
+  hasOrderIndex: false,
+  softDelete: true,
+  hasIsActive: false,
+  requiredFields: ["text"],
+  createFields: ["block_id", "text", "color"],
+  updateFields: ["text", "color"],
+});
+
 export { studentRoutes };
