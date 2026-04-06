@@ -34,7 +34,7 @@ export const aiScheduleAgentRoutes = new Hono();
 const SCHEDULE_RATE_LIMIT = 10;
 const SCHEDULE_RATE_WINDOW_MS = 3600000;
 
-const VALID_ACTIONS = ["distribute", "recommend-today", "reschedule", "weekly-insight"] as const;
+const VALID_ACTIONS = ["distribute", "recommend-today", "reschedule", "weekly-insight", "organize"] as const;
 type ScheduleAction = typeof VALID_ACTIONS[number];
 
 // ── DB context fetcher ─────────────────────────────────────────────
@@ -243,7 +243,152 @@ Perfil del alumno (frontend):
 ${profileStr}
 
 Responde con JSON: { "weekSummary": "...", "strengths": ["..."], "weaknesses": ["..."], "masteryTrend": "improving"|"stable"|"declining", "recommendedFocus": [ { "topicName": "...", "reason": "...", "suggestedMethod": "..." } ], "estimatedWeeklyProgress": number }`;
+
+    case "organize":
+      return `Analiza las tareas pendientes de este alumno y REORGANIZA su plan de estudio de forma optima. Puedes ejecutar estas operaciones:
+
+1. REORDER: Reordenar tareas por prioridad (temas debiles primero, alternando metodos)
+2. RESCHEDULE: Cambiar la fecha programada de tareas
+3. DELETE: Eliminar tareas duplicadas, irrelevantes o ya dominadas
+4. UPDATE: Cambiar metodo de estudio o duracion estimada
+
+${contextBlock}
+
+Perfil del alumno (frontend):
+${profileStr}
+
+INSTRUCCIONES:
+- Analiza TODAS las tareas pendientes
+- Elimina tareas duplicadas o de temas ya dominados (p_know > 0.85)
+- Reorganiza priorizando: temas debiles > needsReview > alternancia de metodos
+- Reagenda tareas sin fecha o con fechas pasadas para los proximos 7 dias
+- Respeta fatiga cognitiva: maximo 3 horas/dia, temas dificiles temprano
+
+Responde con JSON:
+{
+  "operations": [
+    { "op": "delete", "taskId": "uuid", "reason": "..." },
+    { "op": "reorder", "taskId": "uuid", "newIndex": number, "reason": "..." },
+    { "op": "reschedule", "taskId": "uuid", "newDate": "YYYY-MM-DD", "reason": "..." },
+    { "op": "update", "taskId": "uuid", "fields": { "estimated_minutes": number, "original_method": "string", "task_kind": "string" }, "reason": "..." }
+  ],
+  "summary": "Descripcion breve de los cambios realizados",
+  "rationale": "Por que se hicieron estos cambios"
+}`;
   }
+}
+
+// ── Execute AI-generated operations on study_plan_tasks ────────────
+// The AI returns an array of operations (delete, reorder, reschedule, update).
+// We execute each one, verifying ownership through the study_plans join.
+
+const MAX_OPS = 50; // Safety cap
+
+interface AiOperation {
+  op: string;
+  taskId: string;
+  reason?: string;
+  newIndex?: number;
+  newDate?: string;
+  fields?: Record<string, unknown>;
+}
+
+async function executeAiOperations(
+  db: SupabaseClient,
+  userId: string,
+  operations: AiOperation[],
+): Promise<Array<{ op: string; taskId: string; success: boolean; error?: string }>> {
+  const results: Array<{ op: string; taskId: string; success: boolean; error?: string }> = [];
+  const ops = operations.slice(0, MAX_OPS);
+
+  // Pre-fetch all task IDs the student owns for security validation
+  const taskIds = [...new Set(ops.map((o) => o.taskId).filter(Boolean))];
+  if (taskIds.length === 0) return results;
+
+  const { data: ownedTasks } = await db
+    .from("study_plan_tasks")
+    .select("id, study_plans!inner(student_id)")
+    .in("id", taskIds)
+    .eq("study_plans.student_id", userId);
+
+  const ownedIds = new Set((ownedTasks ?? []).map((t: any) => t.id));
+
+  for (const op of ops) {
+    if (!op.taskId || !ownedIds.has(op.taskId)) {
+      results.push({ op: op.op, taskId: op.taskId, success: false, error: "Task not found or not owned" });
+      continue;
+    }
+
+    try {
+      switch (op.op) {
+        case "delete": {
+          const { error: delErr } = await db
+            .from("study_plan_tasks")
+            .delete()
+            .eq("id", op.taskId);
+          results.push({ op: "delete", taskId: op.taskId, success: !delErr, error: delErr?.message });
+          break;
+        }
+
+        case "reorder": {
+          if (typeof op.newIndex !== "number") {
+            results.push({ op: "reorder", taskId: op.taskId, success: false, error: "newIndex required" });
+            break;
+          }
+          const { error: reorderErr } = await db
+            .from("study_plan_tasks")
+            .update({ order_index: op.newIndex })
+            .eq("id", op.taskId);
+          results.push({ op: "reorder", taskId: op.taskId, success: !reorderErr, error: reorderErr?.message });
+          break;
+        }
+
+        case "reschedule": {
+          if (!op.newDate) {
+            results.push({ op: "reschedule", taskId: op.taskId, success: false, error: "newDate required" });
+            break;
+          }
+          const { error: schedErr } = await db
+            .from("study_plan_tasks")
+            .update({ scheduled_date: op.newDate })
+            .eq("id", op.taskId);
+          results.push({ op: "reschedule", taskId: op.taskId, success: !schedErr, error: schedErr?.message });
+          break;
+        }
+
+        case "update": {
+          if (!op.fields || typeof op.fields !== "object") {
+            results.push({ op: "update", taskId: op.taskId, success: false, error: "fields required" });
+            break;
+          }
+          // Only allow safe fields
+          const allowedFields = ["estimated_minutes", "original_method", "task_kind", "scheduled_date"];
+          const safeFields: Record<string, unknown> = {};
+          for (const key of allowedFields) {
+            if (key in op.fields) safeFields[key] = op.fields[key];
+          }
+          if (Object.keys(safeFields).length === 0) {
+            results.push({ op: "update", taskId: op.taskId, success: false, error: "No valid fields" });
+            break;
+          }
+          const { error: updErr } = await db
+            .from("study_plan_tasks")
+            .update(safeFields)
+            .eq("id", op.taskId);
+          results.push({ op: "update", taskId: op.taskId, success: !updErr, error: updErr?.message });
+          break;
+        }
+
+        default:
+          results.push({ op: op.op, taskId: op.taskId, success: false, error: `Unknown op: ${op.op}` });
+      }
+    } catch (e) {
+      results.push({ op: op.op, taskId: op.taskId, success: false, error: (e as Error).message });
+    }
+  }
+
+  console.log(`[Schedule Agent] Organize: ${results.filter((r) => r.success).length}/${results.length} ops succeeded`);
+  return results;
 }
 
 aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => {
@@ -361,6 +506,12 @@ aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => 
     const parsed = parseClaudeJson(result.text);
     const latencyMs = Date.now() - startMs;
 
+    // -- Execute AI operations for "organize" action
+    let executionResults: Array<{ op: string; taskId: string; success: boolean; error?: string }> | undefined;
+    if (action === "organize" && parsed?.operations && Array.isArray(parsed.operations)) {
+      executionResults = await executeAiOperations(db, user.id, parsed.operations);
+    }
+
     // -- Log to ai_schedule_logs (fire-and-forget with admin client)
     const adminDb = getAdminClient();
     adminDb.from("ai_schedule_logs").insert({
@@ -377,6 +528,7 @@ aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => 
 
     return ok(c, {
       result: parsed,
+      executionResults,
       _meta: {
         aiPowered: true,
         model: getModelId(model),
