@@ -30,8 +30,8 @@ import { generateText, parseClaudeJson, getModelId, type ClaudeModel } from "../
 
 export const aiScheduleAgentRoutes = new Hono();
 
-// Dedicated rate limit: 10 requests per hour for schedule agent
-const SCHEDULE_RATE_LIMIT = 10;
+// Dedicated rate limit: 30 requests per hour for schedule agent
+const SCHEDULE_RATE_LIMIT = 30;
 const SCHEDULE_RATE_WINDOW_MS = 3600000;
 
 const VALID_ACTIONS = ["distribute", "recommend-today", "reschedule", "weekly-insight", "organize"] as const;
