@@ -330,6 +330,49 @@ async function fetchSummaryFallbackChunks(
   }
 }
 
+// --- Fallback: all summaries under a topic (no summary_id) -------
+//
+// When the user is browsing a topic rather than a specific summary
+// (e.g. UI shows "Contexto: Examen Fisico Cardiovascular" from the
+// navigation context, but no `:summaryId` is in the URL and the user
+// hasn't opened an individual summary yet), the chat body arrives
+// with `topic_id` but no `summary_id`. We load every active summary
+// under that topic and feed their content to the LLM via the same
+// chunks → summary_blocks → content_markdown cascade.
+
+const FALLBACK_TOPIC_SUMMARIES_LIMIT = 6;
+
+async function fetchTopicFallbackChunks(
+  db: SupabaseClient,
+  topicId: string,
+): Promise<MatchedChunk[]> {
+  try {
+    const { data: summaryRows } = await db
+      .from("summaries")
+      .select("id")
+      .eq("topic_id", topicId)
+      .is("deleted_at", null)
+      .order("order_index", { ascending: true })
+      .limit(FALLBACK_TOPIC_SUMMARIES_LIMIT);
+
+    if (!summaryRows || summaryRows.length === 0) return [];
+
+    const nested = await Promise.all(
+      summaryRows.map((row) =>
+        fetchSummaryFallbackChunks(db, row.id as string),
+      ),
+    );
+
+    return nested.flat();
+  } catch (e) {
+    console.warn(
+      "[RAG Chat] Topic fallback fetch failed:",
+      (e as Error).message,
+    );
+    return [];
+  }
+}
+
 // --- Phase 5: Smart context assembly ------------------------------
 
 const MAX_CONTEXT_CHARS = 8000;
@@ -449,6 +492,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     return err(c, "message too long (max 2000 characters)", 400);
 
   const summaryId = isUuid(body.summary_id) ? (body.summary_id as string) : null;
+  const topicId = isUuid(body.topic_id) ? (body.topic_id as string) : null;
 
   const history = Array.isArray(body.history)
     ? body.history.slice(-6).map((h: Record<string, string>) => ({
@@ -467,6 +511,13 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     const { data: instId } = await db.rpc("resolve_parent_institution", {
       p_table: "summaries",
       p_id: summaryId,
+    });
+    institutionId = instId as string;
+  }
+  if (!institutionId && topicId) {
+    const { data: instId } = await db.rpc("resolve_parent_institution", {
+      p_table: "topics",
+      p_id: topicId,
     });
     institutionId = instId as string;
   }
@@ -614,6 +665,20 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
       sourcesUsed = assembled.sourcesUsed;
       contextChunksCount = assembled.contextChunksCount;
       searchType = "summary_fallback";
+    }
+  }
+
+  // Fallback: no summary selected but the navigation context points
+  // to a topic (e.g. frontend sends topic_id from currentTopic). Load
+  // content from all summaries under that topic.
+  if (!ragContext && topicId) {
+    const fallbackMatches = await fetchTopicFallbackChunks(db, topicId);
+    if (fallbackMatches.length > 0) {
+      const assembled = assembleContext(fallbackMatches, []);
+      ragContext = assembled.ragContext;
+      sourcesUsed = assembled.sourcesUsed;
+      contextChunksCount = assembled.contextChunksCount;
+      searchType = "topic_fallback";
     }
   }
 

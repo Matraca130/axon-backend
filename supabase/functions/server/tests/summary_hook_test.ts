@@ -334,19 +334,30 @@ Deno.test({
       });
 
       // onSummaryWrite returns synchronously (fire-and-forget).
-      // Wait for the background promise to settle.
-      // 127.0.0.1:1 → ECONNREFUSED in ~1ms, but add margin for CI.
-      await new Promise((r) => setTimeout(r, 2000));
+      // Poll for the background promise to settle. The hook does:
+      //   1. SELECT summary_blocks (supabase-js retries on connect
+      //      errors with backoff — observed ~7s on 127.0.0.1:1).
+      //   2. Then autoChunkAndEmbed → try_advisory_lock RPC →
+      //      logs "[Auto-Ingest] Skipping summary ... advisory lock
+      //      not acquired" once the connect refusal surfaces.
+      // We poll up to 15s so the test isn't sensitive to the exact
+      // retry schedule across CI runners.
+      const hookFiredP = (): boolean =>
+        errors.some((e) => e.includes("[Summary Hook]")) ||
+        infos.some((i) => i.includes("[Auto-Ingest]"));
+
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline && !hookFiredP()) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
 
       // The key invariant: no unhandled promise rejection escaped.
       // autoChunkAndEmbed either:
       //   a) returned gracefully (advisory lock not acquired → skipped_locked), or
       //   b) threw and was caught by the hook's .catch() → console.error logged.
       // Either path is valid — the hook absorbed the failure.
-      const hookFired = errors.some((e) => e.includes("[Summary Hook]")) ||
-        infos.some((i) => i.includes("[Auto-Ingest]"));
       assertEquals(
-        hookFired,
+        hookFiredP(),
         true,
         "Expected autoChunkAndEmbed to have been invoked (either logged info or caught error)",
       );
