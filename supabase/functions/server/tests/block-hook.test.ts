@@ -158,20 +158,29 @@ Deno.test({
   sanitizeResources: false,
 });
 
-Deno.test("BH-4 · No-op if summary status is 'draft'", () => {
-  // Draft summaries don't need to be reverted — they're not published.
-  const capture = captureConsole();
-  try {
-    onBlockWrite({
-      action: "create",
-      row: makeBlockRow(),
-      userId: "user-123",
-    });
-  } catch {
-    // Placeholder throws — will pass once implemented
-  } finally {
-    capture.restore();
-  }
+Deno.test({
+  name: "BH-4 · No-op if summary status is 'draft'",
+  fn: () => {
+    // Draft summaries don't need to be reverted — they're not published.
+    // The hook is fire-and-forget and triggers a Supabase call regardless
+    // of the eventual status check, so the underlying client may still
+    // hold a timer when this synchronous test returns. Disable the
+    // sanitizers (matches BH-2/BH-3/BH-5).
+    const capture = captureConsole();
+    try {
+      onBlockWrite({
+        action: "create",
+        row: makeBlockRow(),
+        userId: "user-123",
+      });
+    } catch {
+      // Placeholder throws — will pass once implemented
+    } finally {
+      capture.restore();
+    }
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
 });
 
 Deno.test({

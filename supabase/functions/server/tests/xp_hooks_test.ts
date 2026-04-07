@@ -168,27 +168,47 @@ Deno.test({
   },
 });
 
-Deno.test("fire-and-forget: xpHookForVideoComplete doesn't throw", () => {
-  hooks.xpHookForVideoComplete("user-1", "video-1", "inst-1");
+Deno.test({
+  name: "fire-and-forget: xpHookForVideoComplete doesn't throw",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    hooks.xpHookForVideoComplete("user-1", "video-1", "inst-1");
+  },
 });
 
-Deno.test("fire-and-forget: xpHookForRagQuestion doesn't throw", () => {
-  hooks.xpHookForRagQuestion("user-1", "inst-1", "log-1");
+Deno.test({
+  name: "fire-and-forget: xpHookForRagQuestion doesn't throw",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    hooks.xpHookForRagQuestion("user-1", "inst-1", "log-1");
+  },
 });
 
-Deno.test("fire-and-forget: xpHookForReview with valid create doesn't throw", () => {
-  hooks.xpHookForReview({
-    action: "create",
-    row: { session_id: "sess-1", grade: 4, item_id: "card-1" },
-    userId: "user-1",
-  });
+Deno.test({
+  name: "fire-and-forget: xpHookForReview with valid create doesn't throw",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    hooks.xpHookForReview({
+      action: "create",
+      row: { session_id: "sess-1", grade: 4, item_id: "card-1" },
+      userId: "user-1",
+    });
+  },
 });
 
-Deno.test("fire-and-forget: xpHookForPlanTaskComplete with valid completed doesn't throw", () => {
-  hooks.xpHookForPlanTaskComplete({
-    action: "update",
-    row: { id: "task-1", status: "completed", study_plan_id: "plan-1" },
-    updatedFields: ["status"],
-    userId: "user-1",
-  });
+Deno.test({
+  name: "fire-and-forget: xpHookForPlanTaskComplete with valid completed doesn't throw",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn() {
+    hooks.xpHookForPlanTaskComplete({
+      action: "update",
+      row: { id: "task-1", status: "completed", study_plan_id: "plan-1" },
+      updatedFields: ["status"],
+      userId: "user-1",
+    });
+  },
 });
