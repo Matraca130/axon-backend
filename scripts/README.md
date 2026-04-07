@@ -31,6 +31,27 @@ bash scripts/check-migration-safety.sh supabase/migrations/<file>.sql [more.sql 
 Comments (`-- ...` and `/* ... */`) are stripped before scanning, so a
 commented-out `DROP TABLE` does **not** trigger a false positive.
 
+After comment stripping, the script also **collapses whitespace and
+splits on `;`** so each statement becomes one logical line. This catches
+reformatted statements like:
+
+```sql
+ALTER TABLE
+  foo
+  DROP COLUMN bar;
+```
+
+which would otherwise sneak past line-oriented `grep`.
+
+### What it does NOT flag (deliberate omissions)
+
+| Pattern | Why excluded |
+|---|---|
+| `DROP INDEX` | Indexes don't carry data — dropping one is recoverable by recreating it. Catching it would noise-up routine index swaps. |
+| `CREATE OR REPLACE FUNCTION` | Replacing a function definition is the standard way to ship code. |
+| `ALTER TABLE ... ADD CONSTRAINT` | Adding a constraint is non-destructive (and may fail if existing data violates it, but failure here is loud). |
+| `UPDATE` | Bulk updates *can* lose data, but flagging every UPDATE makes the scanner unusable for legitimate data migrations. Reviewer judgement covers this. |
+
 ### Exit codes
 
 | Code | Meaning |

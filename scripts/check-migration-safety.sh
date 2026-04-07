@@ -97,21 +97,43 @@ for file in "$@"; do
     exit 2
   fi
 
+  # Two views of the file:
+  #   stripped         — comments removed but line structure preserved.
+  #                      Used to grep -n for line numbers in violation reports.
+  #   normalized       — comments removed AND newlines/tabs collapsed to single
+  #                      spaces, then split on `;` so each statement is on its
+  #                      own logical line. Defeats the bypass:
+  #                          ALTER TABLE
+  #                            foo
+  #                            DROP COLUMN bar;
+  #                      which would otherwise sneak past line-oriented grep.
   stripped=$(strip_sql_comments "$file")
+  normalized=$(printf '%s' "$stripped" | tr '\n\t' '  ' | tr -s ' ' | tr ';' '\n')
 
   file_violations=0
   for idx in "${!PATTERNS[@]}"; do
     pattern="${PATTERNS[$idx]}"
     name="${PATTERN_NAMES[$idx]}"
-    if echo "$stripped" | grep -Eqi -- "$pattern"; then
+    if printf '%s' "$normalized" | grep -Eqi -- "$pattern"; then
       if [[ $file_violations -eq 0 ]]; then
         echo "::error file=$file::Destructive SQL detected in $file"
         echo ""
         echo "  ✗ $file"
       fi
       echo "      → $name"
-      # Show the offending lines (with line numbers from original file)
-      grep -Eni -- "$pattern" "$file" | sed 's/^/         /' || true
+      # Try to surface the original line numbers. Multi-line statements may
+      # have their match on the collapsed line, so fall back to the keyword
+      # scan if the per-line grep returns nothing.
+      lines=$(grep -Eni -- "$pattern" "$file" 2>/dev/null || true)
+      if [[ -z "$lines" ]]; then
+        # Pull the leading keyword from the pattern and grep for that instead
+        # of failing silently — gives the reviewer something to look at.
+        keyword=$(echo "$pattern" | grep -oE '\\b[A-Z]+' | head -1 | tr -d '\\b')
+        lines=$(grep -ni -- "$keyword" "$file" 2>/dev/null || true)
+      fi
+      if [[ -n "$lines" ]]; then
+        echo "$lines" | sed 's/^/         /'
+      fi
       file_violations=$((file_violations + 1))
       violations=$((violations + 1))
     fi
