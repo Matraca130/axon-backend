@@ -8,7 +8,7 @@
  */
 
 import { Hono } from "npm:hono";
-import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { authenticate, getAdminClient, ok, err, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import {
   requireInstitutionRole,
@@ -64,7 +64,13 @@ contentTreeRoutes.get(`${PREFIX}/content-tree`, async (c: Context) => {
   const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
-  const { data, error } = await db
+  // PERF: Use admin client (bypasses RLS) for the nested read.
+  // Membership was just verified above + the query is scoped to institution_id,
+  // so RLS is redundant here. The cascading EXISTS policies on
+  // semesters/sections/topics (migration 20260319000004) trigger per-row JOIN
+  // chains under PostgREST's nested embed, causing 15s+ timeouts on large trees.
+  const adminDb = getAdminClient();
+  const { data, error } = await adminDb
     .from("courses")
     .select(
       `
