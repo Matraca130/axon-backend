@@ -1,0 +1,210 @@
+# Axon — Deploy Supabase migrations with defense-in-depth
+#
+# Triggers ONLY on push to main when files in supabase/migrations/** change,
+# plus manual workflow_dispatch. PRs from forks cannot trigger this workflow
+# (they cannot push to main).
+#
+# Eight defense layers (see database/MIGRATIONS-CICD.md in axon-docs):
+#   L1  Trigger restriction (push:main + paths)
+#   L2  Concurrency lock (queue, no race)
+#   L3  Hardcoded PROJECT_ID (no runtime override)
+#   L4  Append-only Guard A (modified/deleted migrations → fail)
+#   L5  Destructive-SQL Guard B (DROP/TRUNCATE/REVOKE/... → fail)
+#       Escape hatch: commit message contains "[migration:destructive-ok]"
+#   L6  Manual approval via GitHub Environment "production-db"
+#       (configured once in repo Settings → Environments → Required reviewers)
+#   L7  Dry-run preview: db diff posted to job summary
+#   L8  Atomic apply + post-deploy verification
+
+name: Deploy Supabase Migrations
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/migrations/**'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why are you triggering this manually?'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: db-migrations
+  cancel-in-progress: false
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # JOB 1 — Guards (L4 + L5). No DB access. No CLI installed.
+  # If anything fails here, the deploy job never runs.
+  # ─────────────────────────────────────────────────────────────
+  guards:
+    name: "Pre-deploy guards (append-only + destructive scan)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      added_files: ${{ steps.diff.outputs.added }}
+      destructive_skip: ${{ steps.commit-msg.outputs.skip }}
+    steps:
+      - name: Checkout (full history for diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve diff range
+        id: range
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # On manual runs there's no "before"; use the previous commit on main.
+            base="$(git rev-parse HEAD~1)"
+          else
+            base="${{ github.event.before }}"
+          fi
+          # Guard against the very first push or shallow scenarios where
+          # the base commit is unknown (40 zeros).
+          if [[ "$base" == "0000000000000000000000000000000000000000" || -z "$base" ]]; then
+            base="$(git rev-parse HEAD~1)"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "Diff range: $base..${{ github.sha }}"
+
+      # ── Layer 4: Append-only Guard A ─────────────────────────
+      - name: "Guard A — migrations are append-only"
+        id: diff
+        run: |
+          set -euo pipefail
+          base="${{ steps.range.outputs.base }}"
+          head="${{ steps.range.outputs.head }}"
+
+          # All changed files under supabase/migrations/, with their git status letter.
+          # Format: "<status>\t<path>"
+          changed=$(git diff --name-status "$base" "$head" -- 'supabase/migrations/' || true)
+
+          if [[ -z "$changed" ]]; then
+            echo "No migration files changed in this push. Nothing to do."
+            echo "added=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Changed migration files:"
+          echo "$changed"
+          echo ""
+
+          forbidden=$(echo "$changed" | awk '$1 != "A" { print }')
+          if [[ -n "$forbidden" ]]; then
+            echo "::error::Migration files are immutable. Only newly-added files (status A) are allowed."
+            echo ""
+            echo "Forbidden changes:"
+            echo "$forbidden"
+            echo ""
+            echo "If you need to amend an applied migration, create a NEW migration"
+            echo "file that reverses or corrects the change instead of editing the old one."
+            exit 1
+          fi
+
+          # Collect just the paths of added .sql files
+          added=$(echo "$changed" | awk '$1 == "A" && $2 ~ /\.sql$/ { print $2 }')
+          echo "added<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$added" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo "✓ Guard A passed. Added migration files:"
+          echo "$added"
+
+      # ── Check for the destructive escape hatch in the commit message ──
+      - name: "Detect [migration:destructive-ok] escape hatch"
+        id: commit-msg
+        run: |
+          set -euo pipefail
+          msg=$(git log -1 --pretty=%B "${{ github.sha }}")
+          echo "Commit message:"
+          echo "$msg"
+          echo ""
+          if echo "$msg" | grep -qF '[migration:destructive-ok]'; then
+            echo "::warning::Destructive-SQL scanner SKIPPED — commit message contains [migration:destructive-ok]."
+            echo "Append-only guard and manual approval gate still apply."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Layer 5: Destructive-SQL Guard B ─────────────────────
+      - name: "Guard B — destructive-SQL scanner"
+        if: steps.commit-msg.outputs.skip != 'true' && steps.diff.outputs.added != ''
+        run: |
+          set -euo pipefail
+          chmod +x scripts/check-migration-safety.sh
+          # Pass each added file as a separate argument
+          echo "${{ steps.diff.outputs.added }}" | xargs -r bash scripts/check-migration-safety.sh
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 2 — Deploy. Runs in environment "production-db".
+  # If you have configured Required reviewers on that environment,
+  # this job will pause until a maintainer clicks Approve.
+  # ─────────────────────────────────────────────────────────────
+  deploy:
+    name: "Deploy migrations to Supabase"
+    needs: guards
+    if: needs.guards.outputs.added_files != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production-db
+    env:
+      # L3: hardcoded — never read from a runtime variable.
+      PROJECT_ID: xdnciktarvxyhkrokbng
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link Supabase project
+        run: supabase link --project-ref "$PROJECT_ID"
+
+      # ── Layer 7: dry-run preview ─────────────────────────────
+      - name: "Preview pending diff (Layer 7)"
+        run: |
+          set -euo pipefail
+          {
+            echo "## Pending migration preview"
+            echo ""
+            echo "**Project:** \`$PROJECT_ID\`"
+            echo "**Commit:** \`${{ github.sha }}\`"
+            echo ""
+            echo "### Files to apply"
+            echo '```'
+            echo "${{ needs.guards.outputs.added_files }}"
+            echo '```'
+            echo ""
+            echo "### Schema diff (from \`supabase db diff --linked\`)"
+            echo '```sql'
+            supabase db diff --linked --schema public,auth,storage 2>&1 || echo "(db diff failed — check the deploy logs)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Layer 8: atomic apply + verification ────────────────
+      - name: "Apply migrations (Layer 8)"
+        run: |
+          set -euo pipefail
+          echo "Applying pending migrations to project $PROJECT_ID ..."
+          supabase db push
+
+      - name: "Verify migrations landed"
+        run: |
+          set -euo pipefail
+          echo "## Post-deploy verification" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # List the most recent applied migrations on the linked project.
+          supabase migration list --linked 2>&1 | tail -20 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
