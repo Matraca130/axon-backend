@@ -494,16 +494,11 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   const summaryId = isUuid(body.summary_id) ? (body.summary_id as string) : null;
   const topicId = isUuid(body.topic_id) ? (body.topic_id as string) : null;
 
-  // DEBUG: log the body keys + topic/summary status so we can see
-  // exactly what the frontend is sending. Remove once verified.
-  console.log(
-    "[RAG Chat DEBUG] body keys:",
-    JSON.stringify(Object.keys(body || {})),
-    "summary_id:", body?.summary_id ?? null,
-    "topic_id:", body?.topic_id ?? null,
-    "summaryId(parsed):", summaryId,
-    "topicId(parsed):", topicId,
-  );
+  // DEBUG: capture the body shape to a string we can stash in
+  // rag_query_log.model_used (text column) for later inspection.
+  // Application console.log output isn't accessible via the
+  // Supabase logs API, so we encode it inline. Remove once verified.
+  const debugBodyShape = `keys=${JSON.stringify(Object.keys(body || {}))} sid=${body?.summary_id ?? "null"} tid=${body?.topic_id ?? "null"} sParsed=${summaryId ?? "null"} tParsed=${topicId ?? "null"}`;
 
   const history = Array.isArray(body.history)
     ? body.history.slice(-6).map((h: Record<string, string>) => ({
@@ -828,7 +823,7 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
                 : null,
               latency_ms: latencyMs,
               search_type: logSearchType,
-              model_used: GENERATE_MODEL,
+              model_used: `${GENERATE_MODEL}|DEBUG ${debugBodyShape}`,
               retrieval_strategy: strategy,
               rerank_applied: rerankApplied,
             })
