@@ -494,6 +494,17 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   const summaryId = isUuid(body.summary_id) ? (body.summary_id as string) : null;
   const topicId = isUuid(body.topic_id) ? (body.topic_id as string) : null;
 
+  // DEBUG: log the body keys + topic/summary status so we can see
+  // exactly what the frontend is sending. Remove once verified.
+  console.log(
+    "[RAG Chat DEBUG] body keys:",
+    JSON.stringify(Object.keys(body || {})),
+    "summary_id:", body?.summary_id ?? null,
+    "topic_id:", body?.topic_id ?? null,
+    "summaryId(parsed):", summaryId,
+    "topicId(parsed):", topicId,
+  );
+
   const history = Array.isArray(body.history)
     ? body.history.slice(-6).map((h: Record<string, string>) => ({
         role: h.role,
