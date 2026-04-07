@@ -152,188 +152,227 @@ Deno.test("XP_TABLE: complete_plan is the highest-value action", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// Helper: deterministic Math.random stub (avoids flaky variable reward)
+// ═══════════════════════════════════════════════════════════════
+
+const _origRandom = Math.random;
+/** Stub Math.random to 0.5 (above the 0.1 variable-reward threshold) */
+function stubRandom() { Math.random = () => 0.5; }
+function restoreRandom() { Math.random = _origRandom; }
+
+// ═══════════════════════════════════════════════════════════════
 // 2. awardXP — RPC Success Path
 // ═══════════════════════════════════════════════════════════════
 
 Deno.test("awardXP: returns AwardResult on successful RPC", async () => {
-  const mockResult = {
-    xp_awarded: 10,
-    xp_base: 10,
-    multiplier: 1.0,
-    bonus_type: null,
-    daily_used: 10,
-    daily_cap: 500,
-    total_xp: 110,
-    level: 2,
-  };
+  stubRandom();
+  try {
+    const mockResult = {
+      xp_awarded: 10,
+      xp_base: 10,
+      multiplier: 1.0,
+      bonus_type: null,
+      daily_used: 10,
+      daily_cap: 500,
+      total_xp: 110,
+      level: 2,
+    };
 
-  const db = mockDb({ rpcResult: { data: mockResult, error: null } });
+    const db = mockDb({ rpcResult: { data: mockResult, error: null } });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "review_correct",
-    xpBase: 10,
-  });
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "review_correct",
+      xpBase: 10,
+    });
 
-  assertExists(result);
-  assertEquals(result!.xp_awarded, 10);
-  assertEquals(result!.level, 2);
+    assertExists(result);
+    assertEquals(result!.xp_awarded, 10);
+    assertEquals(result!.level, 2);
+  } finally {
+    restoreRandom();
+  }
 });
 
 Deno.test("awardXP: on-time bonus adds +0.5 to multiplier", async () => {
-  // Provide fsrsDueAt within 24h of now
-  const now = new Date();
-  const dueAt = new Date(now.getTime() - 1 * 60 * 60 * 1000); // 1h ago
+  stubRandom();
+  try {
+    // Provide fsrsDueAt within 24h of now
+    const now = new Date();
+    const dueAt = new Date(now.getTime() - 1 * 60 * 60 * 1000); // 1h ago
 
-  const db = mockDb({
-    rpcResult: {
-      data: {
-        xp_awarded: 15,
-        xp_base: 10,
-        multiplier: 1.5,
-        bonus_type: "on_time",
-        daily_used: 15,
-        daily_cap: 500,
-        total_xp: 115,
-        level: 2,
+    const db = mockDb({
+      rpcResult: {
+        data: {
+          xp_awarded: 15,
+          xp_base: 10,
+          multiplier: 1.5,
+          bonus_type: "on_time",
+          daily_used: 15,
+          daily_cap: 500,
+          total_xp: 115,
+          level: 2,
+        },
+        error: null,
       },
-      error: null,
-    },
-  });
+    });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "review_correct",
-    xpBase: 10,
-    fsrsDueAt: dueAt.toISOString(),
-  });
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "review_correct",
+      xpBase: 10,
+      fsrsDueAt: dueAt.toISOString(),
+    });
 
-  assertExists(result);
-  // The RPC was called with multiplier >= 1.5 (on_time adds 0.5)
-  // We can't verify the exact RPC params, but the mock returns what we set
-  assertEquals(result!.xp_awarded, 15);
+    assertExists(result);
+    // The RPC was called with multiplier >= 1.5 (on_time adds 0.5)
+    // We can't verify the exact RPC params, but the mock returns what we set
+    assertEquals(result!.xp_awarded, 15);
+  } finally {
+    restoreRandom();
+  }
 });
 
 Deno.test("awardXP: flow zone bonus for BKT p_know in [0.3, 0.7]", async () => {
-  const db = mockDb({
-    rpcResult: {
-      data: {
-        xp_awarded: 13,
-        xp_base: 10,
-        multiplier: 1.25,
-        bonus_type: "flow_zone",
-        daily_used: 13,
-        daily_cap: 500,
-        total_xp: 113,
-        level: 2,
+  stubRandom();
+  try {
+    const db = mockDb({
+      rpcResult: {
+        data: {
+          xp_awarded: 13,
+          xp_base: 10,
+          multiplier: 1.25,
+          bonus_type: "flow_zone",
+          daily_used: 13,
+          daily_cap: 500,
+          total_xp: 113,
+          level: 2,
+        },
+        error: null,
       },
-      error: null,
-    },
-  });
+    });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "review_correct",
-    xpBase: 10,
-    bktPKnow: 0.5, // In flow zone [0.3, 0.7]
-  });
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "review_correct",
+      xpBase: 10,
+      bktPKnow: 0.5, // In flow zone [0.3, 0.7]
+    });
 
-  assertExists(result);
-  assertEquals(result!.bonus_type, "flow_zone");
+    assertExists(result);
+    assertEquals(result!.bonus_type, "flow_zone");
+  } finally {
+    restoreRandom();
+  }
 });
 
 Deno.test("awardXP: BKT p_know outside flow zone (0.9) gets no flow bonus", async () => {
-  const db = mockDb({
-    rpcResult: {
-      data: {
-        xp_awarded: 10,
-        xp_base: 10,
-        multiplier: 1.0,
-        bonus_type: null,
-        daily_used: 10,
-        daily_cap: 500,
-        total_xp: 110,
-        level: 2,
+  stubRandom();
+  try {
+    const db = mockDb({
+      rpcResult: {
+        data: {
+          xp_awarded: 10,
+          xp_base: 10,
+          multiplier: 1.0,
+          bonus_type: null,
+          daily_used: 10,
+          daily_cap: 500,
+          total_xp: 110,
+          level: 2,
+        },
+        error: null,
       },
-      error: null,
-    },
-  });
+    });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "review_correct",
-    xpBase: 10,
-    bktPKnow: 0.9, // Outside flow zone
-  });
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "review_correct",
+      xpBase: 10,
+      bktPKnow: 0.9, // Outside flow zone
+    });
 
-  assertExists(result);
-  // No flow_zone bonus in the bonus_type
+    assertExists(result);
+    // No flow_zone bonus in the bonus_type
+  } finally {
+    restoreRandom();
+  }
 });
 
 Deno.test("awardXP: streak multiplier at 7+ days adds +0.5", async () => {
-  const db = mockDb({
-    rpcResult: {
-      data: {
-        xp_awarded: 15,
-        xp_base: 10,
-        multiplier: 1.5,
-        bonus_type: "streak",
-        daily_used: 15,
-        daily_cap: 500,
-        total_xp: 115,
-        level: 2,
+  stubRandom();
+  try {
+    const db = mockDb({
+      rpcResult: {
+        data: {
+          xp_awarded: 15,
+          xp_base: 10,
+          multiplier: 1.5,
+          bonus_type: "streak",
+          daily_used: 15,
+          daily_cap: 500,
+          total_xp: 115,
+          level: 2,
+        },
+        error: null,
       },
-      error: null,
-    },
-  });
+    });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "review_correct",
-    xpBase: 10,
-    currentStreak: 10, // >= 7
-  });
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "review_correct",
+      xpBase: 10,
+      currentStreak: 10, // >= 7
+    });
 
-  assertExists(result);
+    assertExists(result);
+  } finally {
+    restoreRandom();
+  }
 });
 
 Deno.test("awardXP: streak at 6 days gets NO streak bonus", async () => {
-  const db = mockDb({
-    rpcResult: {
-      data: {
-        xp_awarded: 10,
-        xp_base: 10,
-        multiplier: 1.0,
-        bonus_type: null,
-        daily_used: 10,
-        daily_cap: 500,
-        total_xp: 110,
-        level: 2,
+  stubRandom();
+  try {
+    const db = mockDb({
+      rpcResult: {
+        data: {
+          xp_awarded: 10,
+          xp_base: 10,
+          multiplier: 1.0,
+          bonus_type: null,
+          daily_used: 10,
+          daily_cap: 500,
+          total_xp: 110,
+          level: 2,
+        },
+        error: null,
       },
-      error: null,
-    },
-  });
+    });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "review_correct",
-    xpBase: 10,
-    currentStreak: 6, // < 7, no streak bonus
-  });
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "review_correct",
+      xpBase: 10,
+      currentStreak: 6, // < 7, no streak bonus
+    });
 
-  assertExists(result);
+    assertExists(result);
+  } finally {
+    restoreRandom();
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -341,6 +380,7 @@ Deno.test("awardXP: streak at 6 days gets NO streak bonus", async () => {
 // ═══════════════════════════════════════════════════════════════
 
 Deno.test("awardXP: returns null on total failure (RPC + fallback both fail)", async () => {
+  stubRandom();
   // Mock where RPC fails AND fallback insert fails
   const db = mockDb({
     rpcResult: { data: null, error: { message: "RPC not found" } },
@@ -366,6 +406,7 @@ Deno.test("awardXP: returns null on total failure (RPC + fallback both fail)", a
   } finally {
     console.warn = origWarn;
     console.log = origLog;
+    restoreRandom();
   }
 });
 
@@ -457,151 +498,176 @@ Deno.test("Bonus math: variable reward is +1.0 (2x), not *2.0 (multiplicative)",
 // ═══════════════════════════════════════════════════════════════
 
 Deno.test("awardXP: fsrsDueAt more than 24h ago gets no on-time bonus", async () => {
-  const twoDaysAgo = new Date(
-    Date.now() - 48 * 60 * 60 * 1000,
-  ).toISOString();
+  stubRandom();
+  try {
+    const twoDaysAgo = new Date(
+      Date.now() - 48 * 60 * 60 * 1000,
+    ).toISOString();
 
-  const db = mockDb({
-    rpcResult: {
-      data: {
-        xp_awarded: 10,
-        xp_base: 10,
-        multiplier: 1.0,
-        bonus_type: null,
-        daily_used: 10,
-        daily_cap: 500,
-        total_xp: 110,
-        level: 2,
+    const db = mockDb({
+      rpcResult: {
+        data: {
+          xp_awarded: 10,
+          xp_base: 10,
+          multiplier: 1.0,
+          bonus_type: null,
+          daily_used: 10,
+          daily_cap: 500,
+          total_xp: 110,
+          level: 2,
+        },
+        error: null,
       },
-      error: null,
-    },
-  });
+    });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "review_correct",
-    xpBase: 10,
-    fsrsDueAt: twoDaysAgo,
-  });
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "review_correct",
+      xpBase: 10,
+      fsrsDueAt: twoDaysAgo,
+    });
 
-  assertExists(result);
-  // No on_time bonus should be applied
+    assertExists(result);
+    // No on_time bonus should be applied
+  } finally {
+    restoreRandom();
+  }
 });
 
 Deno.test("awardXP: null bktPKnow gets no flow zone bonus", async () => {
-  const db = mockDb({
-    rpcResult: {
-      data: {
-        xp_awarded: 10,
-        xp_base: 10,
-        multiplier: 1.0,
-        bonus_type: null,
-        daily_used: 10,
-        daily_cap: 500,
-        total_xp: 110,
-        level: 2,
+  stubRandom();
+  try {
+    const db = mockDb({
+      rpcResult: {
+        data: {
+          xp_awarded: 10,
+          xp_base: 10,
+          multiplier: 1.0,
+          bonus_type: null,
+          daily_used: 10,
+          daily_cap: 500,
+          total_xp: 110,
+          level: 2,
+        },
+        error: null,
       },
-      error: null,
-    },
-  });
+    });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "review_correct",
-    xpBase: 10,
-    bktPKnow: null,
-  });
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "review_correct",
+      xpBase: 10,
+      bktPKnow: null,
+    });
 
-  assertExists(result);
+    assertExists(result);
+  } finally {
+    restoreRandom();
+  }
 });
 
 Deno.test("awardXP: bktPKnow at boundary 0.3 IS in flow zone", async () => {
-  const db = mockDb({
-    rpcResult: {
-      data: {
-        xp_awarded: 13,
-        xp_base: 10,
-        multiplier: 1.25,
-        bonus_type: "flow_zone",
-        daily_used: 13,
-        daily_cap: 500,
-        total_xp: 113,
-        level: 2,
+  stubRandom();
+  try {
+    const db = mockDb({
+      rpcResult: {
+        data: {
+          xp_awarded: 13,
+          xp_base: 10,
+          multiplier: 1.25,
+          bonus_type: "flow_zone",
+          daily_used: 13,
+          daily_cap: 500,
+          total_xp: 113,
+          level: 2,
+        },
+        error: null,
       },
-      error: null,
-    },
-  });
+    });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "review_correct",
-    xpBase: 10,
-    bktPKnow: 0.3, // Boundary: inclusive
-  });
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "review_correct",
+      xpBase: 10,
+      bktPKnow: 0.3, // Boundary: inclusive
+    });
 
-  assertExists(result);
+    assertExists(result);
+  } finally {
+    restoreRandom();
+  }
 });
 
 Deno.test("awardXP: bktPKnow at boundary 0.7 IS in flow zone", async () => {
-  const db = mockDb({
-    rpcResult: {
-      data: {
-        xp_awarded: 13,
-        xp_base: 10,
-        multiplier: 1.25,
-        bonus_type: "flow_zone",
-        daily_used: 13,
-        daily_cap: 500,
-        total_xp: 113,
-        level: 2,
+  stubRandom();
+  try {
+    const db = mockDb({
+      rpcResult: {
+        data: {
+          xp_awarded: 13,
+          xp_base: 10,
+          multiplier: 1.25,
+          bonus_type: "flow_zone",
+          daily_used: 13,
+          daily_cap: 500,
+          total_xp: 113,
+          level: 2,
+        },
+        error: null,
       },
-      error: null,
-    },
-  });
+    });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "review_correct",
-    xpBase: 10,
-    bktPKnow: 0.7, // Boundary: inclusive
-  });
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "review_correct",
+      xpBase: 10,
+      bktPKnow: 0.7, // Boundary: inclusive
+    });
 
-  assertExists(result);
+    assertExists(result);
+  } finally {
+    restoreRandom();
+  }
 });
 
 Deno.test("awardXP: bktPKnow at 0.29 is NOT in flow zone", async () => {
-  const db = mockDb({
-    rpcResult: {
-      data: {
-        xp_awarded: 10,
-        xp_base: 10,
-        multiplier: 1.0,
-        bonus_type: null,
-        daily_used: 10,
-        daily_cap: 500,
-        total_xp: 110,
-        level: 2,
+  stubRandom();
+  try {
+    const db = mockDb({
+      rpcResult: {
+        data: {
+          xp_awarded: 10,
+          xp_base: 10,
+          multiplier: 1.0,
+          bonus_type: null,
+          daily_used: 10,
+          daily_cap: 500,
+          total_xp: 110,
+          level: 2,
+        },
+        error: null,
       },
-      error: null,
-    },
-  });
+    });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "review_correct",
-    xpBase: 10,
-    bktPKnow: 0.29,
-  });
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "review_correct",
+      xpBase: 10,
+      bktPKnow: 0.29,
+    });
 
-  assertExists(result);
+    assertExists(result);
+  } finally {
+    restoreRandom();
+  }
 });
