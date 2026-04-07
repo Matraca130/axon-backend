@@ -244,11 +244,16 @@ const FALLBACK_BLOCK_LIMIT = 40;
 const FALLBACK_MARKDOWN_MAX_CHARS = 7000;
 
 async function fetchSummaryFallbackChunks(
-  db: SupabaseClient,
+  adminDb: SupabaseClient,
   summaryId: string,
 ): Promise<MatchedChunk[]> {
+  // SEC-S9B convention: use the admin client (bypasses RLS) for
+  // cross-table content fetches in the RAG path. The user's `db`
+  // client is filtered by RLS policies that may exclude legitimate
+  // educational content (e.g. summary_blocks "Professors manage"
+  // policy denies students), which would silently empty the cascade.
   try {
-    const { data: summaryRow } = await db
+    const { data: summaryRow } = await adminDb
       .from("summaries")
       .select("id, title, content_markdown")
       .eq("id", summaryId)
@@ -274,11 +279,14 @@ async function fetchSummaryFallbackChunks(
     });
 
     // 1. chunks (canonical ingested form)
-    const { data: chunkRows } = await db
+    // NOTE: chunks table has no deleted_at column — filtering by it
+    // makes PostgREST reject the query and return data: null, which
+    // silently masks the rest of the cascade. Order by order_index
+    // is enough.
+    const { data: chunkRows } = await adminDb
       .from("chunks")
       .select("id, summary_id, content, order_index")
       .eq("summary_id", summaryId)
-      .is("deleted_at", null)
       .order("order_index", { ascending: true })
       .limit(FALLBACK_CHUNK_LIMIT);
 
@@ -289,7 +297,7 @@ async function fetchSummaryFallbackChunks(
     }
 
     // 2. summary_blocks (Smart Reader format)
-    const { data: blockRows } = await db
+    const { data: blockRows } = await adminDb
       .from("summary_blocks")
       .select("id, type, heading_text, heading_level, content, order_index")
       .eq("summary_id", summaryId)
@@ -343,11 +351,11 @@ async function fetchSummaryFallbackChunks(
 const FALLBACK_TOPIC_SUMMARIES_LIMIT = 6;
 
 async function fetchTopicFallbackChunks(
-  db: SupabaseClient,
+  adminDb: SupabaseClient,
   topicId: string,
 ): Promise<MatchedChunk[]> {
   try {
-    const { data: summaryRows } = await db
+    const { data: summaryRows } = await adminDb
       .from("summaries")
       .select("id")
       .eq("topic_id", topicId)
@@ -359,7 +367,7 @@ async function fetchTopicFallbackChunks(
 
     const nested = await Promise.all(
       summaryRows.map((row) =>
-        fetchSummaryFallbackChunks(db, row.id as string),
+        fetchSummaryFallbackChunks(adminDb, row.id as string),
       ),
     );
 
@@ -493,12 +501,6 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
 
   const summaryId = isUuid(body.summary_id) ? (body.summary_id as string) : null;
   const topicId = isUuid(body.topic_id) ? (body.topic_id as string) : null;
-
-  // DEBUG: capture the body shape to a string we can stash in
-  // rag_query_log.model_used (text column) for later inspection.
-  // Application console.log output isn't accessible via the
-  // Supabase logs API, so we encode it inline. Remove once verified.
-  const debugBodyShape = `keys=${JSON.stringify(Object.keys(body || {}))} sid=${body?.summary_id ?? "null"} tid=${body?.topic_id ?? "null"} sParsed=${summaryId ?? "null"} tParsed=${topicId ?? "null"}`;
 
   const history = Array.isArray(body.history)
     ? body.history.slice(-6).map((h: Record<string, string>) => ({
@@ -663,7 +665,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   // nothing. Load the topic's chunks directly so the LLM answers
   // from the actual study material instead of hallucinating.
   if (!ragContext && summaryId) {
-    const fallbackMatches = await fetchSummaryFallbackChunks(db, summaryId);
+    const fallbackMatches = await fetchSummaryFallbackChunks(adminDb, summaryId);
     if (fallbackMatches.length > 0) {
       const contextChunks = await fetchAdjacentChunks(db, fallbackMatches);
       const assembled = assembleContext(fallbackMatches, contextChunks);
@@ -678,7 +680,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   // to a topic (e.g. frontend sends topic_id from currentTopic). Load
   // content from all summaries under that topic.
   if (!ragContext && topicId) {
-    const fallbackMatches = await fetchTopicFallbackChunks(db, topicId);
+    const fallbackMatches = await fetchTopicFallbackChunks(adminDb, topicId);
     if (fallbackMatches.length > 0) {
       const assembled = assembleContext(fallbackMatches, []);
       ragContext = assembled.ragContext;
@@ -823,7 +825,7 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
                 : null,
               latency_ms: latencyMs,
               search_type: logSearchType,
-              model_used: `${GENERATE_MODEL}|DEBUG ${debugBodyShape}`,
+              model_used: GENERATE_MODEL,
               retrieval_strategy: strategy,
               rerank_applied: rerankApplied,
             })
