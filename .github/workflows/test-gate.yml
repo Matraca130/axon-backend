@@ -8,6 +8,7 @@ on:
     paths:
       - 'supabase/functions/server/**'
       - 'tests/**'
+      - 'scripts/**'
       - '.github/workflows/test-gate.yml'
   pull_request:
     branches: [main]
@@ -123,12 +124,28 @@ jobs:
           deno test tests/integration/ --allow-net --allow-env --no-check
 
   # ──────────────────────────────────────────────
+  # JOB 4: Scanner tests (no network, no secrets)
+  # Covers: scripts/tests/check-migration-safety_test.sh
+  # Validates the destructive-SQL scanner used by deploy-migrations.yml
+  # ──────────────────────────────────────────────
+  scanner-tests:
+    name: "Scanner Tests (scripts/tests/)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run check-migration-safety fixture suite
+        run: |
+          echo "=== scripts/tests/check-migration-safety_test.sh ==="
+          bash scripts/tests/check-migration-safety_test.sh
+
+  # ──────────────────────────────────────────────
   # GATE: Final check — blocks merge if anything failed
   # ──────────────────────────────────────────────
   gate:
     name: All Tests Passed
     runs-on: ubuntu-latest
-    needs: [unit-tests, server-tests, integration-tests]
+    needs: [unit-tests, server-tests, integration-tests, scanner-tests]
     if: always()
     steps:
       - name: Evaluate results
@@ -136,11 +153,15 @@ jobs:
           echo "Unit tests:        ${{ needs.unit-tests.result }}"
           echo "Server tests:      ${{ needs.server-tests.result }}"
           echo "Integration tests: ${{ needs.integration-tests.result }}"
+          echo "Scanner tests:     ${{ needs.scanner-tests.result }}"
           if [ "${{ needs.unit-tests.result }}" != "success" ]; then
             echo "::error::Unit tests failed!" && exit 1
           fi
           if [ "${{ needs.server-tests.result }}" != "success" ]; then
             echo "::error::Server tests failed!" && exit 1
+          fi
+          if [ "${{ needs.scanner-tests.result }}" != "success" ]; then
+            echo "::error::Scanner tests failed!" && exit 1
           fi
           if [ "${{ needs.integration-tests.result }}" == "failure" ]; then
             echo "::warning::Integration tests failed (non-blocking — live backend may have pre-existing issues)"
