@@ -20,6 +20,7 @@ import { progressRoutes } from "./progress.ts";
 import { spacedRepRoutes } from "./spaced-rep.ts";
 import { batchReviewRoutes } from "./batch-review.ts";
 import { blockReviewRoutes } from "./block-review.ts";
+import { stickyNotesRoutes } from "./sticky-notes.ts";
 
 const studyRoutes = new Hono();
 
@@ -29,5 +30,6 @@ studyRoutes.route("/", progressRoutes);
 studyRoutes.route("/", spacedRepRoutes);
 studyRoutes.route("/", batchReviewRoutes);
 studyRoutes.route("/", blockReviewRoutes);
+studyRoutes.route("/", stickyNotesRoutes);
 
 export { studyRoutes };
