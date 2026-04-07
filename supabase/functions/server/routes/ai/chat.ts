@@ -220,6 +220,57 @@ async function fetchAdjacentChunks(
   }
 }
 
+// --- Fallback: direct summary chunks (no vector search) ----------
+//
+// When `summary_id` is provided but vector search returns zero hits,
+// the user was asking about a topic they are actively viewing, so we
+// should still send the topic content to the LLM instead of letting
+// it hallucinate from general knowledge. Triggered by short queries
+// (e.g. acronyms like "EIC") whose embeddings score below the
+// similarity threshold, or by summaries whose chunks are not yet
+// embedded. See: Axon AI "EIC" bug report.
+
+const FALLBACK_CHUNK_LIMIT = 12;
+
+async function fetchSummaryFallbackChunks(
+  db: SupabaseClient,
+  summaryId: string,
+): Promise<MatchedChunk[]> {
+  try {
+    const [{ data: summaryRow }, { data: chunkRows }] = await Promise.all([
+      db
+        .from("summaries")
+        .select("id, title")
+        .eq("id", summaryId)
+        .is("deleted_at", null)
+        .single(),
+      db
+        .from("chunks")
+        .select("id, summary_id, content, order_index")
+        .eq("summary_id", summaryId)
+        .is("deleted_at", null)
+        .order("order_index", { ascending: true })
+        .limit(FALLBACK_CHUNK_LIMIT),
+    ]);
+
+    if (!chunkRows || chunkRows.length === 0) return [];
+
+    const title = (summaryRow?.title as string) || "Material";
+    return chunkRows.map((row) => ({
+      chunk_id: row.id as string,
+      summary_id: row.summary_id as string,
+      summary_title: title,
+      content: row.content as string,
+      similarity: 0,
+      text_rank: 0,
+      combined_score: 0,
+    }));
+  } catch (e) {
+    console.warn("[RAG Chat] Summary fallback fetch failed:", (e as Error).message);
+    return [];
+  }
+}
+
 // --- Phase 5: Smart context assembly ------------------------------
 
 const MAX_CONTEXT_CHARS = 8000;
@@ -396,6 +447,12 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   let rerankApplied = false;
   let strategyMeta: Record<string, unknown> = {};
 
+  // Short queries (acronyms like "EIC", "HTA", "ECG") produce weak
+  // dense-vector similarity scores. Relax the threshold so the hybrid
+  // search's lexical component can still surface relevant chunks.
+  const isShortQuery = message.trim().length < 15;
+  const similarityThreshold = isShortQuery ? 0.15 : 0.3;
+
   try {
     const embeddingOutput = await executeRetrievalEmbedding(
       strategy, searchQuery,
@@ -413,7 +470,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
           p_institution_id: institutionId,
           p_summary_id: summaryId,
           p_match_count: 8,
-          p_similarity_threshold: 0.3,
+          p_similarity_threshold: similarityThreshold,
         });
         searchType = "hybrid";
         return (data || []) as MatchedChunk[];
@@ -426,7 +483,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
           p_institution_id: institutionId,
           p_top_summaries: 3,
           p_top_chunks: 8,
-          p_similarity_threshold: 0.3,
+          p_similarity_threshold: similarityThreshold,
           p_query_text: message,
         },
       );
@@ -449,7 +506,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
         p_institution_id: institutionId,
         p_summary_id: null,
         p_match_count: 8,
-        p_similarity_threshold: 0.3,
+        p_similarity_threshold: similarityThreshold,
       });
       searchType = "hybrid_fallback";
       return (hybridData || []) as MatchedChunk[];
@@ -484,6 +541,21 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     }
   } catch (e) {
     console.warn("[RAG Chat] Search failed, continuing without context:", e);
+  }
+
+  // Fallback: user is viewing a specific topic but retrieval found
+  // nothing. Load the topic's chunks directly so the LLM answers
+  // from the actual study material instead of hallucinating.
+  if (!ragContext && summaryId) {
+    const fallbackMatches = await fetchSummaryFallbackChunks(db, summaryId);
+    if (fallbackMatches.length > 0) {
+      const contextChunks = await fetchAdjacentChunks(db, fallbackMatches);
+      const assembled = assembleContext(fallbackMatches, contextChunks);
+      ragContext = assembled.ragContext;
+      sourcesUsed = assembled.sourcesUsed;
+      contextChunksCount = assembled.contextChunksCount;
+      searchType = "summary_fallback";
+    }
   }
 
   let profileContext = "";
