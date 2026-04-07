@@ -220,7 +220,7 @@ async function fetchAdjacentChunks(
   }
 }
 
-// --- Fallback: direct summary chunks (no vector search) ----------
+// --- Fallback: direct summary content (no vector search) --------
 //
 // When `summary_id` is provided but vector search returns zero hits,
 // the user was asking about a topic they are actively viewing, so we
@@ -229,42 +229,101 @@ async function fetchAdjacentChunks(
 // (e.g. acronyms like "EIC") whose embeddings score below the
 // similarity threshold, or by summaries whose chunks are not yet
 // embedded. See: Axon AI "EIC" bug report.
+//
+// Cascading source priority:
+//   1. chunks             — if the summary has been ingested for RAG
+//   2. summary_blocks     — Smart Reader block format (heading/paragraph)
+//   3. content_markdown   — raw summary body as a last resort
+//
+// Summaries with `last_chunked_at IS NULL` (never ingested) will fall
+// through to summary_blocks / content_markdown instead of returning
+// empty context.
 
 const FALLBACK_CHUNK_LIMIT = 12;
+const FALLBACK_BLOCK_LIMIT = 40;
+const FALLBACK_MARKDOWN_MAX_CHARS = 7000;
 
 async function fetchSummaryFallbackChunks(
   db: SupabaseClient,
   summaryId: string,
 ): Promise<MatchedChunk[]> {
   try {
-    const [{ data: summaryRow }, { data: chunkRows }] = await Promise.all([
-      db
-        .from("summaries")
-        .select("id, title")
-        .eq("id", summaryId)
-        .is("deleted_at", null)
-        .single(),
-      db
-        .from("chunks")
-        .select("id, summary_id, content, order_index")
-        .eq("summary_id", summaryId)
-        .is("deleted_at", null)
-        .order("order_index", { ascending: true })
-        .limit(FALLBACK_CHUNK_LIMIT),
-    ]);
+    const { data: summaryRow } = await db
+      .from("summaries")
+      .select("id, title, content_markdown")
+      .eq("id", summaryId)
+      .is("deleted_at", null)
+      .single();
 
-    if (!chunkRows || chunkRows.length === 0) return [];
+    if (!summaryRow) return [];
 
-    const title = (summaryRow?.title as string) || "Material";
-    return chunkRows.map((row) => ({
-      chunk_id: row.id as string,
-      summary_id: row.summary_id as string,
+    const title = (summaryRow.title as string) || "Material";
+    const summaryIdStr = summaryRow.id as string;
+
+    const makeMatch = (
+      id: string,
+      content: string,
+    ): MatchedChunk => ({
+      chunk_id: id,
+      summary_id: summaryIdStr,
       summary_title: title,
-      content: row.content as string,
+      content,
       similarity: 0,
       text_rank: 0,
       combined_score: 0,
-    }));
+    });
+
+    // 1. chunks (canonical ingested form)
+    const { data: chunkRows } = await db
+      .from("chunks")
+      .select("id, summary_id, content, order_index")
+      .eq("summary_id", summaryId)
+      .is("deleted_at", null)
+      .order("order_index", { ascending: true })
+      .limit(FALLBACK_CHUNK_LIMIT);
+
+    if (chunkRows && chunkRows.length > 0) {
+      return chunkRows.map((row) =>
+        makeMatch(row.id as string, row.content as string),
+      );
+    }
+
+    // 2. summary_blocks (Smart Reader format)
+    const { data: blockRows } = await db
+      .from("summary_blocks")
+      .select("id, type, heading_text, heading_level, content, order_index")
+      .eq("summary_id", summaryId)
+      .eq("is_active", true)
+      .order("order_index", { ascending: true })
+      .limit(FALLBACK_BLOCK_LIMIT);
+
+    if (blockRows && blockRows.length > 0) {
+      return blockRows
+        .map((row) => {
+          const type = row.type as string;
+          const content = (row.content as string) || "";
+          if (type === "heading" && row.heading_text) {
+            const level = (row.heading_level as number) || 2;
+            const hashes = "#".repeat(Math.min(Math.max(level, 1), 6));
+            return makeMatch(row.id as string, `${hashes} ${row.heading_text}`);
+          }
+          return content.trim()
+            ? makeMatch(row.id as string, content)
+            : null;
+        })
+        .filter((m): m is MatchedChunk => m !== null);
+    }
+
+    // 3. content_markdown (raw summary body)
+    const markdown = (summaryRow.content_markdown as string | null) || "";
+    if (markdown.trim()) {
+      const truncated = markdown.length > FALLBACK_MARKDOWN_MAX_CHARS
+        ? markdown.slice(0, FALLBACK_MARKDOWN_MAX_CHARS) + "\n..."
+        : markdown;
+      return [makeMatch(`${summaryIdStr}:markdown`, truncated)];
+    }
+
+    return [];
   } catch (e) {
     console.warn("[RAG Chat] Summary fallback fetch failed:", (e as Error).message);
     return [];
