@@ -30,10 +30,19 @@
  *   - list-models.ts     (diagnostic, no longer needed)
  *   - re-embed-all.ts    (D57 migration tool, completed)
  *
- * INC-3 FIX: Added AI-specific rate limit middleware (20 req/hour).
+ * INC-3 FIX: Added AI-specific rate limit middleware (now 100 req/hour).
  * Uses the distributed check_rate_limit() RPC from migration 20260303_02.
  * Applies to Gemini-consuming POST routes (generate, generate-smart,
  * ingest, re-chunk, rag-chat, ingest-pdf).
+ *
+ * RL-AI-100 BUMP: Raised AI_RATE_LIMIT from 20 → 100 req/hour. The
+ * original 20/hour cap is barely 1 chat exchange every 3 minutes,
+ * which trips on any normal study session (especially when the
+ * student is iteratively testing or having a multi-turn conversation
+ * with Axon AI). At 100/hour the user gets ~1.6/min average headroom
+ * while still bounding worst-case Anthropic spend per user. The
+ * Anthropic API itself caps further upstream so this isn't the only
+ * line of defense.
  *
  * P6 FIX: POST /ai/report excluded from rate limit (no Gemini cost).
  * D9 FIX: POST /ai/pre-generate has own rate limit bucket.
@@ -63,8 +72,8 @@ import { authenticate, err, getAdminClient, PREFIX } from "../../db.ts";
 
 const aiRoutes = new Hono();
 
-// INC-3 FIX: AI-specific rate limit middleware (20 req/hour)
-const AI_RATE_LIMIT = 20;
+// INC-3 FIX: AI-specific rate limit middleware (RL-AI-100: 100 req/hour)
+const AI_RATE_LIMIT = 100;
 const AI_RATE_WINDOW_MS = 3600000;
 
 async function aiRateLimitMiddleware(c: Context, next: Next) {
