@@ -4,22 +4,32 @@
  * Called by crud-factory.ts fire-and-forget after successful
  * POST or PUT on the summary_blocks table.
  *
- * Purpose: When a block is edited on a published summary,
- * revert the summary status to 'review' (dirty flag).
- * This ensures published summaries aren't served with stale
- * embeddings — the professor must re-publish to regenerate them.
+ * Two responsibilities:
+ *
+ * 1. Dirty-flag the parent summary: when a block is edited on a
+ *    published summary, revert status 'published' → 'review' so
+ *    stale embeddings aren't served to students.
+ *
+ * 2. Re-chunk + re-embed: run autoChunkAndEmbed on the parent
+ *    summary so the chunks table stays in sync with the latest
+ *    block content. Without this, block-based summaries only get
+ *    chunks at publish time and go stale between edits, forcing
+ *    the RAG chat into the block-fallback path instead of real
+ *    semantic search.
  *
  * Behavior:
- *   - status = 'published' → revert to 'review'
- *   - status = 'review'/'raw'/'draft' → no-op (already dirty)
  *   - Missing summary_id → log warning, return
- *   - All errors are absorbed and logged (fire-and-forget)
+ *   - Missing institution_id on parent → log warning, skip re-chunk
+ *   - status = 'published' → revert to 'review' + re-chunk
+ *   - other statuses → re-chunk only
+ *   - All errors absorbed (fire-and-forget, never affects CRUD response)
  *
- * Fase 4, TASK_7
+ * Fase 4, TASK_7 (+ autoChunk follow-up)
  */
 
 import type { AfterWriteParams } from "./crud-factory.ts";
 import { getAdminClient } from "./db.ts";
+import { autoChunkAndEmbed } from "./auto-ingest.ts";
 
 /**
  * afterWrite hook for summary_blocks.
@@ -40,26 +50,26 @@ export function onBlockWrite({
     return;
   }
 
-  // Fire-and-forget: check summary status and revert if published.
-  revertIfPublished(summaryId).catch((e) => {
+  // Fire-and-forget: revert published→review AND trigger re-chunk.
+  handleBlockWrite(summaryId).catch((e) => {
     console.error(
-      `[Block Hook] Failed to check/revert summary ${summaryId}:`,
+      `[Block Hook] Failed to process summary ${summaryId}:`,
       (e as Error).message,
     );
   });
 }
 
 /**
- * Check the summary's current status. If 'published', revert to 'review'.
- * Uses admin client to bypass RLS (the hook runs in server context).
+ * Fetch parent summary, revert status if published, and trigger
+ * autoChunkAndEmbed. Uses the admin client to bypass RLS.
  */
-async function revertIfPublished(summaryId: string): Promise<void> {
+async function handleBlockWrite(summaryId: string): Promise<void> {
   const admin = getAdminClient();
 
-  // 1. Fetch current status
+  // 1. Fetch current status + institution_id (needed for auto-ingest)
   const { data: summary, error: fetchErr } = await admin
     .from("summaries")
-    .select("id, status")
+    .select("id, status, institution_id")
     .eq("id", summaryId)
     .single();
 
@@ -70,26 +80,44 @@ async function revertIfPublished(summaryId: string): Promise<void> {
     return;
   }
 
-  // 2. Only revert if currently published
-  if (summary.status !== "published") {
-    return;
+  // 2. Revert status if currently published
+  if (summary.status === "published") {
+    const { error: updateErr } = await admin
+      .from("summaries")
+      .update({ status: "review", updated_at: new Date().toISOString() })
+      .eq("id", summaryId);
+
+    if (updateErr) {
+      console.error(
+        `[Block Hook] Failed to revert summary ${summaryId} to review:`,
+        updateErr.message,
+      );
+      // Continue to re-chunk anyway — the chunks should still be refreshed.
+    } else {
+      console.info(
+        `[Block Hook] Reverted summary ${summaryId} from 'published' → 'review'`,
+      );
+    }
   }
 
-  // 3. Revert to 'review'
-  const { error: updateErr } = await admin
-    .from("summaries")
-    .update({ status: "review", updated_at: new Date().toISOString() })
-    .eq("id", summaryId);
-
-  if (updateErr) {
-    console.error(
-      `[Block Hook] Failed to revert summary ${summaryId} to review:`,
-      updateErr.message,
+  // 3. Re-chunk + re-embed so the chunks table matches the new block state.
+  //    autoChunkAndEmbed reads summary_blocks directly, holds an advisory
+  //    lock per summary, and skips if the content hash hasn't changed —
+  //    so rapid block edits are coalesced efficiently.
+  const institutionId = summary.institution_id as string | undefined;
+  if (!institutionId) {
+    console.warn(
+      `[Block Hook] Summary ${summaryId} has no institution_id; skipping auto-ingest.`,
     );
     return;
   }
 
-  console.info(
-    `[Block Hook] Reverted summary ${summaryId} from 'published' → 'review'`,
-  );
+  try {
+    await autoChunkAndEmbed(summaryId, institutionId);
+  } catch (e) {
+    console.error(
+      `[Block Hook] Auto-ingest failed for summary ${summaryId}:`,
+      (e as Error).message,
+    );
+  }
 }
