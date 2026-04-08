@@ -1,22 +1,21 @@
 /**
- * block-hook.test.ts — 5 tests for onBlockWrite()
+ * block-hook.test.ts — tests for onBlockWrite()
  *
- * Tests the fire-and-forget hook that reverts summary status
- * from 'published' → 'review' when a block is edited.
+ * Tests the fire-and-forget hook that:
+ *   1. Reverts summary status 'published' → 'review' when a block
+ *      is edited on a published summary.
+ *   2. Triggers autoChunkAndEmbed so the chunks table stays fresh
+ *      after block edits (no need to wait for explicit publish).
  *
- * Strategy: Since block-hook.ts will use getAdminClient() to query
- * the summary status and potentially update it, we test the hook
- * logic by importing it with fake env vars (same pattern as
- * summary_hook_test.ts). The Supabase client will fail to connect
- * (port 1 → ECONNREFUSED), which is fine for testing that errors
- * are absorbed.
- *
- * For the "no crash" and "no-op" tests, we verify the function
- * returns without throwing synchronously.
+ * Strategy: block-hook.ts uses getAdminClient() to query summary
+ * status and trigger auto-ingest. We import it with fake env vars
+ * (same pattern as summary_hook_test.ts). The Supabase client will
+ * fail to connect (port 1 → ECONNREFUSED), which is fine for
+ * testing that errors are absorbed.
  *
  * Run: deno test supabase/functions/server/tests/block-hook.test.ts --allow-env --allow-net --allow-read
  *
- * Fase 4, TASK_3
+ * Fase 4, TASK_3 (+ autoChunk follow-up)
  */
 
 import {
@@ -109,35 +108,12 @@ Deno.test("BH-1 · No crash if summary_id is missing from row", () => {
 });
 
 Deno.test({
-  name: "BH-2 · No-op if summary status is 'review' (already dirty)",
-  fn: () => {
-    // When the summary is already in 'review' status, no DB update needed.
-    // The hook should return immediately without querying or updating.
-    const capture = captureConsole();
-    try {
-      onBlockWrite({
-        action: "update",
-        row: makeBlockRow(),
-        updatedFields: ["content"],
-        userId: "user-123",
-      });
-    } catch {
-      // Placeholder throws — will pass once implemented
-    } finally {
-      capture.restore();
-    }
-  },
-  sanitizeOps: false,
-  sanitizeResources: false,
-});
-
-Deno.test({
-  name: "BH-3 · Reverts 'published' → 'review' when block is edited",
+  name: "BH-2 · Always triggers auto-ingest on block write (review status)",
   fn: async () => {
-    // When a block belonging to a published summary is edited,
-    // the hook should update the summary status to 'review'.
-    // With fake Supabase URL, the DB call fails — that's OK,
-    // we verify the hook doesn't throw (fire-and-forget).
+    // Even if the summary is already in 'review', the hook must still
+    // kick off autoChunkAndEmbed so the chunks table reflects the latest
+    // block content. We verify the hook doesn't throw and the async
+    // fire-and-forget chain settles without crashing.
     const capture = captureConsole();
     try {
       onBlockWrite({
@@ -146,10 +122,7 @@ Deno.test({
         updatedFields: ["content"],
         userId: "user-123",
       });
-      // Wait for async fire-and-forget to settle
-      await new Promise((r) => setTimeout(r, 1000));
-    } catch {
-      // Placeholder throws — will pass once implemented
+      await new Promise((r) => setTimeout(r, 1500));
     } finally {
       capture.restore();
     }
@@ -159,13 +132,36 @@ Deno.test({
 });
 
 Deno.test({
-  name: "BH-4 · No-op if summary status is 'draft'",
-  fn: () => {
-    // Draft summaries don't need to be reverted — they're not published.
-    // The hook is fire-and-forget and triggers a Supabase call regardless
-    // of the eventual status check, so the underlying client may still
-    // hold a timer when this synchronous test returns. Disable the
-    // sanitizers (matches BH-2/BH-3/BH-5).
+  name: "BH-3 · Reverts 'published' → 'review' and triggers auto-ingest",
+  fn: async () => {
+    // When a block belonging to a published summary is edited, the hook
+    // should revert the summary status to 'review' AND re-chunk. With
+    // fake Supabase URL, the DB calls fail — we only verify the hook
+    // doesn't throw (fire-and-forget semantics).
+    const capture = captureConsole();
+    try {
+      onBlockWrite({
+        action: "update",
+        row: makeBlockRow(),
+        updatedFields: ["content"],
+        userId: "user-123",
+      });
+      await new Promise((r) => setTimeout(r, 1500));
+    } finally {
+      capture.restore();
+    }
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+});
+
+Deno.test({
+  name: "BH-4 · Create on draft summary triggers auto-ingest",
+  fn: async () => {
+    // Draft summaries don't need a status revert, but they DO need
+    // chunks so the RAG chat can retrieve their content. Creating a
+    // block must still trigger auto-ingest (no-op'd later if needed
+    // by the advisory lock / content hash logic inside auto-ingest).
     const capture = captureConsole();
     try {
       onBlockWrite({
@@ -173,8 +169,7 @@ Deno.test({
         row: makeBlockRow(),
         userId: "user-123",
       });
-    } catch {
-      // Placeholder throws — will pass once implemented
+      await new Promise((r) => setTimeout(r, 1500));
     } finally {
       capture.restore();
     }

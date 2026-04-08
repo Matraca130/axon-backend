@@ -1,18 +1,24 @@
 /**
  * Tests for summary-hook.ts — onSummaryWrite gate logic.
  *
- * Tests cover the 3-gate decision logic that determines whether
+ * Tests cover the 2-gate decision logic that determines whether
  * to trigger autoChunkAndEmbed after a summary POST/PUT:
  *
- *   Gate 1: On update, only trigger if content_markdown was in updatedFields.
+ *   Gate 1: On update, only trigger if a chunk-relevant field
+ *           (content_markdown or title) was in updatedFields.
  *   Gate 2: Extract summaryId + institutionId from row; skip if missing.
- *   Gate 3: Skip if content_markdown is empty/null/whitespace.
+ *
+ * NOTE: The old "Gate 3" (skip if content_markdown is empty) was
+ * removed — block-based summaries legitimately start with empty
+ * content_markdown and their chunks must come from summary_blocks.
+ * autoChunkAndEmbed now handles the "no content anywhere" case
+ * internally as a cheap no-op.
  *
  * Test strategy:
- *   - Gates that SKIP (T1–T8): verify the function returns without
+ *   - Gates that SKIP (T1–T5): verify the function returns without
  *     throwing. Since skip paths exit before any async work, these
  *     tests are fully synchronous and deterministic.
- *   - Fire path (T9): verify the function doesn't throw even when
+ *   - Fire path (T6–T9): verify the function doesn't throw even when
  *     autoChunkAndEmbed fails (fake Supabase URL → connection refused).
  *     The hook's .catch() absorbs the async error and logs it.
  *
@@ -116,29 +122,33 @@ function captureWarn(): { messages: string[]; restore: () => void } {
 }
 
 // ═════════════════════════════════════════════════════════════════════
-// Gate 1 — Update: only trigger if content_markdown changed
+// Gate 1 — Update: only trigger if a chunk-relevant field changed
 // ═════════════════════════════════════════════════════════════════════
 //
-// Gate 1 code:
-//   if (action === "update" && !updatedFields?.includes("content_markdown")) return;
+// Gate 1 code (simplified):
+//   if (action === "update" && !touched.some(f => CHUNK_RELEVANT_FIELDS.has(f))) return;
+//
+// CHUNK_RELEVANT_FIELDS = {content_markdown, title}
 //
 // Expected behavior:
-//   - update + updatedFields without "content_markdown" → return (no-op)
+//   - update + {status, order_index} only → return (no-op)
 //   - update + empty updatedFields → return (no-op)
-//   - update + undefined updatedFields → return (optional chain → falsy)
-//   - create (any action !== "update") → pass through Gate 1
+//   - update + undefined updatedFields → return (no-op)
+//   - update + {title} → fires (title is embedded with content)
+//   - update + {content_markdown} → fires
+//   - create (any action !== "update") → bypasses Gate 1
 
-Deno.test("T1 · Gate 1 — update without content_markdown in updatedFields → no-op", () => {
-  // Scenario: professor changed title + status via PUT /summaries/:id
-  // Body: { title: "New Title", status: "published" }
-  // updatedFields: ["title", "status"] — no content_markdown
+Deno.test("T1 · Gate 1 — update with only non-chunk fields (status) → no-op", () => {
+  // Scenario: professor toggled status via PUT /summaries/:id
+  // Body: { status: "published" }
+  // updatedFields: ["status"] — no chunk-relevant field
   //
   // Expected: Gate 1 short-circuits. No re-chunking.
   // Verify: function returns without throwing.
   onSummaryWrite({
     action: "update",
     row: makeRow(),
-    updatedFields: ["title", "status"],
+    updatedFields: ["status", "order_index"],
     userId: "user-123",
   });
 });
@@ -147,10 +157,6 @@ Deno.test("T2 · Gate 1 — update with empty updatedFields → no-op", () => {
   // Edge case: factory somehow sent an update with 0 actual fields.
   // (Shouldn't happen — factory checks Object.keys(row).length > 0 —
   //  but if it did, the hook must NOT trigger.)
-  //
-  // [].includes("content_markdown") → false → !false is true? No:
-  // !updatedFields?.includes("content_markdown") → ![].includes(...) → !false → true → return.
-  // Wait, [].includes("content_markdown") returns false. !false = true. So it returns. ✓
   onSummaryWrite({
     action: "update",
     row: makeRow(),
@@ -161,11 +167,7 @@ Deno.test("T2 · Gate 1 — update with empty updatedFields → no-op", () => {
 
 Deno.test("T3 · Gate 1 — update with updatedFields undefined → no-op", () => {
   // Edge case: AfterWriteParams.updatedFields is optional (undefined on create).
-  // If somehow undefined is passed on an update action:
-  // !updatedFields?.includes("content_markdown")
-  //   → !undefined?.includes(...)
-  //   → !undefined
-  //   → true → return. ✓
+  // On update with undefined, the some() on (touched ?? []) is false → return.
   onSummaryWrite({
     action: "update",
     row: makeRow(),
@@ -240,52 +242,91 @@ Deno.test("T5 · Gate 2 — create with row missing institution_id → warns and
 });
 
 // ═════════════════════════════════════════════════════════════════════
-// Gate 3 — Content check: skip if empty/null/whitespace
+// Block-based summaries — create with empty content_markdown should FIRE
 // ═════════════════════════════════════════════════════════════════════
 //
-// Gate 3 code:
-//   const contentMarkdown = row.content_markdown as string | null;
-//   if (!contentMarkdown || contentMarkdown.trim().length === 0) return;
+// The old Gate 3 skipped empty content_markdown. That broke the primary
+// Smart Reader flow: professors create a summary with just a title and
+// then add blocks via POST /summary-blocks. The old behavior meant
+// autoChunkAndEmbed was never invoked, so no chunks ever landed in the
+// chunks table until /summaries/:id/publish was explicitly called.
 //
-// Expected behavior:
-//   - content_markdown is "" → !"" is true → return
-//   - content_markdown is null → !null is true → return
-//   - content_markdown is whitespace → trim().length === 0 → return
-//   - content_markdown has real content → pass through Gate 3
+// Current behavior: onSummaryWrite ALWAYS fires autoChunkAndEmbed on
+// create, and the ingest pipeline itself (auto-ingest.ts) is responsible
+// for resolving the source of truth — summary_blocks first, falling back
+// to content_markdown, returning a cheap no-op if both are empty.
+//
+// These tests verify the hook invokes auto-ingest even when
+// content_markdown is empty/null/whitespace.
+//
+// sanitizeOps/sanitizeResources disabled because the fire-and-forget
+// promise creates async ops that Deno's test sanitizer would flag.
 
-Deno.test("T6 · Gate 3 — create with empty content_markdown → no-op", () => {
-  // Scenario: professor created a summary with title only, no content yet.
-  // POST /summaries { title: "Draft", content_markdown: "" }
-  //
-  // Expected: Gate 3 short-circuits. No point chunking empty content.
-  onSummaryWrite({
-    action: "create",
-    row: makeRow({ content_markdown: "" }),
-    userId: "user-123",
-  });
+async function assertHookFires(
+  row: Record<string, unknown>,
+  action: "create" | "update" = "create",
+): Promise<void> {
+  const errors: string[] = [];
+  const infos: string[] = [];
+  const originalError = console.error;
+  const originalInfo = console.info;
+  const originalWarn = console.warn;
+  console.error = (...args: unknown[]) => {
+    errors.push(args.map(String).join(" "));
+  };
+  console.info = (...args: unknown[]) => {
+    infos.push(args.map(String).join(" "));
+  };
+  console.warn = () => {};
+
+  try {
+    onSummaryWrite({
+      action,
+      row,
+      updatedFields: action === "update" ? ["content_markdown"] : undefined,
+      userId: "user-123",
+    });
+
+    const hookFiredP = (): boolean =>
+      errors.some((e) => e.includes("[Summary Hook]")) ||
+      infos.some((i) => i.includes("[Auto-Ingest]"));
+
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline && !hookFiredP()) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    assertEquals(
+      hookFiredP(),
+      true,
+      "Expected autoChunkAndEmbed to have been invoked",
+    );
+  } finally {
+    console.error = originalError;
+    console.info = originalInfo;
+    console.warn = originalWarn;
+  }
+}
+
+Deno.test({
+  name: "T6 · Block-based create with empty content_markdown → fires auto-ingest",
+  fn: () => assertHookFires(makeRow({ content_markdown: "" })),
+  sanitizeOps: false,
+  sanitizeResources: false,
 });
 
-Deno.test("T7 · Gate 3 — create with null content_markdown → no-op", () => {
-  // Scenario: professor created a summary with title only.
-  // The DB column defaults to NULL (not ""). This is the most
-  // common skip case in production.
-  //
-  // !null → true → return (same branch as empty string).
-  onSummaryWrite({
-    action: "create",
-    row: makeRow({ content_markdown: null }),
-    userId: "user-123",
-  });
+Deno.test({
+  name: "T7 · Block-based create with null content_markdown → fires auto-ingest",
+  fn: () => assertHookFires(makeRow({ content_markdown: null })),
+  sanitizeOps: false,
+  sanitizeResources: false,
 });
 
-Deno.test("T8 · Gate 3 — create with whitespace-only content → no-op", () => {
-  // Scenario: professor typed some spaces/newlines but no real content.
-  // The trim() check catches this.
-  onSummaryWrite({
-    action: "create",
-    row: makeRow({ content_markdown: "   \n\t  \n  " }),
-    userId: "user-123",
-  });
+Deno.test({
+  name: "T8 · Block-based create with whitespace-only content → fires auto-ingest",
+  fn: () => assertHookFires(makeRow({ content_markdown: "   \n\t  \n  " })),
+  sanitizeOps: false,
+  sanitizeResources: false,
 });
 
 // ═════════════════════════════════════════════════════════════════════
