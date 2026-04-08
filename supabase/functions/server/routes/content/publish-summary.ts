@@ -79,7 +79,6 @@ publishSummaryRoutes.post(
       .select("id, type, content, order_index")
       .eq("summary_id", summaryId)
       .eq("is_active", true)
-      .is("deleted_at", null)
       .order("order_index", { ascending: true });
 
     if (blocksErr) return safeErr(c, "Fetch blocks", blocksErr);
