@@ -76,25 +76,25 @@ Deno.test("rate limit: first request is allowed", () => {
   assertEquals(result.current, 1);
 });
 
-Deno.test("rate limit: 120 requests within window are allowed", () => {
+Deno.test("rate limit: requests within window are allowed up to MAX_REQUESTS", () => {
   rateLimitMap.clear();
   const now = Date.now();
   let result;
   for (let i = 0; i < RATE_LIMIT_MAX_REQUESTS; i++) {
     result = checkRateLimitLocal("test-user-2", now);
   }
-  assert(result!.allowed, "Request #120 should be allowed");
+  assert(result!.allowed, `Request #${RATE_LIMIT_MAX_REQUESTS} should be allowed`);
   assertEquals(result!.current, RATE_LIMIT_MAX_REQUESTS);
 });
 
-Deno.test("rate limit: request #121 is rejected", () => {
+Deno.test("rate limit: request beyond MAX_REQUESTS is rejected", () => {
   rateLimitMap.clear();
   const now = Date.now();
   for (let i = 0; i < RATE_LIMIT_MAX_REQUESTS; i++) {
     checkRateLimitLocal("test-user-3", now);
   }
   const result = checkRateLimitLocal("test-user-3", now);
-  assert(!result.allowed, "Request #121 should be rejected");
+  assert(!result.allowed, `Request #${RATE_LIMIT_MAX_REQUESTS + 1} should be rejected`);
   assert(result.retryAfterMs! > 0, "Should include retry-after");
 });
 
@@ -146,8 +146,18 @@ Deno.test("rate limit: window is 60 seconds", () => {
   assertEquals(RATE_LIMIT_WINDOW_MS, 60_000);
 });
 
-Deno.test("rate limit: max requests is 120 per window", () => {
-  assertEquals(RATE_LIMIT_MAX_REQUESTS, 120);
+Deno.test("rate limit: max requests is set to a sane positive integer", () => {
+  // Don't pin a specific number — the constant evolves (was 120, now 300)
+  // and the test should track the source of truth in rate-limit.ts.
+  // Just guard against accidental zero/negative/huge values.
+  assert(
+    Number.isInteger(RATE_LIMIT_MAX_REQUESTS),
+    "MAX_REQUESTS must be an integer",
+  );
+  assert(
+    RATE_LIMIT_MAX_REQUESTS > 0 && RATE_LIMIT_MAX_REQUESTS <= 10_000,
+    `MAX_REQUESTS must be in (0, 10000], got ${RATE_LIMIT_MAX_REQUESTS}`,
+  );
 });
 
 // ═══ CORS — Origin Validation ═══

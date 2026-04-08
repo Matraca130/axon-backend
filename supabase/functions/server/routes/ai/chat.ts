@@ -502,6 +502,16 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   const summaryId = isUuid(body.summary_id) ? (body.summary_id as string) : null;
   const topicId = isUuid(body.topic_id) ? (body.topic_id as string) : null;
 
+  // DEBUG (RL-DEBUG-2): re-introduce body shape capture into the
+  // model_used column so we can read it via SQL. Augmented in this
+  // round with the topic_fallback step counts so we can see whether
+  // the cascade ran and what each step returned. Remove once the
+  // root cause is verified.
+  const debugBodyKeys = JSON.stringify(Object.keys(body || {}));
+  const debugRawSid = body?.summary_id ?? "null";
+  const debugRawTid = body?.topic_id ?? "null";
+  let debugTopicFallbackCount = "skipped";
+
   const history = Array.isArray(body.history)
     ? body.history.slice(-6).map((h: Record<string, string>) => ({
         role: h.role,
@@ -681,6 +691,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   // content from all summaries under that topic.
   if (!ragContext && topicId) {
     const fallbackMatches = await fetchTopicFallbackChunks(adminDb, topicId);
+    debugTopicFallbackCount = String(fallbackMatches.length);
     if (fallbackMatches.length > 0) {
       const assembled = assembleContext(fallbackMatches, []);
       ragContext = assembled.ragContext;
@@ -688,7 +699,14 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
       contextChunksCount = assembled.contextChunksCount;
       searchType = "topic_fallback";
     }
+  } else if (!ragContext) {
+    debugTopicFallbackCount = topicId
+      ? "ragContextAlreadySet"
+      : "noTopicId";
   }
+
+  // DEBUG (RL-DEBUG-2): assemble debug suffix for model_used.
+  const debugModelSuffix = `|DEBUG keys=${debugBodyKeys} rsid=${debugRawSid} rtid=${debugRawTid} sid=${summaryId ?? "null"} tid=${topicId ?? "null"} tfb=${debugTopicFallbackCount}`;
 
   let profileContext = "";
   try {
@@ -825,7 +843,7 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
                 : null,
               latency_ms: latencyMs,
               search_type: logSearchType,
-              model_used: GENERATE_MODEL,
+              model_used: `${GENERATE_MODEL}${debugModelSuffix}`,
               retrieval_strategy: strategy,
               rerank_applied: rerankApplied,
             })
@@ -887,7 +905,7 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
           : null,
         latency_ms: latencyMs,
         search_type: logSearchType,
-        model_used: GENERATE_MODEL,
+        model_used: `${GENERATE_MODEL}${debugModelSuffix}`,
         retrieval_strategy: strategy,
         rerank_applied: rerankApplied,
       })
