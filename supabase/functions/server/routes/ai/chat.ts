@@ -243,6 +243,41 @@ const FALLBACK_CHUNK_LIMIT = 12;
 const FALLBACK_BLOCK_LIMIT = 40;
 const FALLBACK_MARKDOWN_MAX_CHARS = 7000;
 
+// summary_blocks.content is JSONB with shape varying by `type`:
+//   prose / key_point  → { title, content }
+//   list_detail        → { intro, items: [...] }
+//   image_reference    → { alt, src }
+//   stages             → { items: [{ stage, title, content }, ...] }
+//   ...and others
+//
+// We can't enumerate every shape (the schema evolves), so this helper
+// walks the JSONB recursively and concatenates every string value it
+// finds. Lossy but robust: the LLM gets all the prose without us
+// having to maintain a per-type extractor. URLs etc. leak through —
+// acceptable trade-off vs. crashing on `content.trim()`.
+function extractTextFromBlockContent(content: unknown): string {
+  if (content == null) return "";
+  if (typeof content === "string") return content;
+  if (typeof content === "number" || typeof content === "boolean") {
+    return String(content);
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map(extractTextFromBlockContent)
+      .filter((s) => s.length > 0)
+      .join("\n");
+  }
+  if (typeof content === "object") {
+    const parts: string[] = [];
+    for (const v of Object.values(content as Record<string, unknown>)) {
+      const s = extractTextFromBlockContent(v);
+      if (s) parts.push(s);
+    }
+    return parts.join("\n");
+  }
+  return "";
+}
+
 async function fetchSummaryFallbackChunks(
   adminDb: SupabaseClient,
   summaryId: string,
@@ -309,15 +344,14 @@ async function fetchSummaryFallbackChunks(
       return blockRows
         .map((row) => {
           const type = row.type as string;
-          const content = (row.content as string) || "";
           if (type === "heading" && row.heading_text) {
             const level = (row.heading_level as number) || 2;
             const hashes = "#".repeat(Math.min(Math.max(level, 1), 6));
             return makeMatch(row.id as string, `${hashes} ${row.heading_text}`);
           }
-          return content.trim()
-            ? makeMatch(row.id as string, content)
-            : null;
+          // summary_blocks.content is JSONB — extract all string values.
+          const text = extractTextFromBlockContent(row.content).trim();
+          return text ? makeMatch(row.id as string, text) : null;
         })
         .filter((m): m is MatchedChunk => m !== null);
     }
@@ -453,13 +487,14 @@ async function fetchSummaryFallbackChunksTraced(
       const matches = blockRows
         .map((row) => {
           const type = row.type as string;
-          const content = (row.content as string) || "";
           if (type === "heading" && row.heading_text) {
             const level = (row.heading_level as number) || 2;
             const hashes = "#".repeat(Math.min(Math.max(level, 1), 6));
             return makeMatch(row.id as string, `${hashes} ${row.heading_text}`);
           }
-          return content.trim() ? makeMatch(row.id as string, content) : null;
+          // summary_blocks.content is JSONB — extract all string values.
+          const text = extractTextFromBlockContent(row.content).trim();
+          return text ? makeMatch(row.id as string, text) : null;
         })
         .filter((m): m is MatchedChunk => m !== null);
       entry.matchesReturned = matches.length;
