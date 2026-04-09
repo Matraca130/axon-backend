@@ -51,9 +51,10 @@ export async function releaseAdvisoryLock(
   lockKey: number,
   label: string,
 ): Promise<void> {
-  await db.rpc("advisory_unlock", { lock_key: lockKey }).catch((e: Error) => {
-    console.warn(`[Advisory Lock] release failed for ${label}:`, e.message);
-  });
+  const { error } = await db.rpc("advisory_unlock", { lock_key: lockKey });
+  if (error) {
+    console.warn(`[Advisory Lock] release failed for ${label}:`, error.message);
+  }
 }
 
 // ─── High-level helper ────────────────────────────────────────────
