@@ -282,6 +282,3 @@ async function _tryAwardBadge(
   return true;
 }
 
-// ─── Exported for testing ───────────────────────────────────────
-// advisoryLockKey y helpers se exportan desde lib/advisory-lock.ts
-export { advisoryLockKey };

@@ -1,17 +1,10 @@
 /**
- * lib/advisory-lock.ts — Shared advisory lock utilities for Axon
+ * lib/advisory-lock.ts — PostgreSQL advisory lock helpers for Axon
  *
- * Centraliza el patrón de advisory lock de PostgreSQL usado en:
- *   - auto-ingest.ts     (chunking de summaries)
- *   - gamification-dispatcher.ts (post-award badge evaluation)
- *   - routes/gamification/streak.ts (streak-freeze y streak-repair)
- *
- * Anteriormente cada archivo tenía su propia implementación de hash:
- *   - auto-ingest.ts: advisoryLockKey() — djb2, puede retornar negativo
- *   - gamification-dispatcher.ts: fnv1a32() — FNV-1a, siempre positivo
- *   - streak.ts: hashCode() — djb2, Math.abs() en call site
- *
- * Esta versión unifica en FNV-1a con >>> 0 (siempre unsigned).
+ * Previene ejecuciones concurrentes de operaciones críticas:
+ *   - auto-ingest.ts: chunking de la misma summary en paralelo
+ *   - gamification-dispatcher.ts: evaluación de badges post-award
+ *   - routes/gamification/streak.ts: compra/reparación de streak freeze
  */
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
@@ -19,14 +12,8 @@ import type { SupabaseClient } from "npm:@supabase/supabase-js";
 // ─── Hash ────────────────────────────────────────────────────────
 
 /**
- * FNV-1a 32-bit hash → unsigned integer (siempre positivo).
- * Seguro para pg_try_advisory_lock que acepta bigint con o sin signo,
- * pero la consistencia de unsigned evita confusiones entre implementaciones.
- *
- * Reemplaza:
- *   advisoryLockKey() de auto-ingest.ts (djb2, podía ser negativo)
- *   fnv1a32()         de gamification-dispatcher.ts (FNV-1a, unsigned)
- *   hashCode()        de routes/gamification/streak.ts (djb2, Math.abs en call site)
+ * FNV-1a 32-bit hash → unsigned integer.
+ * Siempre positivo (>>> 0): seguro para pg_try_advisory_lock.
  */
 export function advisoryLockKey(input: string): number {
   let hash = 0x811c9dc5; // FNV offset basis

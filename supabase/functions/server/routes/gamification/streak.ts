@@ -151,7 +151,12 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
   // --- Fallback path: read-then-write with advisory lock (C-003) ---
   // Advisory lock serializes concurrent freeze-buy requests per student.
   const lockKey = advisoryLockKey(`${user.id}:streak_freeze`);
-  const lockAcquired = await tryAcquireAdvisoryLock(adminDb, lockKey);
+  let lockAcquired: boolean;
+  try {
+    lockAcquired = await tryAcquireAdvisoryLock(adminDb, lockKey);
+  } catch (e) {
+    return safeErr(c, "Advisory lock (streak-freeze)", e instanceof Error ? e : null);
+  }
 
   if (!lockAcquired) {
     return err(c, "Otra operacion de compra esta en progreso. Intenta de nuevo.", 409);
@@ -291,7 +296,12 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
   // student gets their own lock, but concurrent repairs by the SAME student
   // are serialized.
   const lockKey = advisoryLockKey(`${user.id}:streak_repair`);
-  const lockAcquired = await tryAcquireAdvisoryLock(adminDb, lockKey);
+  let lockAcquired: boolean;
+  try {
+    lockAcquired = await tryAcquireAdvisoryLock(adminDb, lockKey);
+  } catch (e) {
+    return safeErr(c, "Advisory lock (streak-repair)", e instanceof Error ? e : null);
+  }
 
   if (!lockAcquired) {
     return err(c, "Otra operacion de reparacion esta en progreso. Intenta de nuevo.", 409);
