@@ -25,29 +25,7 @@
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { getAdminClient } from "./db.ts";
-
-// ─── Lock Key Derivation ────────────────────────────────────────
-
-/**
- * FNV-1a 32-bit hash → BigInt lock key.
- * Deterministic, fast, good distribution for advisory locks.
- */
-function fnv1a32(input: string): number {
-  let hash = 0x811c9dc5; // FNV offset basis
-  for (let i = 0; i < input.length; i++) {
-    hash ^= input.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193); // FNV prime
-  }
-  // Ensure positive 32-bit integer (pg advisory lock accepts bigint)
-  return hash >>> 0;
-}
-
-/**
- * Derive a deterministic advisory lock key for post-award evaluation.
- */
-function postEvalLockKey(studentId: string): number {
-  return fnv1a32(`${studentId}:post_eval`);
-}
+import { advisoryLockKey, withAdvisoryLock } from "./lib/advisory-lock.ts";
 
 // ─── Post-Award Evaluation ──────────────────────────────────────
 
@@ -84,78 +62,24 @@ export async function _postAwardEvaluation(
   institutionId: string,
 ): Promise<void> {
   const db: SupabaseClient = getAdminClient();
-  const lockKey = postEvalLockKey(studentId);
+  const lockKey = advisoryLockKey(`${studentId}:post_eval`);
 
-  // ── Step 1: Try to acquire advisory lock ──
-  let acquired = false;
-  try {
-    const { data, error } = await db.rpc("try_advisory_lock", {
-      lock_key: lockKey,
-    });
-
-    if (error) {
-      console.warn(
-        `[Gamification Dispatcher] try_advisory_lock RPC failed for student=${studentId}:`,
-        error.message,
+  await withAdvisoryLock(
+    db,
+    lockKey,
+    `post-eval:${studentId}`,
+    async () => {
+      console.info(
+        `[Gamification Dispatcher] Lock acquired for student=${studentId}, ` +
+          `lockKey=${lockKey}. Running post-award badge evaluation.`,
       );
-      // If the lock RPC itself fails, skip evaluation to be safe.
-      // The next XP event will retry.
-      return;
-    }
-
-    acquired = data === true;
-  } catch (e) {
-    console.warn(
-      `[Gamification Dispatcher] try_advisory_lock exception for student=${studentId}:`,
-      (e as Error).message,
-    );
-    return;
-  }
-
-  if (!acquired) {
-    console.info(
+      await _evaluateBadgesForStudent(db, studentId, institutionId);
+    },
+    () => console.info(
       `[Gamification Dispatcher] Lock not acquired for student=${studentId}, ` +
         `lockKey=${lockKey} — another request is already evaluating. Skipping.`,
-    );
-    return;
-  }
-
-  console.info(
-    `[Gamification Dispatcher] Lock acquired for student=${studentId}, ` +
-      `lockKey=${lockKey}. Running post-award badge evaluation.`,
+    ),
   );
-
-  // ── Step 2: Run badge evaluation (protected by lock) ──
-  try {
-    await _evaluateBadgesForStudent(db, studentId, institutionId);
-  } catch (e) {
-    console.warn(
-      `[Gamification Dispatcher] Badge evaluation failed for student=${studentId}:`,
-      (e as Error).message,
-    );
-  } finally {
-    // ── Step 3: Always release the lock ──
-    try {
-      const { error: unlockErr } = await db.rpc("advisory_unlock", {
-        lock_key: lockKey,
-      });
-      if (unlockErr) {
-        console.warn(
-          `[Gamification Dispatcher] advisory_unlock failed for student=${studentId}:`,
-          unlockErr.message,
-        );
-      } else {
-        console.info(
-          `[Gamification Dispatcher] Lock released for student=${studentId}, lockKey=${lockKey}.`,
-        );
-      }
-    } catch (e) {
-      console.warn(
-        `[Gamification Dispatcher] advisory_unlock exception for student=${studentId}:`,
-        (e as Error).message,
-      );
-    }
-  }
 }
 
 // ─── Badge Evaluation (mirrors check-badges route logic) ────────
@@ -359,4 +283,5 @@ async function _tryAwardBadge(
 }
 
 // ─── Exported for testing ───────────────────────────────────────
-export { fnv1a32, postEvalLockKey };
+// advisoryLockKey y helpers se exportan desde lib/advisory-lock.ts
+export { advisoryLockKey };

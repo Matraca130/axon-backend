@@ -37,6 +37,7 @@ import { chunkSemantic, type SemanticChunkResult } from "./semantic-chunker.ts";
 import { generateEmbedding, generateEmbeddings } from "./openai-embeddings.ts";
 import { getAdminClient } from "./db.ts";
 import { flattenBlocksToMarkdown } from "./block-flatten.ts";
+import { advisoryLockKey, withAdvisoryLock } from "./lib/advisory-lock.ts";
 import { crypto } from "https://deno.land/std/crypto/mod.ts";
 import { encodeHex } from "https://deno.land/std/encoding/hex.ts";
 
@@ -99,21 +100,6 @@ export async function embedSummaryContent(
   }
 }
 
-// ─── Advisory Lock ──────────────────────────────────────────────────
-
-/**
- * Compute a stable advisory lock key from a UUID string.
- * pg_try_advisory_lock uses bigint; we hash the summaryId to get a
- * deterministic 32-bit integer (safe for advisory lock).
- */
-function advisoryLockKey(summaryId: string): number {
-  let hash = 0;
-  for (let i = 0; i < summaryId.length; i++) {
-    hash = ((hash << 5) - hash + summaryId.charCodeAt(i)) | 0;
-  }
-  return hash;
-}
-
 // ─── Retry with Exponential Backoff ─────────────────────────────────
 
 const MAX_RETRIES = 3;
@@ -172,15 +158,15 @@ export async function autoChunkAndEmbed(
   const adminDb = getAdminClient();
   const lockKey = advisoryLockKey(summaryId);
 
-  // Acquire advisory lock to prevent concurrent ingest of the same summary
-  const { data: lockAcquired } = await adminDb.rpc("try_advisory_lock", {
-    lock_key: lockKey,
-  });
+  const result = await withAdvisoryLock(
+    adminDb,
+    lockKey,
+    `auto-ingest:${summaryId}`,
+    () => _autoChunkAndEmbedCore(adminDb, summaryId, institutionId, t0, options, strategy),
+    () => console.info(`[Auto-Ingest] Skipping summary ${summaryId} — advisory lock not acquired`),
+  );
 
-  if (!lockAcquired) {
-    console.info(
-      `[Auto-Ingest] Skipping summary ${summaryId} — advisory lock not acquired`,
-    );
+  if (result === null) {
     return {
       summary_id: summaryId,
       chunks_created: 0,
@@ -194,7 +180,17 @@ export async function autoChunkAndEmbed(
     };
   }
 
-  try {
+  return result;
+}
+
+async function _autoChunkAndEmbedCore(
+  adminDb: ReturnType<typeof getAdminClient>,
+  summaryId: string,
+  institutionId: string,
+  t0: number,
+  options?: ChunkOptions,
+  strategy?: "recursive" | "semantic" | "auto",
+): Promise<AutoIngestResult> {
   console.info(
     `[Auto-Ingest] Processing summary ${summaryId} (institution: ${institutionId})`,
   );
@@ -522,11 +518,4 @@ export async function autoChunkAndEmbed(
     skipped_unchanged: false,
     elapsed_ms: elapsed,
   };
-
-  } finally {
-    // Release advisory lock
-    await adminDb.rpc("advisory_unlock", { lock_key: lockKey }).catch((e: Error) => {
-      console.warn(`[Auto-Ingest] Failed to release advisory lock for ${summaryId}:`, e.message);
-    });
-  }
 }
