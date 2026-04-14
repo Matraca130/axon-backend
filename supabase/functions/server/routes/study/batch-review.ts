@@ -571,7 +571,16 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     await Promise.allSettled(propagationPromises);
   }
 
-  return ok(c, {
+  // ── Response status selection ─────────────────────────────
+  // If every item failed → 500 (batch is a total failure).
+  // If some items succeeded and some failed → 207 Multi-Status.
+  // Otherwise → 200 OK.
+  // `reviewsCreated === 0` is the strongest "nothing persisted" signal because
+  // without a review row, downstream FSRS/BKT upserts are semantically orphan.
+  const hasPartialFailure = errors.length > 0 && reviewsCreated > 0;
+  const totalFailure = errors.length > 0 && reviewsCreated === 0;
+
+  const responseBody = {
     processed: validatedItems.length,
     reviews_created: reviewsCreated,
     fsrs_updated: fsrsUpdated,
@@ -579,5 +588,15 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     errors: errors.length > 0 ? errors : undefined,
     results: computedResults.length > 0 ? computedResults : undefined,
     propagation_warnings: propagationWarnings.length > 0 ? propagationWarnings : undefined,
-  });
+  };
+
+  if (totalFailure) {
+    // Use c.json directly: err() only accepts a plain string message,
+    // but the client needs the structured error array for retry logic.
+    return c.json({ error: "All reviews in batch failed", ...responseBody }, 500);
+  }
+  if (hasPartialFailure) {
+    return ok(c, responseBody, 207);
+  }
+  return ok(c, responseBody);
 });
