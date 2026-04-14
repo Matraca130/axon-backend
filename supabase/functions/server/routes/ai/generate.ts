@@ -31,7 +31,7 @@
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
-import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { authenticate, ok, err, safeJson, PREFIX, getAdminClient } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid, isOneOf } from "../../validate.ts";
 import {
@@ -161,7 +161,8 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
 
   // ── Fetch student profile ────────────────────────────────
   let profileContext = "";
-  const { data: profile } = await db.rpc("get_student_knowledge_context", {
+  // SEC-S9B: Use admin client for SECURITY DEFINER RPCs
+  const { data: profile } = await getAdminClient().rpc("get_student_knowledge_context", {
     p_student_id: user.id,
     p_institution_id: instId as string,
   });
@@ -256,14 +257,16 @@ Responde en JSON con este schema exacto:
     // ── Insert into DB ───────────────────────────────────
     if (action === "quiz_question") {
       const g = generated as Record<string, unknown>;
-      const validated = validateQuizQuestion(g);  // AI-001 FIX: sanitize LLM output
+      const questionType = normalizeQuestionType(g.question_type);
+      const validated = validateQuizQuestion(g, questionType);  // AI-001 + AXO-126 FIX
       const { data: inserted, error: insertErr } = await db
         .from("quiz_questions")
         .insert({
           summary_id: summaryId,
           keyword_id: keywordId,
           subtopic_id: subtopicId,
-          question_type: normalizeQuestionType(g.question_type),
+          block_id: blockId,
+          question_type: validated.question_type,
           question: validated.question,
           options: validated.options,
           correct_answer: validated.correct_answer,

@@ -33,7 +33,12 @@ import type {
 
 import { GRADE_TO_FLOAT } from "./types.ts";
 
-// ─── Default Weights (spec v4.2 RECALIBRADOS, seccion 7.3) ──
+// ─── Default Weights (spec v4.2 RECALIBRADOS, seccion 7.3) ──────
+// SOURCE: axon-evaluation-spec.md v4.2, secciones 7.1-7.4
+// These are global defaults. Per-institution overrides could be loaded
+// from the `algorithm_config` table via the `weights` field on FsrsV4Input.
+// Currently only NeedScore weights and BKT priors are configurable per
+// institution; FSRS w0-w17 use these hardcoded defaults.
 
 export const DEFAULT_WEIGHTS: FsrsWeights = {
   w0: 1.0, // S_0 Again — spec: "1 dia"

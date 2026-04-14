@@ -10,6 +10,7 @@
  *   progress.ts      — topic-progress, topics-overview, reading-states, daily-activities, student-stats
  *   spaced-rep.ts    — fsrs-states, bkt-states (upserts)
  *   batch-review.ts  — POST /review-batch (PERF M1: atomic batch persistence)
+ *   block-review.ts  — POST /block-review (independent per-block BKT mastery)
  */
 
 import { Hono } from "npm:hono";
@@ -18,6 +19,8 @@ import { reviewRoutes } from "./reviews.ts";
 import { progressRoutes } from "./progress.ts";
 import { spacedRepRoutes } from "./spaced-rep.ts";
 import { batchReviewRoutes } from "./batch-review.ts";
+import { blockReviewRoutes } from "./block-review.ts";
+import { stickyNotesRoutes } from "./sticky-notes.ts";
 
 const studyRoutes = new Hono();
 
@@ -26,5 +29,7 @@ studyRoutes.route("/", reviewRoutes);
 studyRoutes.route("/", progressRoutes);
 studyRoutes.route("/", spacedRepRoutes);
 studyRoutes.route("/", batchReviewRoutes);
+studyRoutes.route("/", blockReviewRoutes);
+studyRoutes.route("/", stickyNotesRoutes);
 
 export { studyRoutes };

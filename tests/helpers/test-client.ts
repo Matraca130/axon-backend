@@ -83,6 +83,7 @@ export const api = {
   get: <T = unknown>(path: string, token: string) => request<T>("GET", path, token),
   post: <T = unknown>(path: string, token: string, body?: unknown) => request<T>("POST", path, token, body),
   put: <T = unknown>(path: string, token: string, body?: unknown) => request<T>("PUT", path, token, body),
+  patch: <T = unknown>(path: string, token: string, body?: unknown) => request<T>("PATCH", path, token, body),
   delete: <T = unknown>(path: string, token: string) => request<T>("DELETE", path, token),
 };
 
@@ -105,4 +106,9 @@ export function assertError(r: ApiResponse, expectedStatus: number): void {
   if (r.status !== expectedStatus) {
     throw new Error(`Expected error ${expectedStatus}, got ${r.status}`);
   }
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function isUuid(s: unknown): boolean {
+  return typeof s === "string" && UUID_RE.test(s);
 }

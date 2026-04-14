@@ -24,6 +24,7 @@
  *   flashcards-by-topic.ts         — GET /flashcards-by-topic (PERF C1: batch load)
  *   flashcard-mappings.ts          — GET /flashcard-mappings (P0: lightweight id→subtopic mapping)
  *   flashcard-images.ts            — POST /flashcards/:id/generate-image (FC-02: AI image gen)
+ *   summary-block-images.ts        — POST /summary-blocks/:id/generate-image (summary image_reference gen)
  *   publish-summary.ts             — POST /summaries/:id/publish (Fase 4: block-based publish)
  *   block-mastery.ts               — GET /summaries/:id/block-mastery (Fase 3: BKT mastery per block)
  */
@@ -42,6 +43,8 @@ import { flashcardMappingRoutes } from "./flashcard-mappings.ts";
 import { publishSummaryRoutes } from "./publish-summary.ts";
 import { flashcardImageRoutes } from "./flashcard-images.ts";
 import { blockMasteryRoutes } from "./block-mastery.ts";
+import { summaryBlockImageRoutes } from "./summary-block-images.ts";
+import { infographicImageRoutes } from "./infographic-images.ts";
 
 const content = new Hono();
 
@@ -50,6 +53,8 @@ content.route("/", keywordSearchRoutes);
 content.route("/", subtopicsBatchRoutes);
 content.route("/", kwConnectionsBatchRoutes);
 content.route("/", flashcardImageRoutes);
+content.route("/", summaryBlockImageRoutes);
+content.route("/", infographicImageRoutes);
 content.route("/", blockMasteryRoutes);
 content.route("/", contentCrudRoutes);
 content.route("/", keywordConnectionRoutes);

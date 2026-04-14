@@ -125,8 +125,8 @@ async function getStudyQueueFromJs(
       flashcardsQuery,
       keywordsQuery,
       courseId
-        ? resolveSummaryIdsForCourse(db, courseId)
-        : resolveSummaryIdsForStudent(db, userId),
+        ? resolveSummaryIdsForCourse(courseId)
+        : resolveSummaryIdsForStudent(userId),
     ]);
 
   if (bktResult.error) throw new Error(`Fetch bkt_states failed: ${bktResult.error.message}`);

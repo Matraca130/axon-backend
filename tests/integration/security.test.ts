@@ -94,5 +94,8 @@ Deno.test("SEC-010: errors don't leak stack traces", async () => {
   await setup();
   const r = await api.get("/nonexistent", adminToken);
   const s = JSON.stringify(r.raw);
-  assert(!s.includes("stack")); assert(!s.includes("at "));
+  assert(!s.includes("stack"), "Response should not contain 'stack' field");
+  // Check for actual stack trace patterns (e.g. "at functionName (file:...")
+  // not just "at " which matches normal English words like "that"
+  assert(!(/\bat \w+\s*\(/.test(s)), "Response should not contain stack trace frames");
 });

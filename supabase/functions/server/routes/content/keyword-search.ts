@@ -31,7 +31,7 @@
  */
 
 import { Hono } from "npm:hono";
-import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { authenticate, ok, err, PREFIX, getAdminClient } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import {
   requireInstitutionRole,
@@ -143,7 +143,8 @@ keywordSearchRoutes.get(searchBase, async (c: Context) => {
 
       // Optional: filter by course_id
       if (courseId) {
-        const { data: courseSumRows } = await db.rpc(
+        // SEC-S9B: Use admin client for SECURITY DEFINER RPCs
+        const { data: courseSumRows } = await getAdminClient().rpc(
           "get_course_summary_ids",
           { p_course_id: courseId },
         );

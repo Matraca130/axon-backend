@@ -12,16 +12,27 @@
  *         ~2-5ms latency per request for cross-isolate accuracy that
  *         Axon's current scale doesn't require. The DB table and RPC
  *         remain in PostgreSQL but are no longer called.
+ *   - RL-300: Bumped MAX_REQUESTS 120 → 300. The Smart Reader page
+ *         alone fires ~9 GETs in parallel on every summary load
+ *         (block-bookmarks, summary-blocks, chunks, keywords,
+ *         block-mastery, videos, text-annotations, sticky-notes,
+ *         reading-states), and a normal study session triggers
+ *         several reading-state PATCHes per minute. With the old
+ *         120/min cap, two summary loads + a chat exchange would
+ *         trip the limiter and surface "Limite de solicitudes de
+ *         IA excedido" to the user despite no abuse. 300 gives
+ *         5x headroom for the chat path while staying conservative
+ *         enough to detect a runaway client.
  *
  * Architecture:
  *   - Primary: In-memory Map (per-isolate, ~0ms overhead).
  *   - Trade-off: Each Deno isolate has its own counter. A user hitting
  *     N isolates gets up to N × MAX_REQUESTS per window. At Axon's
- *     scale (~1-2 isolates), this is 120-240 req/min — acceptable.
+ *     scale (~1-2 isolates), this is 300-600 req/min — acceptable.
  *
  * Configuration:
  *   - WINDOW_MS: 60,000ms (1 minute)
- *   - MAX_REQUESTS: 120 requests per window per user
+ *   - MAX_REQUESTS: 300 requests per window per user
  *
  * Exemptions:
  *   - Health check (/health)
@@ -34,7 +45,7 @@ import { extractToken } from "./db.ts";
 // ─── Configuration ─────────────────────────────────────────────────
 
 export const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
-export const RATE_LIMIT_MAX_REQUESTS = 120;  // 120 req/min/user
+export const RATE_LIMIT_MAX_REQUESTS = 300;  // 300 req/min/user
 
 // ─── In-Memory State ────────────────────────────────────────────
 

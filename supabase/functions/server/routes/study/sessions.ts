@@ -35,6 +35,7 @@
 import { Hono } from "npm:hono";
 import { registerCrud } from "../../crud-factory.ts";
 import { xpHookForSessionComplete, xpHookForPlanTaskComplete } from "../../xp-hooks.ts";
+import { xpHookForFinalsBadges } from "../../finals-badge-hooks.ts";
 
 export const sessionRoutes = new Hono();
 
@@ -61,8 +62,9 @@ registerCrud(sessionRoutes, {
   hasUpdatedAt: true,
   hasOrderIndex: false,
   requiredFields: ["name"],
-  createFields: ["course_id", "name", "status", "completion_date", "weekly_hours", "metadata"],
-  updateFields: ["name", "status", "completion_date", "weekly_hours", "metadata"],
+  createFields: ["course_id", "name", "status", "completion_date", "weekly_hours", "metadata", "is_finals_plan", "exam_event_id"],
+  updateFields: ["name", "status", "completion_date", "weekly_hours", "metadata", "is_finals_plan", "exam_event_id"],
+  afterWrite: xpHookForFinalsBadges, // Sprint 0: Finals badge evaluation on plan creation
 });
 
 registerCrud(sessionRoutes, {

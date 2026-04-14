@@ -16,13 +16,13 @@ async function setup() {
 
 // ═══ HEALTH CHECK (uses c.json() directly, NOT ok() wrapper) ═══
 
-Deno.test("health returns status ok version 4.4", async () => {
+Deno.test("health returns status ok version 4.5", async () => {
   await setup();
   const r = await api.get("/health", adminToken);
   assertStatus(r, 200);
   // NOTE: /health uses c.json() directly, NOT ok(). So r.raw has NO { data: ... } wrapper.
   assertEquals((r.raw as any).status, "ok");
-  assertEquals((r.raw as any).version, "4.4");
+  assertEquals((r.raw as any).version, "4.5");
   // Verify services field exists (D57: reports gemini + openai status)
   assert(typeof (r.raw as any).services === "object");
 });

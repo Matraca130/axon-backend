@@ -20,7 +20,8 @@
  * Security:
  *   - OPENAI_API_KEY never reaches the client
  *   - Ephemeral token expires in ~60s (OpenAI default)
- *   - Rate-limited by AI middleware in index.ts
+ *   - Own rate limit: 10 realtime sessions/hour per user
+ *   - Session creation logged to ai_generations for cost tracking
  */
 
 import { Hono } from "npm:hono";
@@ -92,10 +93,10 @@ function buildSystemPrompt(ctx: StudentContext): string {
   const parts: string[] = [];
 
   parts.push(
-    `Eres el tutor de voz de Axon, una plataforma educativa. ` +
-    `Hablas en español de forma cálida, amable y motivadora. ` +
-    `Eres conciso en tus respuestas de voz (máximo 3-4 oraciones por turno). ` +
-    `Adapta tu explicación al nivel del alumno.`
+    `Sos el tutor de voz de Axon, una plataforma educativa. ` +
+    `Hablás en español rioplatense de forma cálida, amigable y motivadora. ` +
+    `Sé conciso en las respuestas de voz (máximo 3-4 oraciones por turno). ` +
+    `Adaptá tu explicación al nivel del alumno.`
   );
 
   // Current topic context
@@ -120,12 +121,12 @@ function buildSystemPrompt(ctx: StudentContext): string {
       const strongList = kp.strong
         .map((s: Record<string, unknown>) => `${sanitizeForPrompt(String(s.sub), 100)} (dominio: ${s.p})`)
         .join(", ");
-      sections.push(`Fortalezas: ${strongList}`);
+      sections.push(`Puntos fuertes: ${strongList}`);
     }
 
     if (Array.isArray(kp.lapsing) && kp.lapsing.length > 0) {
       const lapsingList = kp.lapsing
-        .map((l: Record<string, unknown>) => `"${sanitizeForPrompt(String(l.card), 100)}" (${l.lapses} fallos)`)
+        .map((l: Record<string, unknown>) => `"${sanitizeForPrompt(String(l.card), 100)}" (${l.lapses} errores)`)
         .join(", ");
       sections.push(`Flashcards problemáticas: ${lapsingList}`);
     }
@@ -134,7 +135,7 @@ function buildSystemPrompt(ctx: StudentContext): string {
       const failList = kp.quiz_fail
         .map((q: Record<string, unknown>) => `"${sanitizeForPrompt(String(q.q), 100)}"`)
         .join(", ");
-      sections.push(`Quiz fallidos recientes: ${failList}`);
+      sections.push(`Quizzes fallados recientemente: ${failList}`);
     }
 
     if (sections.length > 0) {
@@ -146,7 +147,7 @@ function buildSystemPrompt(ctx: StudentContext): string {
   const statParts: string[] = [];
   if (ctx.stats) {
     if (ctx.stats.current_streak > 0) statParts.push(`racha de ${ctx.stats.current_streak} días`);
-    if (ctx.stats.total_reviews > 0) statParts.push(`${ctx.stats.total_reviews} revisiones totales`);
+    if (ctx.stats.total_reviews > 0) statParts.push(`${ctx.stats.total_reviews} repasos totales`);
   }
   if (ctx.xp) {
     statParts.push(`nivel ${ctx.xp.current_level}`);
@@ -160,12 +161,12 @@ function buildSystemPrompt(ctx: StudentContext): string {
   // Behavioral instructions
   parts.push(
     `\nINSTRUCCIONES DE COMPORTAMIENTO:` +
-    `\n- Si el alumno tiene áreas débiles, ofrécete a explicarlas proactivamente.` +
-    `\n- Felicita logros (racha, nivel, XP del día).` +
-    `\n- Si pregunta qué estudiar, usa la herramienta get_study_queue.` +
-    `\n- Si pregunta sobre el contenido del curso, usa search_course_content.` +
+    `\n- Si el alumno tiene áreas débiles, ofrecé explicarlas proactivamente.` +
+    `\n- Felicitá los logros (racha, nivel, XP del día).` +
+    `\n- Si pregunta qué estudiar, usá la herramienta get_study_queue.` +
+    `\n- Si pregunta sobre el contenido del curso, usá search_course_content.` +
     `\n- Sé breve y natural — es una conversación de voz, no un ensayo.` +
-    `\n- No repitas la información del perfil literalmente, úsala para contextualizar.`
+    `\n- No repitas la información del perfil literalmente, usala para contextualizar.`
   );
 
   return parts.join("\n");
@@ -181,6 +182,28 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
 
   const body = await safeJson(c);
   const summaryId = isUuid(body?.summary_id) ? (body.summary_id as string) : null;
+
+  // 0. Rate limit: 10 realtime sessions per hour per user
+  {
+    const adminDb = getAdminClient();
+    const { data: rlData, error: rlError } = await adminDb.rpc("check_rate_limit", {
+      p_key: `ai-realtime:${user.id}`,
+      p_max_requests: 10,
+      p_window_ms: 3600000,
+    });
+    if (rlError) {
+      console.error(`[Realtime] Rate limit RPC failed: ${rlError.message}. Denying request.`);
+      return err(c, "No se pudo verificar el límite de uso. Intentá de nuevo.", 500);
+    }
+    if (rlData && !rlData.allowed) {
+      return err(
+        c,
+        `Límite de sesiones de voz excedido: máximo 10 por hora. ` +
+        `Intentá de nuevo en ${Math.ceil((rlData.retry_after_ms || 0) / 1000)}s.`,
+        429,
+      );
+    }
+  }
 
   // 1. Resolve institution (same pattern as chat.ts)
   let institutionId: string | null = null;
@@ -325,7 +348,7 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
   // 5. Request ephemeral token from OpenAI
   const openaiKey = Deno.env.get("OPENAI_API_KEY");
   if (!openaiKey) {
-    return err(c, "Clave de API de OpenAI no configurada", 500);
+    return err(c, "Clave de API OpenAI no configurada", 500);
   }
 
   let sessionResponse: Response;
@@ -346,35 +369,30 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
           output_modalities: ["audio"],
           instructions: systemPrompt,
           tools: REALTIME_TOOLS,
-          audio: {
-            input: {
-              transcription: { model: "whisper-1" },
-              noise_reduction: { type: "near_field" },
-              turn_detection: {
-                type: "semantic_vad",
-                eagerness: "medium",
-                create_response: true,
-                interrupt_response: true,
-              },
-            },
-            output: {
-              voice: "marin",
-            },
+          input_audio_format: "pcm16",
+          output_audio_format: "pcm16",
+          input_audio_transcription: { model: "gpt-4o-mini-transcribe" },
+          turn_detection: {
+            type: "semantic_vad",
+            eagerness: "medium",
+            create_response: true,
+            interrupt_response: true,
           },
+          voice: "marin",
         },
       }),
     });
   } catch (fetchErr) {
     console.error("[Realtime] OpenAI session request failed:", (fetchErr as Error).message);
-    return err(c, "Error al crear sesión de voz", 502);
+    return err(c, "Error al crear sesión de voz. Intentá de nuevo.", 502);
   } finally {
     clearTimeout(timeout);
   }
 
   if (!sessionResponse.ok) {
     const errorBody = await sessionResponse.text().catch(() => "");
-    console.error("[Realtime] OpenAI error:", sessionResponse.status, errorBody.slice(0, 200));
-    return err(c, `Error de sesión OpenAI: ${sessionResponse.status} — ${errorBody.slice(0, 300)}`, 502);
+    console.error("[Realtime] OpenAI error:", sessionResponse.status, errorBody.slice(0, 500));
+    return err(c, "Error al crear sesión de voz. Intentá de nuevo.", 502);
   }
 
   let session: Record<string, unknown>;
@@ -393,20 +411,16 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
     return err(c, "OpenAI no devolvió un token de sesión válido", 502);
   }
 
-  // 6. Fire-and-forget: log voice session cost/usage
-  adminDb
-    .from("ai_cost_log")
-    .insert({
-      user_id: user.id,
-      institution_id: institutionId,
-      endpoint: "realtime-session",
-      model: "gpt-realtime-1.5",
-      created_at: new Date().toISOString(),
-    })
-    .then(({ error }) => {
-      if (error) console.warn("[Realtime] Cost log insert failed:", error.message);
-    })
-    .catch((e) => console.error("[Realtime] Cost logging failed:", { error: (e as Error).message, user_id: user.id }));
+  // 6. Log session creation for cost tracking (fire-and-forget)
+  const adminDbLog = getAdminClient();
+  adminDbLog.from("ai_generations").insert({
+    user_id: user.id,
+    institution_id: institutionId,
+    action: "realtime_session",
+    summary_id: summaryId || null,
+    model: "gpt-realtime-1.5",
+    _meta: { voice: "marin", expires_at: session.expires_at },
+  }).then(() => {}).catch(() => {}); // fire-and-forget, don't block response
 
   // 7. Return ephemeral token to frontend
   return ok(c, {
@@ -420,6 +434,6 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
     const msg = (handlerErr as Error).message || String(handlerErr);
     const stack = (handlerErr as Error).stack || "";
     console.error("[Realtime] Unhandled error:", msg, "\n", stack);
-    return err(c, `Error interno al crear sesión de voz: ${msg}`, 500);
+    return err(c, "Error interno al crear sesión de voz. Intentá de nuevo.", 500);
   }
 });

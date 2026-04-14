@@ -269,6 +269,200 @@ progressRoutes.get(`${PREFIX}/topics-overview`, async (c: Context) => {
   }
 });
 
+// ═════════════════════════════════════════════════════════════════
+// STUDY INTELLIGENCE: topic difficulty & prerequisite data
+//
+// GET /study-intelligence?course_id=xxx
+//
+// Returns per-topic structural data for the scheduling pipeline:
+//   - Topic names, sections, summary counts
+//   - Prerequisite relationships (aggregated from keywords)
+//   - Difficulty fields (null until DB columns are added)
+//
+// The frontend scheduling pipeline (runSchedulingPipeline) uses
+// this data for prerequisite ordering, cognitive load balancing,
+// and adaptive interleaving. Null difficulty fields default to 0.5.
+//
+// Max ~200 topics per course (safety: Supabase default limit).
+// ═════════════════════════════════════════════════════════════════
+
+progressRoutes.get(`${PREFIX}/study-intelligence`, async (c: Context) => {
+  const auth = await authenticate(c);
+  if (auth instanceof Response) return auth;
+  const { db } = auth;
+
+  const courseId = c.req.query("course_id");
+  if (!isUuid(courseId)) {
+    return err(c, "course_id must be a valid UUID", 400);
+  }
+
+  try {
+    // Step 1: Get all section IDs for this course (semesters → sections)
+    const { data: sections, error: secErr } = await db
+      .from("sections")
+      .select("id, title, semesters!inner(course_id)")
+      .eq("semesters.course_id", courseId)
+      .is("deleted_at", null);
+
+    if (secErr) {
+      return safeErr(c, "Fetch sections for course", secErr);
+    }
+
+    if (!sections || sections.length === 0) {
+      return ok(c, {
+        topics: [],
+        course_stats: {
+          avg_difficulty: 0,
+          total_estimated_minutes: 0,
+          topics_analyzed: 0,
+          topics_pending_analysis: 0,
+        },
+      });
+    }
+
+    const sectionIds = sections.map((s: any) => s.id);
+    const sectionMap: Record<string, string> = {};
+    for (const s of sections) {
+      sectionMap[s.id] = s.title;
+    }
+
+    // Step 2: Get topics for these sections
+    const { data: topics, error: topicErr } = await db
+      .from("topics")
+      .select("id, title, section_id")
+      .in("section_id", sectionIds)
+      .is("deleted_at", null)
+      .order("order_index", { ascending: true });
+
+    if (topicErr) {
+      return safeErr(c, "Fetch topics for course", topicErr);
+    }
+
+    if (!topics || topics.length === 0) {
+      return ok(c, {
+        topics: [],
+        course_stats: {
+          avg_difficulty: 0,
+          total_estimated_minutes: 0,
+          topics_analyzed: 0,
+          topics_pending_analysis: 0,
+        },
+      });
+    }
+
+    const topicIds = topics.map((t: any) => t.id);
+
+    // Step 3: Fetch summaries + keywords in parallel (both depend only on topicIds)
+    const [summariesResult, keywordsViaResult] = await Promise.all([
+      db
+        .from("summaries")
+        .select("id, topic_id, estimated_study_minutes")
+        .in("topic_id", topicIds)
+        .eq("status", "published")
+        .eq("is_active", true)
+        .is("deleted_at", null),
+      // Get keywords via summaries (we need summary_id for the topic lookup)
+      db
+        .from("keywords")
+        .select("id, summary_id, is_foundation, prerequisite_keyword_ids, summaries!inner(topic_id)")
+        .in("summaries.topic_id", topicIds)
+        .eq("is_active", true)
+        .is("deleted_at", null),
+    ]);
+
+    if (summariesResult.error) {
+      return safeErr(c, "Fetch summaries for intelligence", summariesResult.error);
+    }
+    const summaries = summariesResult.data || [];
+
+    // Build summary → topic lookup
+    const summaryToTopic: Record<string, string> = {};
+    for (const s of summaries) {
+      summaryToTopic[s.id] = s.topic_id;
+    }
+
+    // Process keywords — group by topic
+    let keywordsByTopic: Record<string, Array<{
+      id: string;
+      is_foundation: boolean;
+      prerequisite_keyword_ids: string[];
+      summary_id: string;
+    }>> = {};
+
+    if (!keywordsViaResult.error && keywordsViaResult.data) {
+      for (const kw of keywordsViaResult.data) {
+        const topicId = (kw as any).summaries?.topic_id ?? summaryToTopic[kw.summary_id];
+        if (topicId) {
+          if (!keywordsByTopic[topicId]) keywordsByTopic[topicId] = [];
+          keywordsByTopic[topicId].push(kw);
+        }
+      }
+    }
+
+    // Step 4: Build keyword → topic reverse lookup (for prerequisite aggregation)
+    const keywordToTopic: Record<string, string> = {};
+    for (const [topicId, kws] of Object.entries(keywordsByTopic)) {
+      for (const kw of kws) {
+        keywordToTopic[kw.id] = topicId;
+      }
+    }
+
+    // Step 5: Aggregate prerequisite_keyword_ids → prerequisite_topic_ids
+    // For each topic, collect the topics that its keywords depend on
+    const topicPrereqs: Record<string, Set<string>> = {};
+    for (const [topicId, kws] of Object.entries(keywordsByTopic)) {
+      topicPrereqs[topicId] = new Set();
+      for (const kw of kws) {
+        if (kw.prerequisite_keyword_ids?.length) {
+          for (const prereqKwId of kw.prerequisite_keyword_ids) {
+            const prereqTopicId = keywordToTopic[prereqKwId];
+            if (prereqTopicId && prereqTopicId !== topicId) {
+              topicPrereqs[topicId].add(prereqTopicId);
+            }
+          }
+        }
+      }
+    }
+
+    // Step 6: Build response
+    let totalEstimatedMinutes = 0;
+    const topicData = topics.map((t: any) => {
+      const topicSummaries = summaries.filter((s: any) => s.topic_id === t.id);
+      const estMinutes = topicSummaries.reduce(
+        (sum: number, s: any) => sum + (s.estimated_study_minutes || 0), 0
+      );
+      totalEstimatedMinutes += estMinutes;
+
+      return {
+        id: t.id,
+        name: t.title,
+        section_name: sectionMap[t.section_id] || '',
+        // Difficulty fields — null until DB columns exist
+        difficulty_estimate: null,
+        estimated_study_minutes: estMinutes || null,
+        bloom_level: null,
+        abstraction_level: null,
+        concept_density: null,
+        interrelation_score: null,
+        cohort_difficulty: null,
+        prerequisite_topic_ids: [...(topicPrereqs[t.id] || [])],
+      };
+    });
+
+    return ok(c, {
+      topics: topicData,
+      course_stats: {
+        avg_difficulty: 0, // No difficulty data yet
+        total_estimated_minutes: totalEstimatedMinutes,
+        topics_analyzed: 0,
+        topics_pending_analysis: topicData.length,
+      },
+    });
+  } catch (e: any) {
+    return safeErr(c, "Study intelligence", e);
+  }
+});
+
 // ─── Reading States ─────────────────────────────────────────────────────
 
 progressRoutes.get(`${PREFIX}/reading-states`, async (c: Context) => {

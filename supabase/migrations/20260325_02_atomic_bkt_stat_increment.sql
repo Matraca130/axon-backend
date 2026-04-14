@@ -17,6 +17,7 @@ CREATE OR REPLACE FUNCTION increment_bkt_attempts(
 RETURNS TABLE(new_total_attempts INT, new_correct_attempts INT)
 LANGUAGE plpgsql
 SECURITY DEFINER
+SET search_path = public, pg_temp
 AS $$
 BEGIN
   RETURN QUERY

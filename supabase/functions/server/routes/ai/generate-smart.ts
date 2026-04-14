@@ -47,7 +47,7 @@
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
-import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { authenticate, ok, err, safeJson, PREFIX, getAdminClient } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { isUuid, isOneOf, isNonNegInt } from "../../validate.ts";
@@ -162,14 +162,15 @@ async function generateAndInsert(
   const generated = parseClaudeJson(result.text) as Record<string, unknown>;
 
   if (action === "quiz_question") {
-    const validated = validateQuizQuestion(generated);  // AI-001 FIX: sanitize LLM output
+    const questionType = normalizeQuestionType(generated.question_type);
+    const validated = validateQuizQuestion(generated, questionType);  // AI-001 + AXO-126 FIX
     const { data: inserted, error: insertErr } = await db
       .from("quiz_questions")
       .insert({
         summary_id: target.summary_id,
         keyword_id: target.keyword_id,
         subtopic_id: target.subtopic_id,
-        question_type: normalizeQuestionType(generated.question_type),
+        question_type: validated.question_type,
         question: validated.question,
         options: validated.options,
         correct_answer: validated.correct_answer,
@@ -390,7 +391,7 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
     );
 
     let profileContext = "";
-    const { data: profile } = await db.rpc("get_student_knowledge_context", {
+    const { data: profile } = await getAdminClient().rpc("get_student_knowledge_context", {
       p_student_id: user.id,
       p_institution_id: resolvedInstId as string,
     });
@@ -494,7 +495,7 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
   let sharedProfileContext = "";
   const firstInstId = institutionIdCache.values().next().value;
   if (firstInstId) {
-    const { data: profile } = await db.rpc("get_student_knowledge_context", {
+    const { data: profile } = await getAdminClient().rpc("get_student_knowledge_context", {
       p_student_id: user.id,
       p_institution_id: firstInstId,
     });

@@ -40,12 +40,33 @@ registerCrud(studentRoutes, {
   updateFields: ["front", "back", "source", "subtopic_id", "is_active", "front_image_url", "back_image_url"],
 });
 
-// 2. Quiz Questions — Keyword + Summary -> QuizQuestion (SACRED, soft-delete)
+// ── Student-owned flashcards (scopeToUser) ─────────────────
+// Students can CRUD their own flashcards only.
+// Professor flashcards route above remains for read-only access.
+registerCrud(studentRoutes, {
+  table: "flashcards",
+  slug: "my-flashcards",
+  parentKey: "summary_id",
+  optionalFilters: ["keyword_id", "subtopic_id"],
+  scopeToUser: "created_by",
+  hasCreatedBy: true,
+  hasUpdatedAt: true,
+  hasOrderIndex: false,
+  softDelete: true,
+  hasIsActive: true,
+  requiredFields: ["keyword_id", "front", "back"],
+  createFields: ["keyword_id", "subtopic_id", "front", "back", "source", "front_image_url", "back_image_url"],
+  updateFields: ["front", "back", "subtopic_id", "is_active", "front_image_url", "back_image_url"],
+});
+
+// 2. Quiz Questions — Keyword/Block + Summary -> QuizQuestion (SACRED, soft-delete)
+//    ADR-001: block_id added for per-block quiz with domain tracking.
+//    keyword_id removed from requiredFields — per-block questions may not need a keyword.
 registerCrud(studentRoutes, {
   table: "quiz_questions",
   slug: "quiz-questions",
   parentKey: "summary_id",
-  optionalFilters: ["keyword_id", "question_type", "difficulty", "subtopic_id", "quiz_id", "block_id"],
+  optionalFilters: ["keyword_id", "block_id", "question_type", "difficulty", "subtopic_id", "quiz_id"],
   hasCreatedBy: true,
   hasUpdatedAt: true,
   hasOrderIndex: false,
@@ -150,7 +171,7 @@ registerCrud(studentRoutes, {
   softDelete: true,
   hasIsActive: false,
   requiredFields: ["start_offset", "end_offset"],
-  createFields: ["start_offset", "end_offset", "color", "note"],
+  createFields: ["start_offset", "end_offset", "color", "note", "block_id"],
   updateFields: ["color", "note"],
 });
 
@@ -168,6 +189,40 @@ registerCrud(studentRoutes, {
   requiredFields: ["note"],
   createFields: ["timestamp_seconds", "note"],
   updateFields: ["timestamp_seconds", "note"],
+});
+
+// 7. Block Bookmarks — student bookmarks on summary blocks
+registerCrud(studentRoutes, {
+  table: "block_bookmarks",
+  slug: "block-bookmarks",
+  parentKey: "summary_id",
+  optionalFilters: ["block_id"],
+  scopeToUser: "student_id",
+  hasCreatedBy: false,
+  hasUpdatedAt: false,
+  hasOrderIndex: false,
+  softDelete: false,
+  hasIsActive: false,
+  requiredFields: ["block_id"],
+  createFields: ["block_id"],
+  updateFields: [],
+});
+
+// 8. Block Notes — student notes on summary blocks
+registerCrud(studentRoutes, {
+  table: "block_notes",
+  slug: "block-notes",
+  parentKey: "summary_id",
+  optionalFilters: ["block_id"],
+  scopeToUser: "student_id",
+  hasCreatedBy: false,
+  hasUpdatedAt: true,
+  hasOrderIndex: false,
+  softDelete: true,
+  hasIsActive: false,
+  requiredFields: ["text"],
+  createFields: ["block_id", "text", "color"],
+  updateFields: ["text", "color"],
 });
 
 export { studentRoutes };

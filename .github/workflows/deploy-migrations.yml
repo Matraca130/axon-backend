@@ -1,0 +1,368 @@
+# Axon — Deploy Supabase migrations with defense-in-depth
+#
+# Triggers ONLY on push to main when files in supabase/migrations/** change,
+# plus manual workflow_dispatch. PRs from forks cannot trigger this workflow
+# (they cannot push to main).
+#
+# Eight defense layers (see database/MIGRATIONS-CICD.md in axon-docs):
+#   L1  Trigger restriction (push:main + paths)
+#   L2  Concurrency lock (queue, no race)
+#   L3  Hardcoded PROJECT_ID (no runtime override)
+#   L4  Append-only Guard A (modified/deleted migrations → fail)
+#   L5  Destructive-SQL Guard B (DROP/TRUNCATE/REVOKE/... → fail)
+#       Escape hatch: any commit message in the push range contains
+#       "[migration:destructive-ok]"
+#   L6  Manual approval via GitHub Environment "production-db"
+#       (configured once in repo Settings → Environments → Required reviewers)
+#   L7  Per-file SQL preview posted to job summary
+#   L8  Atomic apply + post-deploy "all-applied" assertion
+#
+# SECURITY NOTE: this workflow never inlines `${{ ... }}` expressions inside
+# `run:` shell blocks. Outputs and event payload values are passed via
+# environment variables and read with `"$VAR"`, which prevents shell-injection
+# via crafted filenames or commit messages.
+
+name: Deploy Supabase Migrations
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/migrations/**'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why are you triggering this manually? (logged to summary for audit)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write   # for the failure-notification step
+  actions: none
+  id-token: none
+
+# L2: queue parallel deploys instead of racing them.
+# Group is `prod`-scoped so a future staging environment can use its own group.
+concurrency:
+  group: db-migrations-prod
+  cancel-in-progress: false
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # JOB 1 — Guards (L4 + L5). No DB access. No CLI installed.
+  # If anything fails here, the deploy job never runs.
+  # ─────────────────────────────────────────────────────────────
+  guards:
+    name: "Pre-deploy guards (append-only + destructive scan)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      added_files: ${{ steps.diff.outputs.added }}
+      destructive_skip: ${{ steps.commit-msg.outputs.skip }}
+    steps:
+      - name: Checkout (full history for diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: "Log workflow trigger metadata"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          DISPATCH_REASON: ${{ github.event.inputs.reason }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Workflow trigger"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Event   | \`$EVENT_NAME\` |"
+            echo "| Actor   | \`$ACTOR\` |"
+            echo "| Ref     | \`$REF\` |"
+            echo "| SHA     | \`$SHA\` |"
+            if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+              echo "| Reason  | $DISPATCH_REASON |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Resolve diff range"
+        id: range
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            base="$(git rev-parse HEAD~1)"
+          else
+            base="$EVENT_BEFORE"
+          fi
+          # Guard against the very first push or shallow scenarios where
+          # the base commit is unknown (40 zeros) or empty.
+          if [[ -z "$base" || "$base" == "0000000000000000000000000000000000000000" ]]; then
+            base="$(git rev-parse HEAD~1)"
+          fi
+          # Sanity-check the resolved base actually exists in this clone.
+          if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "::error::Resolved base commit '$base' does not exist in this checkout. Bailing."
+            exit 1
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "Diff range: $base..$HEAD_SHA"
+
+      # ── Layer 4: Append-only Guard A ─────────────────────────
+      - name: "Guard A — migrations are append-only"
+        id: diff
+        env:
+          BASE_SHA: ${{ steps.range.outputs.base }}
+          HEAD_SHA: ${{ steps.range.outputs.head }}
+        run: |
+          set -euo pipefail
+
+          # Capture git diff exit code explicitly — never swallow real failures.
+          if ! changed=$(git diff --name-status "$BASE_SHA" "$HEAD_SHA" -- 'supabase/migrations/'); then
+            echo "::error::git diff failed between $BASE_SHA and $HEAD_SHA"
+            exit 1
+          fi
+
+          if [[ -z "$changed" ]]; then
+            echo "No migration files changed in $BASE_SHA..$HEAD_SHA. Nothing to do."
+            echo "added=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Changed migration files:"
+          echo "$changed"
+          echo ""
+
+          forbidden=$(echo "$changed" | awk '$1 != "A" { print }')
+          if [[ -n "$forbidden" ]]; then
+            echo "::error::Migration files are immutable. Only newly-added files (status A) are allowed."
+            echo ""
+            echo "Forbidden changes:"
+            echo "$forbidden"
+            echo ""
+            echo "If you need to amend an applied migration, create a NEW migration"
+            echo "file that reverses or corrects the change instead of editing the old one."
+            exit 1
+          fi
+
+          # Collect just the paths of added .sql files
+          added=$(echo "$changed" | awk '$1 == "A" && $2 ~ /\.sql$/ { print $2 }')
+          echo "added<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$added" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          echo "✓ Guard A passed. Added migration files:"
+          echo "$added"
+
+      # ── Check for the destructive escape hatch ───────────────
+      # Scans EVERY commit message in the push range, not just HEAD.
+      # This way the token can live in any commit of the merged PR or
+      # in a follow-up empty commit.
+      - name: "Detect [migration:destructive-ok] escape hatch"
+        id: commit-msg
+        env:
+          BASE_SHA: ${{ steps.range.outputs.base }}
+          HEAD_SHA: ${{ steps.range.outputs.head }}
+        run: |
+          set -euo pipefail
+          msgs=$(git log "$BASE_SHA..$HEAD_SHA" --pretty=%B || true)
+          if [[ -z "$msgs" ]]; then
+            # workflow_dispatch falls back to the HEAD commit
+            msgs=$(git log -1 --pretty=%B "$HEAD_SHA")
+          fi
+          echo "Commit message(s) in range:"
+          printf '%s\n' "$msgs"
+          echo ""
+          if printf '%s' "$msgs" | grep -qF '[migration:destructive-ok]'; then
+            echo "::warning::Destructive-SQL scanner SKIPPED — a commit message in this push contains [migration:destructive-ok]."
+            echo "Append-only guard and manual approval gate still apply."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Layer 5: Destructive-SQL Guard B ─────────────────────
+      - name: "Guard B — destructive-SQL scanner"
+        if: steps.commit-msg.outputs.skip != 'true' && steps.diff.outputs.added != ''
+        env:
+          ADDED_FILES: ${{ steps.diff.outputs.added }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/check-migration-safety.sh
+          # Newline-delimited xargs so filenames with spaces stay intact,
+          # and we never inline ADDED_FILES into the script body.
+          printf '%s\n' "$ADDED_FILES" | xargs -r -d '\n' bash scripts/check-migration-safety.sh
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 2 — Deploy. Runs in environment "production-db".
+  # If you have configured Required reviewers on that environment,
+  # this job will pause until a maintainer clicks Approve.
+  # ─────────────────────────────────────────────────────────────
+  deploy:
+    name: "Deploy migrations to Supabase"
+    needs: guards
+    if: needs.guards.outputs.added_files != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production-db
+    env:
+      # L3: hardcoded — never read from a runtime variable.
+      # If you ever need to deploy to staging, fork this workflow rather
+      # than parameterizing PROJECT_ID — it's deliberate.
+      PROJECT_ID: xdnciktarvxyhkrokbng
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      ADDED_FILES: ${{ needs.guards.outputs.added_files }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link Supabase project
+        run: supabase link --project-ref "$PROJECT_ID"
+
+      # ── Layer 7: per-file SQL preview ────────────────────────
+      # We dump the actual SQL of every added migration file into the
+      # job summary, wrapped in <details>. The reviewer at Layer 6 sees
+      # exactly what's about to be applied — no dependency on `db diff`
+      # (which can fail or surface unrelated drift).
+      - name: "Preview migration SQL (Layer 7)"
+        run: |
+          set -euo pipefail
+          {
+            echo "## Pending migration preview"
+            echo ""
+            echo "**Project:** \`$PROJECT_ID\`"
+            echo "**Files to apply:**"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            if [[ ! -f "$f" ]]; then
+              echo "::error::Migration file referenced by guards but missing on disk: $f"
+              exit 1
+            fi
+            {
+              echo "<details><summary><code>$f</code></summary>"
+              echo ""
+              echo '```sql'
+              cat "$f"
+              echo ""
+              echo '```'
+              echo "</details>"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          done <<< "$ADDED_FILES"
+
+      # ── Layer 8a: atomic apply ───────────────────────────────
+      - name: "Apply migrations (Layer 8)"
+        run: |
+          set -euo pipefail
+          echo "Applying pending migrations to project $PROJECT_ID ..."
+          supabase db push
+
+      # ── Layer 8b: assert each expected migration was applied ──
+      # Extracts the version (timestamp prefix) from each added filename
+      # and confirms it appears in `supabase migration list --linked`.
+      # A partial failure where db push aborted mid-stream is caught here.
+      - name: "Verify each migration is registered (Layer 8)"
+        run: |
+          set -euo pipefail
+          echo "## Post-deploy verification" >> "$GITHUB_STEP_SUMMARY"
+
+          # Capture the linked migration list. Fail loudly on CLI errors.
+          if ! list_output=$(supabase migration list --linked 2>&1); then
+            echo "::error::supabase migration list failed"
+            echo "$list_output"
+            exit 1
+          fi
+
+          {
+            echo '```'
+            echo "$list_output" | tail -30
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Extract just the local-version column (digits only) from the table.
+          applied=$(echo "$list_output" | awk '/^[[:space:]]*[0-9]/ { print $1 }')
+
+          missing=()
+          while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            version=$(basename "$f" | grep -oE '^[0-9]+' || true)
+            if [[ -z "$version" ]]; then
+              echo "::warning::Could not extract version from filename: $f"
+              continue
+            fi
+            if ! printf '%s\n' "$applied" | grep -qx "$version"; then
+              missing+=("$version ($f)")
+            fi
+          done <<< "$ADDED_FILES"
+
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "::error::Some expected migrations are NOT marked applied on the linked DB:"
+            for m in "${missing[@]}"; do echo "  - $m"; done
+            echo ""
+            echo "supabase db push exited 0 but migration_list says these are still pending."
+            echo "Investigate the linked DB state immediately."
+            exit 1
+          fi
+
+          echo "✓ All ${#missing[@]} expected migrations confirmed in supabase_migrations.schema_migrations." \
+            >> "$GITHUB_STEP_SUMMARY"
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 3 — Failure notification. Opens a GitHub issue if anything
+  # in the guards or deploy job failed, so a human notices.
+  # ─────────────────────────────────────────────────────────────
+  notify-failure:
+    name: "Open issue on failure"
+    needs: [guards, deploy]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Open / update tracking issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = context.sha.substring(0, 7);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const title = `[deploy-migrations] Failure on ${sha}`;
+            const body = [
+              `**Workflow run:** ${runUrl}`,
+              `**Commit:** \`${context.sha}\``,
+              `**Triggered by:** @${context.actor}`,
+              `**Event:** \`${context.eventName}\``,
+              ``,
+              `One of the jobs in \`deploy-migrations.yml\` failed. Open the run above and check:`,
+              `1. Did **Guard A** reject a modified migration file?`,
+              `2. Did **Guard B** flag destructive SQL?`,
+              `3. Did \`supabase db push\` fail mid-stream?`,
+              `4. Did the post-deploy assertion find missing migrations?`,
+              ``,
+              `**Recovery:** see \`axon-docs/database/MIGRATIONS-CICD.md\` → "Manual fallback" and "Rollback" sections.`,
+            ].join('\n');
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['ci-failure', 'migrations'],
+            });

@@ -15,7 +15,7 @@
 
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
-import { PREFIX, authenticate, safeJson, ok, err } from "../../db.ts";
+import { PREFIX, authenticate, safeJson, ok, err, getAdminClient } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import {
@@ -69,7 +69,8 @@ muxTrackingRoutes.post(`${PREFIX}/mux/track-view`, async (c: Context) => {
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   // ── Primary: atomic DB function (N-7 FIX) ──
-  const { data: rpcData, error: rpcError } = await db.rpc("upsert_video_view", {
+  // SEC-S9B: Use admin client for SECURITY DEFINER RPCs
+  const { data: rpcData, error: rpcError } = await getAdminClient().rpc("upsert_video_view", {
     p_video_id: video_id, p_user_id: user.id, p_institution_id: institution_id,
     p_watch_time_seconds: watch_time_seconds,
     p_total_watch_time_seconds: total_watch_time_seconds,
