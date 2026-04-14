@@ -72,7 +72,6 @@ import {
   ALL_ROLES,
 } from "../../auth-helpers.ts";
 import { generateText, generateTextStream, GENERATE_MODEL } from "../../claude-ai.ts";
-import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { xpHookForRagQuestion } from "../../xp-hooks.ts";
 
 // Fase 6: Import strategy functions + shared MatchedChunk type
@@ -85,569 +84,44 @@ import {
   type RetrievalStrategy,
 } from "../../retrieval-strategies.ts";
 
+// Split refactor (refactor/chat-split-modules): pull chunk retrieval,
+// fallback cascade, query augmentation, context assembly and fallback
+// trace helpers from dedicated modules. chat.ts is now a thin route
+// handler that orchestrates them.
+import {
+  fetchAdjacentChunks,
+  fetchSummaryFallbackChunks,
+  fetchTopicFallbackChunks,
+  normalizeCoarseToFineResults,
+} from "./chat/retrieval.ts";
+import {
+  buildAugmentedQuery,
+  assembleContext,
+} from "./chat/context-assembly.ts";
+import {
+  newFallbackTrace,
+  type CoarseToFineRow,
+} from "./chat/types.ts";
+import {
+  SHORT_QUERY_CHAR_THRESHOLD,
+  SHORT_QUERY_SIMILARITY_THRESHOLD,
+  NORMAL_QUERY_SIMILARITY_THRESHOLD,
+  RERANK_HIGH_CONFIDENCE_THRESHOLD,
+  RERANK_MIN_RESULTS,
+  MAX_SEARCH_RESULTS,
+  COARSE_TO_FINE_TOP_SUMMARIES,
+  RERANK_TOP_K,
+  CONTEXT_PRIMARY_MATCHES,
+  MAX_MESSAGE_LENGTH,
+  MAX_HISTORY_CONTEXT_CHARS,
+  MAX_RAG_CONTEXT_CHARS,
+  MAX_HISTORY_TURNS,
+  MAX_HISTORY_TURN_CHARS,
+  CHAT_TEMPERATURE,
+  CHAT_MAX_TOKENS,
+} from "./chat/constants.ts";
+
 export const aiChatRoutes = new Hono();
-
-// --- Phase 5: History-augmented search query builder ----------------
-const MAX_HISTORY_CHARS_FOR_SEARCH = 200;
-
-function buildAugmentedQuery(
-  message: string,
-  history: Array<{ role: string; content: string }>,
-): { query: string; wasAugmented: boolean } {
-  const recentUserMessages = history
-    .filter((h) => h.role === "user")
-    .slice(-2)
-    .map((h) => h.content.slice(0, MAX_HISTORY_CHARS_FOR_SEARCH).trim())
-    .filter((s) => s.length > 0);
-
-  if (recentUserMessages.length === 0) {
-    return { query: message, wasAugmented: false };
-  }
-
-  const augmented = [...recentUserMessages, message].join(" ");
-  return { query: augmented, wasAugmented: true };
-}
-
-// --- Phase 5: Adjacent chunk expansion ----------------------------
-
-interface ContextChunk {
-  id: string;
-  summary_id: string;
-  content: string;
-  order_index: number;
-  is_primary: boolean;
-}
-
-async function fetchAdjacentChunks(
-  db: SupabaseClient,
-  matches: MatchedChunk[],
-): Promise<ContextChunk[]> {
-  if (!matches || matches.length === 0) return [];
-
-  try {
-    const matchedIds = matches.map((m) => m.chunk_id);
-    const { data: matchedWithOrder, error: orderErr } = await db
-      .from("chunks")
-      .select("id, summary_id, content, order_index")
-      .in("id", matchedIds)
-      .is("deleted_at", null);
-
-    if (orderErr || !matchedWithOrder) return [];
-
-    const adjacentPairs = new Set<string>();
-    const matchedSet = new Set(matchedIds);
-
-    for (const chunk of matchedWithOrder) {
-      if (chunk.order_index !== null && chunk.order_index !== undefined) {
-        if (chunk.order_index > 0) {
-          adjacentPairs.add(`${chunk.summary_id}:${chunk.order_index - 1}`);
-        }
-        adjacentPairs.add(`${chunk.summary_id}:${chunk.order_index + 1}`);
-      }
-    }
-
-    if (adjacentPairs.size === 0) return [];
-
-    const summaryGroups = new Map<string, number[]>();
-    for (const pair of adjacentPairs) {
-      const [sumId, orderStr] = pair.split(":");
-      const orderIdx = parseInt(orderStr, 10);
-      if (!summaryGroups.has(sumId)) summaryGroups.set(sumId, []);
-      summaryGroups.get(sumId)!.push(orderIdx);
-    }
-
-    const allContextChunks: ContextChunk[] = [];
-
-    for (const chunk of matchedWithOrder) {
-      allContextChunks.push({
-        id: chunk.id,
-        summary_id: chunk.summary_id,
-        content: chunk.content,
-        order_index: chunk.order_index ?? 0,
-        is_primary: true,
-      });
-    }
-
-    // Consolidated single query: fetch all adjacent chunks at once
-    // instead of N queries per summary group (fixes N+1 loop).
-    const summaryEntries = Array.from(summaryGroups.entries()).slice(0, 3);
-    const allSummaryIds = summaryEntries.map(([sumId]) => sumId);
-    const allOrderIndexes = new Set<number>();
-    for (const [, orderIndexes] of summaryEntries) {
-      for (const idx of orderIndexes) allOrderIndexes.add(idx);
-    }
-
-    if (allSummaryIds.length > 0 && allOrderIndexes.size > 0) {
-      const { data: adjacentBatch } = await db
-        .from("chunks")
-        .select("id, summary_id, content, order_index")
-        .in("summary_id", allSummaryIds)
-        .in("order_index", Array.from(allOrderIndexes))
-        .is("deleted_at", null);
-
-      if (adjacentBatch) {
-        // Build a lookup set for valid (summary_id, order_index) pairs
-        const validPairs = new Set(
-          summaryEntries.flatMap(([sumId, indexes]) =>
-            indexes.map((idx) => `${sumId}:${idx}`)
-          ),
-        );
-
-        for (const adj of adjacentBatch) {
-          const pairKey = `${adj.summary_id}:${adj.order_index}`;
-          if (!matchedSet.has(adj.id) && validPairs.has(pairKey)) {
-            allContextChunks.push({
-              id: adj.id,
-              summary_id: adj.summary_id,
-              content: adj.content,
-              order_index: adj.order_index ?? 0,
-              is_primary: false,
-            });
-          }
-        }
-      }
-    }
-
-    allContextChunks.sort((a, b) => {
-      if (a.summary_id !== b.summary_id) return a.summary_id.localeCompare(b.summary_id);
-      return a.order_index - b.order_index;
-    });
-
-    return allContextChunks;
-  } catch (e) {
-    console.warn("[RAG Chat] Adjacent chunk expansion failed, using primary only:", e);
-    return [];
-  }
-}
-
-// --- Fallback: direct summary content (no vector search) --------
-//
-// When `summary_id` is provided but vector search returns zero hits,
-// the user was asking about a topic they are actively viewing, so we
-// should still send the topic content to the LLM instead of letting
-// it hallucinate from general knowledge. Triggered by short queries
-// (e.g. acronyms like "EIC") whose embeddings score below the
-// similarity threshold, or by summaries whose chunks are not yet
-// embedded. See: Axon AI "EIC" bug report.
-//
-// Cascading source priority:
-//   1. chunks             — if the summary has been ingested for RAG
-//   2. summary_blocks     — Smart Reader block format (heading/paragraph)
-//   3. content_markdown   — raw summary body as a last resort
-//
-// Summaries with `last_chunked_at IS NULL` (never ingested) will fall
-// through to summary_blocks / content_markdown instead of returning
-// empty context.
-
-const FALLBACK_CHUNK_LIMIT = 12;
-const FALLBACK_BLOCK_LIMIT = 40;
-const FALLBACK_MARKDOWN_MAX_CHARS = 7000;
-
-// summary_blocks.content is JSONB with shape varying by `type`:
-//   prose / key_point  → { title, content }
-//   list_detail        → { intro, items: [...] }
-//   image_reference    → { alt, src }
-//   stages             → { items: [{ stage, title, content }, ...] }
-//   ...and others
-//
-// We can't enumerate every shape (the schema evolves), so this helper
-// walks the JSONB recursively and concatenates every string value it
-// finds. Lossy but robust: the LLM gets all the prose without us
-// having to maintain a per-type extractor. URLs etc. leak through —
-// acceptable trade-off vs. crashing on `content.trim()`.
-function extractTextFromBlockContent(content: unknown): string {
-  if (content == null) return "";
-  if (typeof content === "string") return content;
-  if (typeof content === "number" || typeof content === "boolean") {
-    return String(content);
-  }
-  if (Array.isArray(content)) {
-    return content
-      .map(extractTextFromBlockContent)
-      .filter((s) => s.length > 0)
-      .join("\n");
-  }
-  if (typeof content === "object") {
-    const parts: string[] = [];
-    for (const v of Object.values(content as Record<string, unknown>)) {
-      const s = extractTextFromBlockContent(v);
-      if (s) parts.push(s);
-    }
-    return parts.join("\n");
-  }
-  return "";
-}
-
-async function fetchSummaryFallbackChunks(
-  adminDb: SupabaseClient,
-  summaryId: string,
-): Promise<MatchedChunk[]> {
-  // SEC-S9B convention: use the admin client (bypasses RLS) for
-  // cross-table content fetches in the RAG path. The user's `db`
-  // client is filtered by RLS policies that may exclude legitimate
-  // educational content (e.g. summary_blocks "Professors manage"
-  // policy denies students), which would silently empty the cascade.
-  try {
-    const { data: summaryRow } = await adminDb
-      .from("summaries")
-      .select("id, title, content_markdown")
-      .eq("id", summaryId)
-      .is("deleted_at", null)
-      .single();
-
-    if (!summaryRow) return [];
-
-    const title = (summaryRow.title as string) || "Material";
-    const summaryIdStr = summaryRow.id as string;
-
-    const makeMatch = (
-      id: string,
-      content: string,
-    ): MatchedChunk => ({
-      chunk_id: id,
-      summary_id: summaryIdStr,
-      summary_title: title,
-      content,
-      similarity: 0,
-      text_rank: 0,
-      combined_score: 0,
-    });
-
-    // 1. chunks (canonical ingested form)
-    // NOTE: chunks table has no deleted_at column — filtering by it
-    // makes PostgREST reject the query and return data: null, which
-    // silently masks the rest of the cascade. Order by order_index
-    // is enough.
-    const { data: chunkRows } = await adminDb
-      .from("chunks")
-      .select("id, summary_id, content, order_index")
-      .eq("summary_id", summaryId)
-      .order("order_index", { ascending: true })
-      .limit(FALLBACK_CHUNK_LIMIT);
-
-    if (chunkRows && chunkRows.length > 0) {
-      return chunkRows.map((row) =>
-        makeMatch(row.id as string, row.content as string),
-      );
-    }
-
-    // 2. summary_blocks (Smart Reader format)
-    const { data: blockRows } = await adminDb
-      .from("summary_blocks")
-      .select("id, type, heading_text, heading_level, content, order_index")
-      .eq("summary_id", summaryId)
-      .eq("is_active", true)
-      .order("order_index", { ascending: true })
-      .limit(FALLBACK_BLOCK_LIMIT);
-
-    if (blockRows && blockRows.length > 0) {
-      return blockRows
-        .map((row) => {
-          const type = row.type as string;
-          if (type === "heading" && row.heading_text) {
-            const level = (row.heading_level as number) || 2;
-            const hashes = "#".repeat(Math.min(Math.max(level, 1), 6));
-            return makeMatch(row.id as string, `${hashes} ${row.heading_text}`);
-          }
-          // summary_blocks.content is JSONB — extract all string values.
-          const text = extractTextFromBlockContent(row.content).trim();
-          return text ? makeMatch(row.id as string, text) : null;
-        })
-        .filter((m): m is MatchedChunk => m !== null);
-    }
-
-    // 3. content_markdown (raw summary body)
-    const markdown = (summaryRow.content_markdown as string | null) || "";
-    if (markdown.trim()) {
-      const truncated = markdown.length > FALLBACK_MARKDOWN_MAX_CHARS
-        ? markdown.slice(0, FALLBACK_MARKDOWN_MAX_CHARS) + "\n..."
-        : markdown;
-      return [makeMatch(`${summaryIdStr}:markdown`, truncated)];
-    }
-
-    return [];
-  } catch (e) {
-    console.warn("[RAG Chat] Summary fallback fetch failed:", (e as Error).message);
-    return [];
-  }
-}
-
-// --- Fallback: all summaries under a topic (no summary_id) -------
-//
-// When the user is browsing a topic rather than a specific summary
-// (e.g. UI shows "Contexto: Examen Fisico Cardiovascular" from the
-// navigation context, but no `:summaryId` is in the URL and the user
-// hasn't opened an individual summary yet), the chat body arrives
-// with `topic_id` but no `summary_id`. We load every active summary
-// under that topic and feed their content to the LLM via the same
-// chunks → summary_blocks → content_markdown cascade.
-
-const FALLBACK_TOPIC_SUMMARIES_LIMIT = 6;
-
-// DEBUG (RL-DEBUG-3): track per-step diagnostics for the fallback
-// cascade so we can see WHERE it returns empty. Stashed into the
-// shared debugTopicFallbackTrace array by the caller.
-interface FallbackTrace {
-  topicSummariesCount: number;
-  topicSummariesError: string | null;
-  perSummary: Array<{
-    sid: string;
-    rowFound: boolean;
-    summaryError: string | null;
-    chunkRows: number;
-    chunkError: string | null;
-    blockRows: number;
-    blockError: string | null;
-    mdLen: number;
-    matchesReturned: number;
-  }>;
-}
-
-function newFallbackTrace(): FallbackTrace {
-  return { topicSummariesCount: 0, topicSummariesError: null, perSummary: [] };
-}
-
-async function fetchSummaryFallbackChunksTraced(
-  adminDb: SupabaseClient,
-  summaryId: string,
-  trace: FallbackTrace,
-): Promise<MatchedChunk[]> {
-  const entry = {
-    sid: summaryId.slice(0, 8),
-    rowFound: false,
-    summaryError: null as string | null,
-    chunkRows: 0,
-    chunkError: null as string | null,
-    blockRows: 0,
-    blockError: null as string | null,
-    mdLen: 0,
-    matchesReturned: 0,
-  };
-  trace.perSummary.push(entry);
-
-  try {
-    const { data: summaryRow, error: summaryErr } = await adminDb
-      .from("summaries")
-      .select("id, title, content_markdown")
-      .eq("id", summaryId)
-      .is("deleted_at", null)
-      .single();
-
-    if (summaryErr) entry.summaryError = summaryErr.message.slice(0, 60);
-    if (!summaryRow) return [];
-    entry.rowFound = true;
-
-    const title = (summaryRow.title as string) || "Material";
-    const summaryIdStr = summaryRow.id as string;
-    const markdown = (summaryRow.content_markdown as string | null) || "";
-    entry.mdLen = markdown.length;
-
-    const makeMatch = (id: string, content: string): MatchedChunk => ({
-      chunk_id: id,
-      summary_id: summaryIdStr,
-      summary_title: title,
-      content,
-      similarity: 0,
-      text_rank: 0,
-      combined_score: 0,
-    });
-
-    // 1. chunks
-    const { data: chunkRows, error: chunkErr } = await adminDb
-      .from("chunks")
-      .select("id, summary_id, content, order_index")
-      .eq("summary_id", summaryId)
-      .order("order_index", { ascending: true })
-      .limit(FALLBACK_CHUNK_LIMIT);
-
-    if (chunkErr) entry.chunkError = chunkErr.message.slice(0, 60);
-    entry.chunkRows = chunkRows?.length ?? 0;
-
-    if (chunkRows && chunkRows.length > 0) {
-      const matches = chunkRows.map((row) =>
-        makeMatch(row.id as string, row.content as string),
-      );
-      entry.matchesReturned = matches.length;
-      return matches;
-    }
-
-    // 2. summary_blocks
-    const { data: blockRows, error: blockErr } = await adminDb
-      .from("summary_blocks")
-      .select("id, type, heading_text, heading_level, content, order_index")
-      .eq("summary_id", summaryId)
-      .eq("is_active", true)
-      .order("order_index", { ascending: true })
-      .limit(FALLBACK_BLOCK_LIMIT);
-
-    if (blockErr) entry.blockError = blockErr.message.slice(0, 60);
-    entry.blockRows = blockRows?.length ?? 0;
-
-    if (blockRows && blockRows.length > 0) {
-      const matches = blockRows
-        .map((row) => {
-          const type = row.type as string;
-          if (type === "heading" && row.heading_text) {
-            const level = (row.heading_level as number) || 2;
-            const hashes = "#".repeat(Math.min(Math.max(level, 1), 6));
-            return makeMatch(row.id as string, `${hashes} ${row.heading_text}`);
-          }
-          // summary_blocks.content is JSONB — extract all string values.
-          const text = extractTextFromBlockContent(row.content).trim();
-          return text ? makeMatch(row.id as string, text) : null;
-        })
-        .filter((m): m is MatchedChunk => m !== null);
-      entry.matchesReturned = matches.length;
-      return matches;
-    }
-
-    // 3. content_markdown
-    if (markdown.trim()) {
-      const truncated = markdown.length > FALLBACK_MARKDOWN_MAX_CHARS
-        ? markdown.slice(0, FALLBACK_MARKDOWN_MAX_CHARS) + "\n..."
-        : markdown;
-      const matches = [makeMatch(`${summaryIdStr}:markdown`, truncated)];
-      entry.matchesReturned = matches.length;
-      return matches;
-    }
-
-    return [];
-  } catch (e) {
-    entry.summaryError = `EXC: ${(e as Error).message.slice(0, 50)}`;
-    return [];
-  }
-}
-
-async function fetchTopicFallbackChunks(
-  adminDb: SupabaseClient,
-  topicId: string,
-  trace?: FallbackTrace,
-): Promise<MatchedChunk[]> {
-  const t = trace ?? newFallbackTrace();
-  try {
-    const { data: summaryRows, error: summariesErr } = await adminDb
-      .from("summaries")
-      .select("id")
-      .eq("topic_id", topicId)
-      .is("deleted_at", null)
-      .order("order_index", { ascending: true })
-      .limit(FALLBACK_TOPIC_SUMMARIES_LIMIT);
-
-    if (summariesErr) t.topicSummariesError = summariesErr.message.slice(0, 60);
-    t.topicSummariesCount = summaryRows?.length ?? 0;
-
-    if (!summaryRows || summaryRows.length === 0) return [];
-
-    const nested = await Promise.all(
-      summaryRows.map((row) =>
-        fetchSummaryFallbackChunksTraced(adminDb, row.id as string, t),
-      ),
-    );
-
-    return nested.flat();
-  } catch (e) {
-    t.topicSummariesError = `EXC: ${(e as Error).message.slice(0, 50)}`;
-    console.warn("[RAG Chat] Topic fallback fetch failed:", (e as Error).message);
-    return [];
-  }
-}
-
-// --- Phase 5: Smart context assembly ------------------------------
-
-const MAX_CONTEXT_CHARS = 8000;
-
-function assembleContext(
-  matches: MatchedChunk[],
-  contextChunks: ContextChunk[],
-): { ragContext: string; sourcesUsed: Array<{ chunk_id: string; summary_title: string; similarity: number }>; contextChunksCount: number } {
-  const sourcesUsed = matches.map((m) => ({
-    chunk_id: m.chunk_id,
-    summary_title: m.summary_title,
-    similarity: Math.round(m.similarity * 100) / 100,
-  }));
-
-  if (contextChunks.length === 0 && matches.length === 0) {
-    return { ragContext: "", sourcesUsed, contextChunksCount: 0 };
-  }
-
-  if (contextChunks.length > 0) {
-    const titleMap = new Map<string, string>();
-    for (const m of matches) {
-      titleMap.set(m.summary_id, m.summary_title);
-    }
-
-    let context = "";
-    let currentSummary = "";
-    let charCount = 0;
-    let chunksIncluded = 0;
-
-    for (const chunk of contextChunks) {
-      if (chunk.summary_id !== currentSummary) {
-        const title = titleMap.get(chunk.summary_id) || "Material";
-        const header = `\n[De "${title}"]:\n`;
-        if (charCount + header.length > MAX_CONTEXT_CHARS) break;
-        context += header;
-        charCount += header.length;
-        currentSummary = chunk.summary_id;
-      }
-
-      const separator = chunk.is_primary ? "" : "";
-      const text = `${separator}${chunk.content}\n`;
-      if (charCount + text.length > MAX_CONTEXT_CHARS) {
-        const remaining = MAX_CONTEXT_CHARS - charCount;
-        if (remaining > 100) {
-          context += text.slice(0, remaining) + "...\n";
-          chunksIncluded++;
-        }
-        break;
-      }
-      context += text;
-      charCount += text.length;
-      chunksIncluded++;
-    }
-
-    return {
-      ragContext: context.trim()
-        ? `\n\nContexto relevante del material de estudio:\n${context.trim()}`
-        : "",
-      sourcesUsed,
-      contextChunksCount: chunksIncluded,
-    };
-  }
-
-  const ragContext = "\n\nContexto relevante del material de estudio:\n" +
-    matches
-      .map((m, i) => `[${i + 1}] (de "${m.summary_title}"): ${m.content}`)
-      .join("\n\n");
-
-  return { ragContext, sourcesUsed, contextChunksCount: matches.length };
-}
-
-// --- Fase 3: Coarse-to-Fine result normalizer ---------------------
-
-interface CoarseToFineRow {
-  chunk_id: string;
-  summary_id: string;
-  summary_title: string;
-  content: string;
-  summary_similarity: number;
-  chunk_similarity: number;
-  combined_score: number;
-}
-
-function normalizeCoarseToFineResults(
-  rows: CoarseToFineRow[],
-): MatchedChunk[] {
-  return rows.map((r) => ({
-    chunk_id: r.chunk_id,
-    summary_id: r.summary_id,
-    summary_title: r.summary_title,
-    content: r.content,
-    similarity: r.chunk_similarity,
-    text_rank: 0,
-    combined_score: r.combined_score,
-  }));
-}
 
 // --- Fase 6: Valid strategy values for client override ------------
 
@@ -667,8 +141,8 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   const message = (body.message as string).trim();
   if (message.length === 0)
     return err(c, "message cannot be empty", 400);
-  if (message.length > 2000)
-    return err(c, "message too long (max 2000 characters)", 400);
+  if (message.length > MAX_MESSAGE_LENGTH)
+    return err(c, `message too long (max ${MAX_MESSAGE_LENGTH} characters)`, 400);
 
   const summaryId = isUuid(body.summary_id) ? (body.summary_id as string) : null;
   const topicId = isUuid(body.topic_id) ? (body.topic_id as string) : null;
@@ -684,9 +158,9 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   let debugTopicFallbackCount = "skipped";
 
   const history = Array.isArray(body.history)
-    ? body.history.slice(-6).map((h: Record<string, string>) => ({
+    ? body.history.slice(-MAX_HISTORY_TURNS).map((h: Record<string, string>) => ({
         role: h.role,
-        content: typeof h.content === "string" ? h.content.slice(0, 500) : "",
+        content: typeof h.content === "string" ? h.content.slice(0, MAX_HISTORY_TURN_CHARS) : "",
       }))
     : [];
 
@@ -749,8 +223,10 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   // Short queries (acronyms like "EIC", "HTA", "ECG") produce weak
   // dense-vector similarity scores. Relax the threshold so the hybrid
   // search's lexical component can still surface relevant chunks.
-  const isShortQuery = message.trim().length < 15;
-  const similarityThreshold = isShortQuery ? 0.15 : 0.3;
+  const isShortQuery = message.trim().length < SHORT_QUERY_CHAR_THRESHOLD;
+  const similarityThreshold = isShortQuery
+    ? SHORT_QUERY_SIMILARITY_THRESHOLD
+    : NORMAL_QUERY_SIMILARITY_THRESHOLD;
 
   try {
     const embeddingOutput = await executeRetrievalEmbedding(
@@ -768,7 +244,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
           p_query_text: message,
           p_institution_id: institutionId,
           p_summary_id: summaryId,
-          p_match_count: 8,
+          p_match_count: MAX_SEARCH_RESULTS,
           p_similarity_threshold: similarityThreshold,
         });
         searchType = "hybrid";
@@ -780,8 +256,8 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
         {
           p_query_embedding: queryEmbeddingJson,
           p_institution_id: institutionId,
-          p_top_summaries: 3,
-          p_top_chunks: 8,
+          p_top_summaries: COARSE_TO_FINE_TOP_SUMMARIES,
+          p_top_chunks: MAX_SEARCH_RESULTS,
           p_similarity_threshold: similarityThreshold,
           p_query_text: message,
         },
@@ -804,7 +280,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
         p_query_text: message,
         p_institution_id: institutionId,
         p_summary_id: null,
-        p_match_count: 8,
+        p_match_count: MAX_SEARCH_RESULTS,
         p_similarity_threshold: similarityThreshold,
       });
       searchType = "hybrid_fallback";
@@ -818,11 +294,12 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     // Task 4.5: Conditional re-ranking — skip for high-confidence single results
     const topSimilarity = mergedMatches.length > 0 ? mergedMatches[0].similarity : 0;
     const shouldRerank = mergedMatches.length > 1 &&
-      (topSimilarity < 0.7 || mergedMatches.length > 3);
+      (topSimilarity < RERANK_HIGH_CONFIDENCE_THRESHOLD ||
+        mergedMatches.length > RERANK_MIN_RESULTS);
 
     if (shouldRerank) {
       try {
-        mergedMatches = await rerankWithClaude(message, mergedMatches, 5);
+        mergedMatches = await rerankWithClaude(message, mergedMatches, RERANK_TOP_K);
         rerankApplied = true;
       } catch (e) {
         console.warn("[RAG Chat] Re-ranking failed, using original order:", (e as Error).message);
@@ -830,7 +307,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     }
 
     if (mergedMatches.length > 0) {
-      const topMatches = mergedMatches.slice(0, 5);
+      const topMatches = mergedMatches.slice(0, CONTEXT_PRIMARY_MATCHES);
       const contextChunks = await fetchAdjacentChunks(db, topMatches);
 
       const assembled = assembleContext(topMatches, contextChunks);
@@ -930,10 +407,12 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
     .join("\n");
 
   const sanitizedHistory = conversationHistory
-    ? wrapXml("conversation_history", sanitizeForPrompt(conversationHistory, 3000))
+    ? wrapXml("conversation_history", sanitizeForPrompt(conversationHistory, MAX_HISTORY_CONTEXT_CHARS))
     : "";
-  const sanitizedMessage = wrapXml("user_message", sanitizeForPrompt(message, 2000));
-  const sanitizedContext = ragContext ? wrapXml("course_content", sanitizeForPrompt(ragContext, 6000)) : "";
+  const sanitizedMessage = wrapXml("user_message", sanitizeForPrompt(message, MAX_MESSAGE_LENGTH));
+  const sanitizedContext = ragContext
+    ? wrapXml("course_content", sanitizeForPrompt(ragContext, MAX_RAG_CONTEXT_CHARS))
+    : "";
   const userPrompt = `${sanitizedHistory}\n${sanitizedMessage}\n${sanitizedContext}`;
 
   // --- Streaming path: ?stream=1 OR body.stream === true ---------
@@ -945,8 +424,8 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
       const anthropicStream = await generateTextStream({
         prompt: userPrompt,
         systemPrompt,
-        temperature: 0.5,
-        maxTokens: 2500,
+        temperature: CHAT_TEMPERATURE,
+        maxTokens: CHAT_MAX_TOKENS,
       });
 
       const logId = crypto.randomUUID();
@@ -1075,8 +554,8 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
     const result = await generateText({
       prompt: userPrompt,
       systemPrompt,
-      temperature: 0.5,
-      maxTokens: 2500,
+      temperature: CHAT_TEMPERATURE,
+      maxTokens: CHAT_MAX_TOKENS,
     });
 
     const latencyMs = Date.now() - t0;
