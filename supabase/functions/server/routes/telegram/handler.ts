@@ -245,6 +245,155 @@ function trimHistory(history: ClaudeMessage[]): ClaudeMessage[] {
   return history.slice(-maxMessages);
 }
 
+// ─── Agentic Loop Helpers ────────────────────────────────
+
+/**
+ * Outcome of processing a single tool_use block inside the agentic loop.
+ * - "continue": tool executed, tool_result pushed to history, keep looping
+ * - "break":    terminal condition reached (async enqueue), stop looping with finalText=""
+ * - "return":   short-circuit the whole handler (e.g. entered review mode)
+ */
+type ToolStepOutcome =
+  | { kind: "continue" }
+  | { kind: "break" }
+  | { kind: "return" };
+
+interface ToolStepContext {
+  chatId: number;
+  userId: string;
+  messageId: number;
+  iteration: number;
+  startMs: number;
+  sessionVersion: number;
+  sessionContext: Record<string, unknown>;
+  history: ClaudeMessage[];
+  toolsUsed: string[];
+  responseContent: ClaudeContentBlock[];
+  toolUseBlock: ClaudeContentBlock;
+}
+
+async function processToolUseBlock(ctx: ToolStepContext): Promise<ToolStepOutcome> {
+  const { chatId, userId, messageId, iteration, startMs, sessionVersion, sessionContext,
+          history, toolsUsed, responseContent, toolUseBlock } = ctx;
+
+  const toolName = toolUseBlock.name!;
+  const toolUseId = toolUseBlock.id!;
+  const toolArgs = (toolUseBlock.input ?? {}) as Record<string, unknown>;
+  toolsUsed.push(toolName);
+  console.warn(`[TG-Handler] Tool #${iteration + 1}: ${toolName}(${JSON.stringify(toolArgs).slice(0, 100)})`);
+
+  // Record assistant's tool_use turn in history before executing
+  history.push({ role: "assistant", content: responseContent });
+
+  const toolResult = await executeToolCall(toolName, toolArgs, userId, sessionContext);
+
+  // Async tool → enqueue job and terminate loop
+  if (toolResult.isAsync) {
+    await handleAsyncToolEnqueue(chatId, userId, toolName, toolResult.result, history, toolUseId);
+    return { kind: "break" };
+  }
+
+  // Study queue → try to enter review mode (may short-circuit the handler)
+  if (toolName === "get_study_queue" && toolResult.result) {
+    const entered = await tryEnterStudyQueueReview(
+      chatId, userId, sessionVersion, messageId, startMs, toolsUsed, toolResult,
+    );
+    if (entered) return { kind: "return" };
+  }
+
+  // Standard tool_result round-trip
+  history.push({
+    role: "user",
+    content: [{
+      type: "tool_result",
+      tool_use_id: toolUseId,
+      content: JSON.stringify(toolResult.error ? { error: toolResult.error } : toolResult.result),
+    }],
+  });
+  return { kind: "continue" };
+}
+
+async function handleAsyncToolEnqueue(
+  chatId: number,
+  userId: string,
+  toolName: string,
+  result: unknown,
+  history: ClaudeMessage[],
+  toolUseId: string,
+): Promise<void> {
+  const asyncResult = result as Record<string, unknown>;
+  await sendTextPlain(chatId, (asyncResult?.message as string) ?? "Procesando... \u23f3");
+
+  const enqueued = await enqueueJob({
+    type: toolName as "generate_content" | "generate_weekly_report",
+    channel: "telegram",
+    user_id: userId,
+    chat_id: chatId,
+    action: (asyncResult?.action as "flashcard" | "quiz") ?? undefined,
+    summary_id: (asyncResult?.summary_id as string) ?? undefined,
+  });
+
+  if (enqueued) {
+    processNextJob().catch((e) =>
+      console.warn(`[TG-Handler] Fire-and-forget queue failed: ${(e as Error).message}`)
+    );
+  }
+
+  history.push({
+    role: "user",
+    content: [{ type: "tool_result", tool_use_id: toolUseId, content: JSON.stringify(result) }],
+  });
+}
+
+/**
+ * If study queue returned cards, attempt to enter review mode.
+ * Returns true if the handler should short-circuit (review mode entered).
+ * If review mode could not be entered, mutates toolResult.result to add a
+ * formatted summary so the LLM can present the cards textually.
+ */
+async function tryEnterStudyQueueReview(
+  chatId: number,
+  userId: string,
+  sessionVersion: number,
+  messageId: number,
+  startMs: number,
+  toolsUsed: string[],
+  toolResult: { result: unknown },
+): Promise<boolean> {
+  const queueResult = toolResult.result as { cards: FlashcardItem[]; count: number };
+  if (!queueResult || queueResult.count <= 0) return false;
+
+  const entered = await enterReviewMode(chatId, userId, queueResult.cards, sessionVersion);
+  if (entered) {
+    updateLogRecord(chatId, messageId, toolsUsed, Date.now() - startMs);
+    return true;
+  }
+  const formatted = formatFlashcardSummary(queueResult.cards, queueResult.count);
+  (toolResult.result as Record<string, unknown>).formatted_summary = formatted;
+  return false;
+}
+
+/**
+ * Extract the final assistant text from a Claude response.
+ * Handles both the "first text block" case and the "end_turn with concatenated text blocks" case.
+ * Returns empty string if no text content is present.
+ */
+function extractResponseText(response: {
+  content: ClaudeContentBlock[];
+  stopReason?: string | null;
+}): string {
+  const textBlock = response.content.find((b) => b.type === "text") as ClaudeContentBlock | undefined;
+  if (textBlock?.text) return textBlock.text;
+
+  if (response.stopReason === "end_turn" && response.content.length > 0) {
+    return response.content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text ?? "")
+      .join("");
+  }
+  return "";
+}
+
 // ─── Main Handler ────────────────────────────────────────
 
 export async function handleMessage(params: HandleMessageParams): Promise<void> {
@@ -335,105 +484,34 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
         maxTokens: 1024,
       });
 
-      // Extract tool_use blocks
       const toolUseBlock = response.content.find(
         (b) => b.type === "tool_use",
       ) as ClaudeContentBlock | undefined;
 
-      const textBlock = response.content.find(
-        (b) => b.type === "text",
-      ) as ClaudeContentBlock | undefined;
-
+      // Branch 1: Claude wants to call a tool
       if (toolUseBlock?.name && toolUseBlock.id) {
-        const toolName = toolUseBlock.name;
-        const toolArgs = (toolUseBlock.input ?? {}) as Record<string, unknown>;
-        toolsUsed.push(toolName);
-        console.warn(`[TG-Handler] Tool #${iteration + 1}: ${toolName}(${JSON.stringify(toolArgs).slice(0, 100)})`);
-
-        // Add assistant message with tool_use to history
-        history.push({
-          role: "assistant",
-          content: response.content,
+        const outcome = await processToolUseBlock({
+          chatId, userId, messageId, iteration, startMs,
+          sessionVersion: session.version,
+          sessionContext: session.current_context,
+          history, toolsUsed,
+          responseContent: response.content,
+          toolUseBlock,
         });
-
-        const toolResult = await executeToolCall(toolName, toolArgs, userId, session.current_context);
-
-        // Handle async tools — enqueue for background processing
-        if (toolResult.isAsync) {
-          const asyncResult = toolResult.result as Record<string, unknown>;
-          await sendTextPlain(chatId, (asyncResult?.message as string) ?? "Procesando... \u23f3");
-
-          // Enqueue the job for background execution
-          const enqueued = await enqueueJob({
-            type: toolName as "generate_content" | "generate_weekly_report",
-            channel: "telegram",
-            user_id: userId,
-            chat_id: chatId,
-            action: (asyncResult?.action as "flashcard" | "quiz") ?? undefined,
-            summary_id: (asyncResult?.summary_id as string) ?? undefined,
-          });
-
-          if (enqueued) {
-            // Fire-and-forget: attempt immediate processing
-            processNextJob().catch((e) =>
-              console.warn(`[TG-Handler] Fire-and-forget queue failed: ${(e as Error).message}`)
-            );
-          }
-
-          history.push({
-            role: "user",
-            content: [{ type: "tool_result", tool_use_id: toolUseBlock.id, content: JSON.stringify(toolResult.result) }],
-          });
-          break;
-        }
-
-        // Handle study queue → enter review mode
-        if (toolName === "get_study_queue" && toolResult.result) {
-          const queueResult = toolResult.result as { cards: FlashcardItem[]; count: number };
-          if (queueResult.count > 0) {
-            const entered = await enterReviewMode(chatId, userId, queueResult.cards, session.version);
-            if (entered) {
-              updateLogRecord(chatId, messageId, toolsUsed, Date.now() - startMs);
-              return;
-            }
-            const formatted = formatFlashcardSummary(queueResult.cards, queueResult.count);
-            (toolResult.result as Record<string, unknown>).formatted_summary = formatted;
-          }
-        }
-
-        // Add tool_result to history
-        history.push({
-          role: "user",
-          content: [{
-            type: "tool_result",
-            tool_use_id: toolUseBlock.id,
-            content: JSON.stringify(
-              toolResult.error ? { error: toolResult.error } : toolResult.result,
-            ),
-          }],
-        });
+        if (outcome.kind === "return") return;
+        if (outcome.kind === "break") break;
         continue;
       }
 
-      if (textBlock?.text) {
-        finalText = textBlock.text;
+      // Branch 2: Claude responded with plain text
+      const responseText = extractResponseText(response);
+      if (responseText) {
+        finalText = responseText;
         history.push({ role: "assistant", content: finalText });
         break;
       }
 
-      // If response has text content directly
-      if (response.stopReason === "end_turn" && response.content.length > 0) {
-        const allText = response.content
-          .filter((b) => b.type === "text")
-          .map((b) => b.text ?? "")
-          .join("");
-        if (allText) {
-          finalText = allText;
-          history.push({ role: "assistant", content: finalText });
-          break;
-        }
-      }
-
+      // Branch 3: Empty response, bail out
       console.warn(`[TG-Handler] Claude empty at iteration ${iteration}`);
       break;
     }
