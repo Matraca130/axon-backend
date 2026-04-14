@@ -5,21 +5,18 @@
  *
  * Active functions:
  *   extractTextFromPdf()  — Gemini 2.5 Flash multimodal PDF text extraction (Fase 7)
- *   fetchWithRetry()      — Shared fetch helper (also used by handler.ts)
+ *   fetchWithRetry()      — Thin wrapper over lib/fetch-retry.ts (429, 503)
+ *   parseGeminiJson()     — Backward-compat re-export of parseLlmJson
  *
- * Legacy (still exported for backward compat):
- *   generateText()        — Gemini text generation (DEPRECATED — use claude-ai.ts)
- *   parseGeminiJson()     — JSON parser (DEPRECATED — use parseClaudeJson from claude-ai.ts)
- *
- * REMOVED function:
+ * REMOVED functions:
+ *   generateText()        — Text generation migrated to claude-ai.ts
  *   generateEmbedding()   — HARD ERROR: Use openai-embeddings.ts instead (D57)
  *
  * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
- *
- * LA-02 FIX: Added AbortController timeout (15s generate, 10s embed)
- * LA-06 FIX: Added retry with exponential backoff for 429/503
- * N3 FIX: Export fetchWithRetry so handler.ts can use it for callGemini
  */
+
+import { fetchWithRetry as _fetchWithRetry } from "./lib/fetch-retry.ts";
+import { parseLlmJson } from "./lib/parse-llm-json.ts";
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -33,8 +30,8 @@ function getApiKey(): string {
 
 export { getApiKey };
 
-// ─── LA-02 + LA-06 FIX: Fetch with timeout + retry ─────────────
-// N3 FIX: Now exported so handler.ts callGemini can use retry logic
+// ─── Fetch with timeout + retry ─────────────
+// Shared implementation in lib/fetch-retry.ts. Gemini retries on 429, 503.
 
 export async function fetchWithRetry(
   url: string,
@@ -42,109 +39,7 @@ export async function fetchWithRetry(
   timeoutMs: number,
   maxRetries = 3,
 ): Promise<Response> {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const res = await fetch(url, { ...init, signal: controller.signal });
-      clearTimeout(timer);
-
-      if ((res.status === 429 || res.status === 503) && attempt < maxRetries) {
-        const delay = Math.min(1000 * 2 ** attempt, 8000);
-        console.warn(
-          `[Gemini] ${res.status}, retry ${attempt + 1}/${maxRetries} in ${delay}ms`,
-        );
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
-      }
-
-      return res;
-    } catch (e) {
-      clearTimeout(timer);
-      if (e instanceof DOMException && e.name === "AbortError") {
-        throw new Error(
-          `Gemini API timeout after ${timeoutMs}ms (attempt ${attempt + 1})`,
-        );
-      }
-      if (attempt < maxRetries) {
-        const delay = Math.min(1000 * 2 ** attempt, 8000);
-        console.warn(
-          `[Gemini] Network error, retry ${attempt + 1}/${maxRetries} in ${delay}ms: ${(e as Error).message}`,
-        );
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
-      }
-      throw e;
-    }
-  }
-  throw new Error("Gemini: max retries exceeded");
-}
-
-// ─── Text Generation ────────────────────────────────────────────
-
-interface GeminiGenerateOpts {
-  prompt: string;
-  systemPrompt?: string;
-  jsonMode?: boolean;
-  temperature?: number;
-  maxTokens?: number;
-}
-
-interface GeminiGenerateResult {
-  text: string;
-  tokensUsed: { input: number; output: number };
-}
-
-export async function generateText(
-  opts: GeminiGenerateOpts,
-): Promise<GeminiGenerateResult> {
-  const key = getApiKey();
-  const model = GENERATE_MODEL;
-  const url = `${GEMINI_BASE}/${model}:generateContent?key=${key}`;
-
-  const body: Record<string, unknown> = {
-    contents: [{ parts: [{ text: opts.prompt }] }],
-    generationConfig: {
-      temperature: opts.temperature ?? 0.7,
-      maxOutputTokens: opts.maxTokens ?? 2048,
-      ...(opts.jsonMode && { responseMimeType: "application/json" }),
-    },
-  };
-
-  if (opts.systemPrompt) {
-    body.systemInstruction = {
-      parts: [{ text: opts.systemPrompt }],
-    };
-  }
-
-  const res = await fetchWithRetry(
-    url,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-    15_000,
-  );
-
-  if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`Gemini API error ${res.status}: ${errBody}`);
-  }
-
-  const data = await res.json();
-  const candidate = data.candidates?.[0];
-  if (!candidate?.content?.parts?.[0]?.text) {
-    throw new Error("Gemini returned no content");
-  }
-
-  return {
-    text: candidate.content.parts[0].text,
-    tokensUsed: {
-      input: data.usageMetadata?.promptTokenCount ?? 0,
-      output: data.usageMetadata?.candidatesTokenCount ?? 0,
-    },
-  };
+  return _fetchWithRetry(url, init, timeoutMs, maxRetries, [429, 503]);
 }
 
 // ─── Embeddings (REMOVED — W7-RAG01) ────────────────────────────
@@ -267,16 +162,7 @@ export async function extractTextFromPdf(
 }
 
 // ─── Parse JSON safely from Gemini output ───────────────────────
+// Shared implementation in lib/parse-llm-json.ts. Re-exported for
+// backward compatibility; no consumers currently import this name.
 
-export function parseGeminiJson<T = unknown>(text: string): T {
-  let cleaned = text.trim();
-  if (cleaned.startsWith("```json")) {
-    cleaned = cleaned.slice(7);
-  } else if (cleaned.startsWith("```")) {
-    cleaned = cleaned.slice(3);
-  }
-  if (cleaned.endsWith("```")) {
-    cleaned = cleaned.slice(0, -3);
-  }
-  return JSON.parse(cleaned.trim()) as T;
-}
+export const parseGeminiJson = parseLlmJson;

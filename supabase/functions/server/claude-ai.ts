@@ -15,6 +15,9 @@
  * Environment: Reads ANTHROPIC_API_KEY from Deno.env (set via supabase secrets).
  */
 
+import { fetchWithRetry as _fetchWithRetry } from "./lib/fetch-retry.ts";
+import { parseLlmJson } from "./lib/parse-llm-json.ts";
+
 const CLAUDE_BASE = "https://api.anthropic.com/v1";
 const ANTHROPIC_VERSION = "2023-06-01";
 
@@ -43,6 +46,7 @@ function getApiKey(): string {
 export { getApiKey as getClaudeApiKey };
 
 // ─── Fetch with Timeout + Retry ──────────────────────────
+// Shared implementation in lib/fetch-retry.ts. Claude retries on 429, 503, 529.
 
 export async function fetchWithRetry(
   url: string,
@@ -50,42 +54,7 @@ export async function fetchWithRetry(
   timeoutMs: number,
   maxRetries = 3,
 ): Promise<Response> {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const res = await fetch(url, { ...init, signal: controller.signal });
-      clearTimeout(timer);
-
-      if ((res.status === 429 || res.status === 529 || res.status === 503) && attempt < maxRetries) {
-        const delay = Math.min(1000 * 2 ** attempt, 8000);
-        console.warn(
-          `[Claude] ${res.status}, retry ${attempt + 1}/${maxRetries} in ${delay}ms`,
-        );
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
-      }
-
-      return res;
-    } catch (e) {
-      clearTimeout(timer);
-      if (e instanceof DOMException && e.name === "AbortError") {
-        throw new Error(
-          `Claude API timeout after ${timeoutMs}ms (attempt ${attempt + 1})`,
-        );
-      }
-      if (attempt < maxRetries) {
-        const delay = Math.min(1000 * 2 ** attempt, 8000);
-        console.warn(
-          `[Claude] Network error, retry ${attempt + 1}/${maxRetries} in ${delay}ms: ${(e as Error).message}`,
-        );
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
-      }
-      throw e;
-    }
-  }
-  throw new Error("Claude: max retries exceeded");
+  return _fetchWithRetry(url, init, timeoutMs, maxRetries, [429, 503, 529]);
 }
 
 // ─── Types ───────────────────────────────────────────────
@@ -409,18 +378,7 @@ export async function generateTextStream(
 }
 
 // ─── Parse JSON safely from Claude output ─────────────────
-// Claude sometimes wraps JSON in markdown code blocks.
-// Same logic as gemini.ts parseGeminiJson (drop-in replacement).
+// Shared implementation in lib/parse-llm-json.ts. Re-exported here for
+// backward compatibility with existing consumer imports.
 
-export function parseClaudeJson<T = unknown>(text: string): T {
-  let cleaned = text.trim();
-  if (cleaned.startsWith("```json")) {
-    cleaned = cleaned.slice(7);
-  } else if (cleaned.startsWith("```")) {
-    cleaned = cleaned.slice(3);
-  }
-  if (cleaned.endsWith("```")) {
-    cleaned = cleaned.slice(0, -3);
-  }
-  return JSON.parse(cleaned.trim()) as T;
-}
+export const parseClaudeJson = parseLlmJson;
