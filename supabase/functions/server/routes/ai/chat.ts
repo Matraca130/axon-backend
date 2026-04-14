@@ -384,146 +384,10 @@ async function fetchSummaryFallbackChunks(
 
 const FALLBACK_TOPIC_SUMMARIES_LIMIT = 6;
 
-// DEBUG (RL-DEBUG-3): track per-step diagnostics for the fallback
-// cascade so we can see WHERE it returns empty. Stashed into the
-// shared debugTopicFallbackTrace array by the caller.
-interface FallbackTrace {
-  topicSummariesCount: number;
-  topicSummariesError: string | null;
-  perSummary: Array<{
-    sid: string;
-    rowFound: boolean;
-    summaryError: string | null;
-    chunkRows: number;
-    chunkError: string | null;
-    blockRows: number;
-    blockError: string | null;
-    mdLen: number;
-    matchesReturned: number;
-  }>;
-}
-
-function newFallbackTrace(): FallbackTrace {
-  return { topicSummariesCount: 0, topicSummariesError: null, perSummary: [] };
-}
-
-async function fetchSummaryFallbackChunksTraced(
-  adminDb: SupabaseClient,
-  summaryId: string,
-  trace: FallbackTrace,
-): Promise<MatchedChunk[]> {
-  const entry = {
-    sid: summaryId.slice(0, 8),
-    rowFound: false,
-    summaryError: null as string | null,
-    chunkRows: 0,
-    chunkError: null as string | null,
-    blockRows: 0,
-    blockError: null as string | null,
-    mdLen: 0,
-    matchesReturned: 0,
-  };
-  trace.perSummary.push(entry);
-
-  try {
-    const { data: summaryRow, error: summaryErr } = await adminDb
-      .from("summaries")
-      .select("id, title, content_markdown")
-      .eq("id", summaryId)
-      .is("deleted_at", null)
-      .single();
-
-    if (summaryErr) entry.summaryError = summaryErr.message.slice(0, 60);
-    if (!summaryRow) return [];
-    entry.rowFound = true;
-
-    const title = (summaryRow.title as string) || "Material";
-    const summaryIdStr = summaryRow.id as string;
-    const markdown = (summaryRow.content_markdown as string | null) || "";
-    entry.mdLen = markdown.length;
-
-    const makeMatch = (id: string, content: string): MatchedChunk => ({
-      chunk_id: id,
-      summary_id: summaryIdStr,
-      summary_title: title,
-      content,
-      similarity: 0,
-      text_rank: 0,
-      combined_score: 0,
-    });
-
-    // 1. chunks
-    const { data: chunkRows, error: chunkErr } = await adminDb
-      .from("chunks")
-      .select("id, summary_id, content, order_index")
-      .eq("summary_id", summaryId)
-      .order("order_index", { ascending: true })
-      .limit(FALLBACK_CHUNK_LIMIT);
-
-    if (chunkErr) entry.chunkError = chunkErr.message.slice(0, 60);
-    entry.chunkRows = chunkRows?.length ?? 0;
-
-    if (chunkRows && chunkRows.length > 0) {
-      const matches = chunkRows.map((row) =>
-        makeMatch(row.id as string, row.content as string),
-      );
-      entry.matchesReturned = matches.length;
-      return matches;
-    }
-
-    // 2. summary_blocks
-    const { data: blockRows, error: blockErr } = await adminDb
-      .from("summary_blocks")
-      .select("id, type, heading_text, heading_level, content, order_index")
-      .eq("summary_id", summaryId)
-      .eq("is_active", true)
-      .order("order_index", { ascending: true })
-      .limit(FALLBACK_BLOCK_LIMIT);
-
-    if (blockErr) entry.blockError = blockErr.message.slice(0, 60);
-    entry.blockRows = blockRows?.length ?? 0;
-
-    if (blockRows && blockRows.length > 0) {
-      const matches = blockRows
-        .map((row) => {
-          const type = row.type as string;
-          if (type === "heading" && row.heading_text) {
-            const level = (row.heading_level as number) || 2;
-            const hashes = "#".repeat(Math.min(Math.max(level, 1), 6));
-            return makeMatch(row.id as string, `${hashes} ${row.heading_text}`);
-          }
-          // summary_blocks.content is JSONB — extract all string values.
-          const text = extractTextFromBlockContent(row.content).trim();
-          return text ? makeMatch(row.id as string, text) : null;
-        })
-        .filter((m): m is MatchedChunk => m !== null);
-      entry.matchesReturned = matches.length;
-      return matches;
-    }
-
-    // 3. content_markdown
-    if (markdown.trim()) {
-      const truncated = markdown.length > FALLBACK_MARKDOWN_MAX_CHARS
-        ? markdown.slice(0, FALLBACK_MARKDOWN_MAX_CHARS) + "\n..."
-        : markdown;
-      const matches = [makeMatch(`${summaryIdStr}:markdown`, truncated)];
-      entry.matchesReturned = matches.length;
-      return matches;
-    }
-
-    return [];
-  } catch (e) {
-    entry.summaryError = `EXC: ${(e as Error).message.slice(0, 50)}`;
-    return [];
-  }
-}
-
 async function fetchTopicFallbackChunks(
   adminDb: SupabaseClient,
   topicId: string,
-  trace?: FallbackTrace,
 ): Promise<MatchedChunk[]> {
-  const t = trace ?? newFallbackTrace();
   try {
     const { data: summaryRows, error: summariesErr } = await adminDb
       .from("summaries")
@@ -533,20 +397,20 @@ async function fetchTopicFallbackChunks(
       .order("order_index", { ascending: true })
       .limit(FALLBACK_TOPIC_SUMMARIES_LIMIT);
 
-    if (summariesErr) t.topicSummariesError = summariesErr.message.slice(0, 60);
-    t.topicSummariesCount = summaryRows?.length ?? 0;
+    if (summariesErr) {
+      console.warn("[RAG Chat] Topic summaries query error:", summariesErr.message);
+    }
 
     if (!summaryRows || summaryRows.length === 0) return [];
 
     const nested = await Promise.all(
       summaryRows.map((row) =>
-        fetchSummaryFallbackChunksTraced(adminDb, row.id as string, t),
+        fetchSummaryFallbackChunks(adminDb, row.id as string),
       ),
     );
 
     return nested.flat();
   } catch (e) {
-    t.topicSummariesError = `EXC: ${(e as Error).message.slice(0, 50)}`;
     console.warn("[RAG Chat] Topic fallback fetch failed:", (e as Error).message);
     return [];
   }
@@ -672,16 +536,6 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
 
   const summaryId = isUuid(body.summary_id) ? (body.summary_id as string) : null;
   const topicId = isUuid(body.topic_id) ? (body.topic_id as string) : null;
-
-  // DEBUG (RL-DEBUG-2): re-introduce body shape capture into the
-  // model_used column so we can read it via SQL. Augmented in this
-  // round with the topic_fallback step counts so we can see whether
-  // the cascade ran and what each step returned. Remove once the
-  // root cause is verified.
-  const debugBodyKeys = JSON.stringify(Object.keys(body || {}));
-  const debugRawSid = body?.summary_id ?? "null";
-  const debugRawTid = body?.topic_id ?? "null";
-  let debugTopicFallbackCount = "skipped";
 
   const history = Array.isArray(body.history)
     ? body.history.slice(-6).map((h: Record<string, string>) => ({
@@ -860,10 +714,8 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   // Fallback: no summary selected but the navigation context points
   // to a topic (e.g. frontend sends topic_id from currentTopic). Load
   // content from all summaries under that topic.
-  const fallbackTrace = newFallbackTrace();
   if (!ragContext && topicId) {
-    const fallbackMatches = await fetchTopicFallbackChunks(adminDb, topicId, fallbackTrace);
-    debugTopicFallbackCount = String(fallbackMatches.length);
+    const fallbackMatches = await fetchTopicFallbackChunks(adminDb, topicId);
     if (fallbackMatches.length > 0) {
       const assembled = assembleContext(fallbackMatches, []);
       ragContext = assembled.ragContext;
@@ -871,38 +723,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
       contextChunksCount = assembled.contextChunksCount;
       searchType = "topic_fallback";
     }
-  } else if (!ragContext) {
-    debugTopicFallbackCount = topicId
-      ? "ragContextAlreadySet"
-      : "noTopicId";
   }
-
-  // DEBUG (RL-DEBUG-3): serialize fallback trace into a compact string.
-  const traceStr = (() => {
-    const parts: string[] = [];
-    parts.push(`tsr=${fallbackTrace.topicSummariesCount}`);
-    if (fallbackTrace.topicSummariesError) {
-      parts.push(`tsErr=${fallbackTrace.topicSummariesError}`);
-    }
-    for (const e of fallbackTrace.perSummary) {
-      const segs = [
-        `sid=${e.sid}`,
-        `row=${e.rowFound ? "Y" : "N"}`,
-        `c=${e.chunkRows}`,
-        `b=${e.blockRows}`,
-        `md=${e.mdLen}`,
-        `m=${e.matchesReturned}`,
-      ];
-      if (e.summaryError) segs.push(`sErr=${e.summaryError}`);
-      if (e.chunkError) segs.push(`cErr=${e.chunkError}`);
-      if (e.blockError) segs.push(`bErr=${e.blockError}`);
-      parts.push(`[${segs.join(",")}]`);
-    }
-    return parts.join(" ");
-  })();
-
-  // DEBUG (RL-DEBUG-2): assemble debug suffix for model_used.
-  const debugModelSuffix = `|DEBUG keys=${debugBodyKeys} rsid=${debugRawSid} rtid=${debugRawTid} sid=${summaryId ?? "null"} tid=${topicId ?? "null"} tfb=${debugTopicFallbackCount} ${traceStr}`;
 
   let profileContext = "";
   try {
@@ -1039,7 +860,7 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
                 : null,
               latency_ms: latencyMs,
               search_type: logSearchType,
-              model_used: `${GENERATE_MODEL}${debugModelSuffix}`,
+              model_used: GENERATE_MODEL,
               retrieval_strategy: strategy,
               rerank_applied: rerankApplied,
             })
@@ -1101,7 +922,7 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
           : null,
         latency_ms: latencyMs,
         search_type: logSearchType,
-        model_used: `${GENERATE_MODEL}${debugModelSuffix}`,
+        model_used: GENERATE_MODEL,
         retrieval_strategy: strategy,
         rerank_applied: rerankApplied,
       })
