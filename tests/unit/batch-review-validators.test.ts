@@ -43,7 +43,7 @@ Deno.test("mapToFsrsGrade: grade 4 maps to 4 (Easy)", () => {
   assertEquals(mapToFsrsGrade(4), 4);
 });
 
-Deno.test("mapToFsrsGrade: grade 5 maps to 4 (Easy, legacy SM-2)", () => {
+Deno.test("mapToFsrsGrade: grade 5 maps to 4 (UI rating 5 → FSRS Easy)", () => {
   assertEquals(mapToFsrsGrade(5), 4);
 });
 

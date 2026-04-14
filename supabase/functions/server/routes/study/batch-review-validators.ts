@@ -70,7 +70,7 @@ export function mapToFsrsGrade(grade: number): FsrsGrade {
   if (grade === 2) return 2; // Hard
   if (grade === 3) return 3; // Good
   if (grade === 4) return 4; // Easy
-  return 4; // Easy (SM-2 grade 5 legacy)
+  return 4; // Easy (UI rating 5 collapses to FSRS Easy)
 }
 
 // ─── Item Validator ──────────────────────────────────────────────
