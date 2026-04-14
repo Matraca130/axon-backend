@@ -139,11 +139,21 @@ Deno.test("validateReviewItem: missing instrument_type", () => {
   assertEquals(result.error!.includes("instrument_type"), true);
 });
 
-Deno.test("validateReviewItem: grade out of range", () => {
+Deno.test("validateReviewItem: grade out of range (high)", () => {
   const result = validateReviewItem({
     item_id: VALID_UUID,
     instrument_type: "flashcard",
     grade: 6,
+  }, 0);
+  assertEquals(result.valid, null);
+  assertEquals(result.error!.includes("grade"), true);
+});
+
+Deno.test("validateReviewItem: grade=0 rejected (prevents silent collapse to Again)", () => {
+  const result = validateReviewItem({
+    item_id: VALID_UUID,
+    instrument_type: "flashcard",
+    grade: 0,
   }, 0);
   assertEquals(result.valid, null);
   assertEquals(result.error!.includes("grade"), true);

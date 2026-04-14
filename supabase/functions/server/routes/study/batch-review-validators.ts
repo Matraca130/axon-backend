@@ -85,8 +85,10 @@ export function validateReviewItem(
     return { valid: null, error: `${prefix}.item_id must be a valid UUID` };
   if (!isNonEmpty(item.instrument_type))
     return { valid: null, error: `${prefix}.instrument_type must be a non-empty string` };
-  if (!inRange(item.grade, 0, 5))
-    return { valid: null, error: `${prefix}.grade must be in [0, 5]` };
+  // grade must be in [1, 5]. Rejecting 0 prevents silent collapse to FSRS "Again"
+  // via mapToFsrsGrade — callers should send an explicit grade from the UI scale.
+  if (!inRange(item.grade, 1, 5))
+    return { valid: null, error: `${prefix}.grade must be in [1, 5]` };
   if (item.response_time_ms !== undefined && !isNonNegInt(item.response_time_ms))
     return { valid: null, error: `${prefix}.response_time_ms must be a non-negative integer` };
 
