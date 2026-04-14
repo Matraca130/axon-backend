@@ -255,8 +255,9 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
     const session = await loadOrCreateSession(chatId, userId);
     let history: ClaudeMessage[] = Array.isArray(session.history) ? [...session.history] : [];
 
-    // ── Flashcard review mode routing ──
+    // ── Flashcard review mode routing (guard clauses) ──
     if (session.mode === "flashcard_review") {
+      // Callback button inside review mode → let review-flow handle it
       if (messageType === "callback" && callbackData) {
         const handled = await handleReviewCallback(
           chatId, userId, callbackData,
@@ -266,13 +267,18 @@ export async function handleMessage(params: HandleMessageParams): Promise<void> 
           updateLogRecord(chatId, messageId, ["flashcard_review"], Date.now() - startMs);
           return;
         }
+        // fall-through: callback not recognized by review-flow, continue normal path
       }
+
+      // Explicit exit command → leave review mode
+      if (text && isExitCommand(text)) {
+        await exitReviewMode(chatId, session.current_context, session.version);
+        updateLogRecord(chatId, messageId, ["review_exit"], Date.now() - startMs);
+        return;
+      }
+
+      // Any other text → auto-exit review mode and fall through to conversation
       if (text) {
-        if (isExitCommand(text)) {
-          await exitReviewMode(chatId, session.current_context, session.version);
-          updateLogRecord(chatId, messageId, ["review_exit"], Date.now() - startMs);
-          return;
-        }
         await updateSession(chatId, session.version, {
           mode: "conversation", current_tool: null, current_context: {},
         });
