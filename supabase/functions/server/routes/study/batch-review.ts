@@ -99,6 +99,7 @@ async function propagateKeywordBkt(
   instrumentType: string,
   isCorrect: boolean,
   sourceSubtopicId: string | undefined,
+  precomputedKeywordId?: string,
 ): Promise<string | undefined> {
   try {
     // Input validation
@@ -107,25 +108,31 @@ async function propagateKeywordBkt(
       return `Invalid instrumentType: ${instrumentType}`;
     }
 
-    // 1. Determine the source table based on instrument type
-    const table = instrumentType === "quiz" ? "quiz_questions" : "flashcards";
+    let keywordId: string;
+    if (precomputedKeywordId) {
+      // Caller already resolved the keyword — skip the lookup entirely.
+      keywordId = precomputedKeywordId;
+    } else {
+      // 1. Determine the source table based on instrument type
+      const table = instrumentType === "quiz" ? "quiz_questions" : "flashcards";
 
-    // 2. Look up the item's keyword_id
-    const { data: item, error: itemErr } = await db
-      .from(table)
-      .select("keyword_id")
-      .eq("id", itemId)
-      .maybeSingle();
+      // 2. Look up the item's keyword_id
+      const { data: item, error: itemErr } = await db
+        .from(table)
+        .select("keyword_id")
+        .eq("id", itemId)
+        .maybeSingle();
 
-    if (itemErr || !item?.keyword_id) {
-      if (itemErr) {
-        console.error(`[KW-BKT] Failed to look up ${table} keyword_id:`, itemErr.message);
-        return `Failed to look up keyword: ${itemErr.message}`;
+      if (itemErr || !item?.keyword_id) {
+        if (itemErr) {
+          console.error(`[KW-BKT] Failed to look up ${table} keyword_id:`, itemErr.message);
+          return `Failed to look up keyword: ${itemErr.message}`;
+        }
+        return; // No keyword linked — nothing to propagate (not an error)
       }
-      return; // No keyword linked — nothing to propagate (not an error)
-    }
 
-    const keywordId = item.keyword_id as string;
+      keywordId = item.keyword_id as string;
+    }
 
     // 3. Find all subtopics under this keyword
     const { data: subtopics, error: subErr } = await db
@@ -310,6 +317,47 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
 
   const fsrsMap = new Map(allFsrs?.map(s => [s.flashcard_id, s]) ?? []);
   const bktMap = new Map(allBkt?.map(s => [s.subtopic_id, s]) ?? []);
+
+  // ── Fix #3: Pre-fetch keyword_ids for every item_id, grouped by instrument ──
+  // Previous code called propagateKeywordBkt once per review, which meant
+  // 100 cards under the same keyword = 100 redundant propagations. We now
+  // resolve the keyword upfront and dedupe by keyword_id at the end of the loop.
+  const flashcardItemIds = validatedItems
+    .filter(i => i.instrument_type === "flashcard")
+    .map(i => i.item_id);
+  const quizItemIds = validatedItems
+    .filter(i => i.instrument_type === "quiz")
+    .map(i => i.item_id);
+
+  const itemKeywordMap = new Map<string, string>();
+  if (flashcardItemIds.length > 0) {
+    const { data: fcRows } = await db
+      .from("flashcards")
+      .select("id, keyword_id")
+      .in("id", flashcardItemIds);
+    for (const row of fcRows ?? []) {
+      if (row.keyword_id) itemKeywordMap.set(row.id as string, row.keyword_id as string);
+    }
+  }
+  if (quizItemIds.length > 0) {
+    const { data: qzRows } = await db
+      .from("quiz_questions")
+      .select("id, keyword_id")
+      .in("id", quizItemIds);
+    for (const row of qzRows ?? []) {
+      if (row.keyword_id) itemKeywordMap.set(row.id as string, row.keyword_id as string);
+    }
+  }
+
+  // Accumulate one propagation per unique keyword. "Last write wins" for
+  // isCorrect and source_subtopic: we only care that the propagation runs
+  // exactly once per keyword using the most recent review's outcome.
+  const propagationByKeyword = new Map<string, {
+    itemId: string;
+    instrumentType: string;
+    isCorrect: boolean;
+    sourceSubtopicId?: string;
+  }>();
 
   for (let i = 0; i < validatedItems.length; i++) {
     const item = validatedItems[i];
@@ -520,14 +568,18 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
             });
           }
 
-          // §4.2: Keyword BKT propagation (async, warnings surfaced in response)
-          propagationPromises.push(
-            propagateKeywordBkt(
-              db, user.id, item.item_id, item.instrument_type,
-              isCorrect, item.subtopic_id,
-            ).then(warning => { if (warning) propagationWarnings.push(warning); })
-             .catch((e) => { propagationWarnings.push((e as Error).message); })
-          );
+          // §4.2 + Fix #3: Instead of firing propagation immediately, record
+          // intent by keyword. A single propagation will run after the loop
+          // for each unique keyword (last review wins for correctness signal).
+          const keywordIdForItem = itemKeywordMap.get(item.item_id);
+          if (keywordIdForItem) {
+            propagationByKeyword.set(keywordIdForItem, {
+              itemId: item.item_id,
+              instrumentType: item.instrument_type,
+              isCorrect,
+              sourceSubtopicId: item.subtopic_id,
+            });
+          }
 
           const lastResult = computedResults[computedResults.length - 1];
           if (lastResult && lastResult.item_id === item.item_id) {
@@ -563,6 +615,23 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     } catch (hookErr) {
       console.error("[XP Hook] batch review setup error:", (hookErr as Error).message);
     }
+  }
+
+  // Fix #3: Fire one propagation per unique keyword (not per review).
+  for (const [keywordId, payload] of propagationByKeyword) {
+    propagationPromises.push(
+      propagateKeywordBkt(
+        db,
+        user.id,
+        payload.itemId,
+        payload.instrumentType,
+        payload.isCorrect,
+        payload.sourceSubtopicId,
+        keywordId,
+      )
+        .then(warning => { if (warning) propagationWarnings.push(warning); })
+        .catch((e) => { propagationWarnings.push((e as Error).message); }),
+    );
   }
 
   // Wait for all keyword propagations to settle before responding,
