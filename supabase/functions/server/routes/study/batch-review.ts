@@ -23,7 +23,6 @@ import { Hono } from "npm:hono";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
 import { isUuid } from "../../validate.ts";
-import { atomicUpsert } from "./progress.ts";
 import type { Context } from "npm:hono";
 
 // ── Server-side FSRS + BKT compute ──────────────────────────
@@ -359,147 +358,153 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     sourceSubtopicId?: string;
   }>();
 
+  // ════════════════════════════════════════════════════════════
+  // FIX #1 — COMPUTE PHASE (pure TS, no DB writes)
+  // ════════════════════════════════════════════════════════════
+  // Previously this loop issued DB writes per review. If a later
+  // FSRS/BKT write failed after the `reviews` row was already
+  // inserted, the batch ended in an inconsistent state (a review
+  // row with no FSRS update, or vice-versa). We now run the entire
+  // batch as a single transaction via `process_review_batch` RPC:
+  // this loop only computes, and the RPC does all writes atomically.
+
+  interface ReviewRowPayload {
+    item_id: string;
+    instrument_type: string;
+    grade: number;
+    response_time_ms?: number;
+  }
+  interface FsrsRowPayload {
+    student_id: string;
+    flashcard_id: string;
+    stability: number;
+    difficulty: number;
+    due_at: string;
+    last_review_at: string;
+    reps: number;
+    lapses: number;
+    state: string;
+    consecutive_lapses: number;
+    is_leech: boolean;
+  }
+  interface BktRowPayload {
+    student_id: string;
+    subtopic_id: string;
+    p_know: number;
+    max_p_know: number;
+    p_transit: number;
+    p_slip: number;
+    p_guess: number;
+    delta: number;
+    total_delta: number;    // +1 per review, added to existing counter in RPC
+    correct_delta: number;  // 0 or 1, added to existing counter in RPC
+    last_attempt_at: string;
+  }
+
+  const reviewRows: ReviewRowPayload[] = [];
+  const fsrsRows: FsrsRowPayload[] = [];
+  const bktRows: BktRowPayload[] = [];
+
   for (let i = 0; i < validatedItems.length; i++) {
     const item = validatedItems[i];
     const now = new Date();
     const nowIso = now.toISOString();
 
-    // ── Step A: INSERT review ──
-    try {
-      const reviewRow: Record<string, unknown> = {
-        session_id: sessionId,
-        item_id: item.item_id,
-        instrument_type: item.instrument_type,
-        grade: item.grade,
-      };
-      if (item.response_time_ms !== undefined) {
-        reviewRow.response_time_ms = item.response_time_ms;
-      }
-
-      const { error: revErr } = await db
-        .from("reviews")
-        .insert(reviewRow)
-        .select()
-        .single();
-
-      if (revErr) {
-        errors.push({ index: i, step: "review", message: revErr.message });
-      } else {
-        reviewsCreated++;
-        // Track for XP hook
-        successfulReviews.push({
-          item_id: item.item_id,
-          grade: item.grade,
-          instrument_type: item.instrument_type,
-        });
-      }
-    } catch (e) {
-      errors.push({ index: i, step: "review", message: (e as Error).message });
+    // ── Step A: review row payload (no DB call) ──
+    const reviewRow: ReviewRowPayload = {
+      item_id: item.item_id,
+      instrument_type: item.instrument_type,
+      grade: item.grade,
+    };
+    if (item.response_time_ms !== undefined) {
+      reviewRow.response_time_ms = item.response_time_ms;
     }
+    reviewRows.push(reviewRow);
 
-    // ── Step B: UPSERT fsrs_states (server-side FSRS v4 Petrick) ──
-    {
-      try {
-        // 1. Read current FSRS state (from pre-loaded map)
-        const existingFsrs = fsrsMap.get(item.item_id) ?? null;
+    // Track for XP hook (fires post-commit, same as before).
+    successfulReviews.push({
+      item_id: item.item_id,
+      grade: item.grade,
+      instrument_type: item.instrument_type,
+    });
 
-        // 2. Read BKT for recovery cross-signal (from pre-loaded map)
-        let isRecovering = false;
-        if (item.subtopic_id) {
-          const existingBkt = bktMap.get(item.subtopic_id) ?? null;
+    // ── Step B: compute FSRS v4 Petrick update ──
+    try {
+      const existingFsrs = fsrsMap.get(item.item_id) ?? null;
 
-          if (existingBkt) {
-            const maxPKnow = existingBkt.max_p_know ?? 0;
-            const pKnow = existingBkt.p_know ?? 0;
-            isRecovering = maxPKnow > 0.50 && pKnow < maxPKnow;
-          }
+      // BKT recovery cross-signal (from pre-loaded map)
+      let isRecovering = false;
+      if (item.subtopic_id) {
+        const existingBkt = bktMap.get(item.subtopic_id) ?? null;
+        if (existingBkt) {
+          const maxPKnow = existingBkt.max_p_know ?? 0;
+          const pKnow = existingBkt.p_know ?? 0;
+          isRecovering = maxPKnow > 0.50 && pKnow < maxPKnow;
         }
+      }
 
-        // 3. Map grade
-        const fsrsGrade = mapToFsrsGrade(item.grade);
+      const fsrsGrade = mapToFsrsGrade(item.grade);
 
-        // 4. Compute FSRS v4 update
-        const fsrsResult = computeFsrsV4Update({
-          currentStability: existingFsrs?.stability ?? 0,
-          currentDifficulty: existingFsrs?.difficulty ?? 5.0,
-          currentReps: existingFsrs?.reps ?? 0,
-          currentLapses: existingFsrs?.lapses ?? 0,
-          currentState: (existingFsrs?.state as FsrsCardState) ?? "new",
-          lastReviewAt: existingFsrs?.last_review_at ?? null,
-          grade: fsrsGrade,
-          isRecovering,
-          now,
-        });
+      const fsrsResult = computeFsrsV4Update({
+        currentStability: existingFsrs?.stability ?? 0,
+        currentDifficulty: existingFsrs?.difficulty ?? 5.0,
+        currentReps: existingFsrs?.reps ?? 0,
+        currentLapses: existingFsrs?.lapses ?? 0,
+        currentState: (existingFsrs?.state as FsrsCardState) ?? "new",
+        lastReviewAt: existingFsrs?.last_review_at ?? null,
+        grade: fsrsGrade,
+        isRecovering,
+        now,
+      });
 
-        // 5. Leech detection (v4.2)
-        const prevConsecutiveLapses = existingFsrs?.consecutive_lapses ?? 0;
-        let newConsecutiveLapses: number;
-        if (fsrsGrade === 1) {
-          newConsecutiveLapses = prevConsecutiveLapses + 1;
-        } else {
-          newConsecutiveLapses = 0;
-        }
-        const newIsLeech = newConsecutiveLapses >= leechThreshold;
+      // Leech detection (v4.2)
+      const prevConsecutiveLapses = existingFsrs?.consecutive_lapses ?? 0;
+      const newConsecutiveLapses = fsrsGrade === 1 ? prevConsecutiveLapses + 1 : 0;
+      const newIsLeech = newConsecutiveLapses >= leechThreshold;
 
-        // 6. UPSERT computed result + leech fields
-        const fsrsRow = {
-          student_id: user.id,
-          flashcard_id: item.item_id,
+      fsrsRows.push({
+        student_id: user.id,
+        flashcard_id: item.item_id,
+        stability: fsrsResult.stability,
+        difficulty: fsrsResult.difficulty,
+        due_at: fsrsResult.due_at,
+        last_review_at: fsrsResult.last_review_at,
+        reps: fsrsResult.reps,
+        lapses: fsrsResult.lapses,
+        state: fsrsResult.state,
+        consecutive_lapses: newConsecutiveLapses,
+        is_leech: newIsLeech,
+      });
+
+      computedResults.push({
+        item_id: item.item_id,
+        fsrs: {
           stability: fsrsResult.stability,
           difficulty: fsrsResult.difficulty,
           due_at: fsrsResult.due_at,
-          last_review_at: fsrsResult.last_review_at,
+          state: fsrsResult.state,
           reps: fsrsResult.reps,
           lapses: fsrsResult.lapses,
-          state: fsrsResult.state,
           consecutive_lapses: newConsecutiveLapses,
           is_leech: newIsLeech,
-        };
-
-        const { error: fsrsErr } = await atomicUpsert(
-          db, "fsrs_states", "student_id,flashcard_id", fsrsRow,
-        );
-
-        if (fsrsErr) {
-          errors.push({ index: i, step: "fsrs", message: fsrsErr.message });
-        } else {
-          fsrsUpdated++;
-
-          computedResults.push({
-            item_id: item.item_id,
-            fsrs: {
-              stability: fsrsResult.stability,
-              difficulty: fsrsResult.difficulty,
-              due_at: fsrsResult.due_at,
-              state: fsrsResult.state,
-              reps: fsrsResult.reps,
-              lapses: fsrsResult.lapses,
-              consecutive_lapses: newConsecutiveLapses,
-              is_leech: newIsLeech,
-            },
-          });
-        }
-      } catch (e) {
-        errors.push({ index: i, step: "fsrs", message: (e as Error).message });
-      }
+        },
+      });
+    } catch (e) {
+      errors.push({ index: i, step: "fsrs", message: (e as Error).message });
     }
 
-    // ── Step C: UPSERT bkt_states + atomic counter increment ──
+    // ── Step C: compute BKT v4 Recovery update ──
     if (item.subtopic_id) {
-      // ════════ Server-side BKT v4 Recovery ════════
       try {
         const fsrsGrade = mapToFsrsGrade(item.grade);
         const isCorrect = fsrsGrade >= THRESHOLDS.BKT_CORRECT_MIN_GRADE;
         const instrumentType =
           item.instrument_type === "quiz" ? "quiz" as const : "flashcard" as const;
 
-        // Read from pre-loaded map (may contain updated values from earlier items — fix 2.7)
         const existingBkt = bktMap.get(item.subtopic_id) ?? null;
 
         const currentMastery = existingBkt?.p_know ?? 0;
         const maxReachedMastery = existingBkt?.max_p_know ?? 0;
-        const existingTotal = existingBkt?.total_attempts ?? 0;
-        const existingCorrect = existingBkt?.correct_attempts ?? 0;
 
         const bktResult = computeBktV4Update({
           currentMastery,
@@ -508,9 +513,9 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           instrumentType,
         });
 
-        // FIX: Use placeholder values for INSERT; actual counters are
-        // atomically incremented via RPC to prevent concurrent race.
-        const bktRow = {
+        const correctDelta = isCorrect ? 1 : 0;
+
+        bktRows.push({
           student_id: user.id,
           subtopic_id: item.subtopic_id,
           p_know: bktResult.p_know,
@@ -519,92 +524,103 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
           p_slip: existingBkt?.p_slip ?? 0.10,
           p_guess: existingBkt?.p_guess ?? 0.25,
           delta: bktResult.delta,
-          total_attempts: 0,                           // seed for INSERT; RPC increments atomically
-          correct_attempts: 0,                        // seed for INSERT; RPC increments atomically
+          // Counter deltas: the RPC adds these to existing counters
+          // atomically in the ON CONFLICT clause of the upsert.
+          total_delta: 1,
+          correct_delta: correctDelta,
           last_attempt_at: nowIso,
-        };
+        });
 
-        const { error: bktErr } = await atomicUpsert(
-          db, "bkt_states", "student_id,subtopic_id", bktRow,
-        );
+        // 2.7: Update bktMap so next item with same subtopic reads
+        // fresh in-memory state during computation. Counters use
+        // existing + delta projection (DB commits the same values).
+        bktMap.set(item.subtopic_id, {
+          ...(existingBkt ?? {}),
+          subtopic_id: item.subtopic_id,
+          p_know: bktResult.p_know,
+          max_p_know: bktResult.max_p_know,
+          p_transit: existingBkt?.p_transit ?? 0.18,
+          p_slip: existingBkt?.p_slip ?? 0.10,
+          p_guess: existingBkt?.p_guess ?? 0.25,
+          total_attempts: (existingBkt?.total_attempts ?? 0) + 1,
+          correct_attempts: (existingBkt?.correct_attempts ?? 0) + correctDelta,
+        });
 
-        // FIX: Atomically increment attempt counters via SQL arithmetic
-        // to avoid the read-then-write race condition on concurrent batches.
-        let finalTotalAttempts = existingTotal;
-        let finalCorrectAttempts = existingCorrect;
-        if (!bktErr) {
-          const correctDelta = isCorrect ? 1 : 0;
-          const { data: rpcData, error: rpcErr } = await db.rpc("increment_bkt_attempts", {
-            p_student_id: user.id,
-            p_subtopic_id: item.subtopic_id,
-            p_total_delta: 1,
-            p_correct_delta: correctDelta,
+        // Record keyword intent for post-commit propagation (fix #3).
+        const keywordIdForItem = itemKeywordMap.get(item.item_id);
+        if (keywordIdForItem) {
+          propagationByKeyword.set(keywordIdForItem, {
+            itemId: item.item_id,
+            instrumentType: item.instrument_type,
+            isCorrect,
+            sourceSubtopicId: item.subtopic_id,
           });
-          if (rpcErr) {
-            console.error("[BKT] Atomic increment failed, counters may be stale:", rpcErr.message);
-          } else if (rpcData && rpcData.length > 0) {
-            finalTotalAttempts = rpcData[0].new_total_attempts;
-            finalCorrectAttempts = rpcData[0].new_correct_attempts;
-          }
         }
 
-        if (bktErr) {
-          errors.push({ index: i, step: "bkt", message: bktErr.message });
+        const lastResult = computedResults[computedResults.length - 1];
+        if (lastResult && lastResult.item_id === item.item_id) {
+          lastResult.bkt = {
+            subtopic_id: item.subtopic_id,
+            p_know: bktResult.p_know,
+            max_p_know: bktResult.max_p_know,
+            delta: bktResult.delta,
+          };
         } else {
-          bktUpdated++;
-
-          // 2.7: Update bktMap so next item with same subtopic reads fresh state
-          if (item.subtopic_id) {
-            bktMap.set(item.subtopic_id, {
-              ...(existingBkt ?? {}),
-              subtopic_id: item.subtopic_id,
-              p_know: bktResult.p_know,
-              max_p_know: bktResult.max_p_know,
-              p_transit: existingBkt?.p_transit ?? 0.18,
-              p_slip: existingBkt?.p_slip ?? 0.10,
-              p_guess: existingBkt?.p_guess ?? 0.25,
-              total_attempts: finalTotalAttempts,
-              correct_attempts: finalCorrectAttempts,
-            });
-          }
-
-          // §4.2 + Fix #3: Instead of firing propagation immediately, record
-          // intent by keyword. A single propagation will run after the loop
-          // for each unique keyword (last review wins for correctness signal).
-          const keywordIdForItem = itemKeywordMap.get(item.item_id);
-          if (keywordIdForItem) {
-            propagationByKeyword.set(keywordIdForItem, {
-              itemId: item.item_id,
-              instrumentType: item.instrument_type,
-              isCorrect,
-              sourceSubtopicId: item.subtopic_id,
-            });
-          }
-
-          const lastResult = computedResults[computedResults.length - 1];
-          if (lastResult && lastResult.item_id === item.item_id) {
-            lastResult.bkt = {
+          computedResults.push({
+            item_id: item.item_id,
+            bkt: {
               subtopic_id: item.subtopic_id,
               p_know: bktResult.p_know,
               max_p_know: bktResult.max_p_know,
               delta: bktResult.delta,
-            };
-          } else {
-            computedResults.push({
-              item_id: item.item_id,
-              bkt: {
-                subtopic_id: item.subtopic_id,
-                p_know: bktResult.p_know,
-                max_p_know: bktResult.max_p_know,
-                delta: bktResult.delta,
-              },
-            });
-          }
+            },
+          });
         }
       } catch (e) {
         errors.push({ index: i, step: "bkt", message: (e as Error).message });
       }
     }
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // PERSIST PHASE — one atomic RPC call
+  // ════════════════════════════════════════════════════════════
+  // The RPC wraps: INSERT reviews + UPSERT fsrs_states + UPSERT
+  // bkt_states (with inline counter arithmetic) in a single
+  // PL/pgSQL function, which runs as a single transaction.
+  // A failure here rolls the whole batch back — no partial writes.
+  try {
+    const { data: rpcData, error: rpcErr } = await db.rpc("process_review_batch", {
+      p_session_id: sessionId,
+      p_reviews: reviewRows,
+      p_fsrs: fsrsRows,
+      p_bkt: bktRows,
+    });
+
+    if (rpcErr) {
+      // Transaction rolled back — nothing was persisted.
+      return c.json({
+        error: `Atomic batch persistence failed: ${rpcErr.message}`,
+        processed: validatedItems.length,
+        reviews_created: 0,
+        fsrs_updated: 0,
+        bkt_updated: 0,
+      }, 500);
+    }
+
+    // RPC returns a single-row TABLE; supabase-js surfaces it as an array.
+    const stats = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+    reviewsCreated = stats?.reviews_created ?? reviewRows.length;
+    fsrsUpdated = stats?.fsrs_updated ?? fsrsRows.length;
+    bktUpdated = stats?.bkt_updated ?? bktRows.length;
+  } catch (e) {
+    return c.json({
+      error: `Atomic batch persistence threw: ${(e as Error).message}`,
+      processed: validatedItems.length,
+      reviews_created: 0,
+      fsrs_updated: 0,
+      bkt_updated: 0,
+    }, 500);
   }
 
   // PR #99: Fire-and-forget XP for batch reviews (contract §4.3)
