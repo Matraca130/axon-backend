@@ -29,6 +29,7 @@ import {
   type FallbackTrace,
   newFallbackTrace,
 } from "./types.ts";
+import { ADJACENT_FETCH_MAX_SUMMARIES } from "./constants.ts";
 
 // --- Phase 5: Adjacent chunk expansion ----------------------------
 
@@ -84,7 +85,7 @@ export async function fetchAdjacentChunks(
 
     // Consolidated single query: fetch all adjacent chunks at once
     // instead of N queries per summary group (fixes N+1 loop).
-    const summaryEntries = Array.from(summaryGroups.entries()).slice(0, 3);
+    const summaryEntries = Array.from(summaryGroups.entries()).slice(0, ADJACENT_FETCH_MAX_SUMMARIES);
     const allSummaryIds = summaryEntries.map(([sumId]) => sumId);
     const allOrderIndexes = new Set<number>();
     for (const [, orderIndexes] of summaryEntries) {
