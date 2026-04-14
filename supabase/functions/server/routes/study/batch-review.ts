@@ -583,6 +583,40 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   }
 
   // ════════════════════════════════════════════════════════════
+  // DEDUP PHASE — collapse conflicting rows before the RPC
+  // ════════════════════════════════════════════════════════════
+  // Postgres errors ("ON CONFLICT DO UPDATE command cannot affect row
+  // a second time") if a single INSERT...ON CONFLICT statement contains
+  // two rows that conflict with each other on the same unique key.
+  // A batch of N flashcards under the same subtopic would produce N
+  // bktRows with the same (student_id, subtopic_id) — so we collapse
+  // them here.
+  //
+  // Rules:
+  //   - For (student_id, subtopic_id): keep the LAST computed p_know /
+  //     max_p_know / delta (they already chain forward via the in-memory
+  //     bktMap), and SUM total_delta / correct_delta across all entries.
+  //   - For (student_id, flashcard_id) on FSRS: defensively keep the
+  //     last row (same item shouldn't appear twice, but we guard anyway).
+  const bktDeduped = new Map<string, BktRowPayload>();
+  for (const row of bktRows) {
+    const key = `${row.student_id}|${row.subtopic_id}`;
+    const existing = bktDeduped.get(key);
+    if (existing) {
+      row.total_delta   = existing.total_delta   + row.total_delta;
+      row.correct_delta = existing.correct_delta + row.correct_delta;
+    }
+    bktDeduped.set(key, row);
+  }
+  const dedupedBktRows = [...bktDeduped.values()];
+
+  const fsrsDeduped = new Map<string, FsrsRowPayload>();
+  for (const row of fsrsRows) {
+    fsrsDeduped.set(`${row.student_id}|${row.flashcard_id}`, row);
+  }
+  const dedupedFsrsRows = [...fsrsDeduped.values()];
+
+  // ════════════════════════════════════════════════════════════
   // PERSIST PHASE — one atomic RPC call
   // ════════════════════════════════════════════════════════════
   // The RPC wraps: INSERT reviews + UPSERT fsrs_states + UPSERT
@@ -593,8 +627,8 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     const { data: rpcData, error: rpcErr } = await db.rpc("process_review_batch", {
       p_session_id: sessionId,
       p_reviews: reviewRows,
-      p_fsrs: fsrsRows,
-      p_bkt: bktRows,
+      p_fsrs: dedupedFsrsRows,
+      p_bkt: dedupedBktRows,
     });
 
     if (rpcErr) {
@@ -611,8 +645,8 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     // RPC returns a single-row TABLE; supabase-js surfaces it as an array.
     const stats = Array.isArray(rpcData) ? rpcData[0] : rpcData;
     reviewsCreated = stats?.reviews_created ?? reviewRows.length;
-    fsrsUpdated = stats?.fsrs_updated ?? fsrsRows.length;
-    bktUpdated = stats?.bkt_updated ?? bktRows.length;
+    fsrsUpdated = stats?.fsrs_updated ?? dedupedFsrsRows.length;
+    bktUpdated = stats?.bkt_updated ?? dedupedBktRows.length;
   } catch (e) {
     return c.json({
       error: `Atomic batch persistence threw: ${(e as Error).message}`,
