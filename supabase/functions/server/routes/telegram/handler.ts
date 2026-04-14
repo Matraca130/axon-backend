@@ -394,135 +394,214 @@ function extractResponseText(response: {
   return "";
 }
 
-// ─── Main Handler ────────────────────────────────────────
+// ─── handleMessage sub-steps ─────────────────────────────
 
-export async function handleMessage(params: HandleMessageParams): Promise<void> {
-  const { chatId, userId, messageId, messageType, text, callbackData, callbackQueryId, voiceFileId } = params;
-  const startMs = Date.now();
+/**
+ * Step 1: Load session and handle flashcard-review mode routing.
+ * Returns { shortCircuit: true } when the handler should return immediately
+ * (review callback handled, or explicit review-exit). Otherwise returns the
+ * session + a mutable history copy ready for the conversation path. If the
+ * session transitioned out of review mode via auto-exit, the session object
+ * is updated in-place to reflect the new version/mode/context.
+ */
+async function resolveSession(
+  params: HandleMessageParams,
+  startMs: number,
+): Promise<
+  | { shortCircuit: true }
+  | { shortCircuit: false; session: SessionRow; history: ClaudeMessage[] }
+> {
+  const { chatId, userId, messageId, messageType, text, callbackData } = params;
 
-  try {
-    const session = await loadOrCreateSession(chatId, userId);
-    let history: ClaudeMessage[] = Array.isArray(session.history) ? [...session.history] : [];
+  const session = await loadOrCreateSession(chatId, userId);
+  const history: ClaudeMessage[] = Array.isArray(session.history) ? [...session.history] : [];
 
-    // ── Flashcard review mode routing (guard clauses) ──
-    if (session.mode === "flashcard_review") {
-      // Callback button inside review mode → let review-flow handle it
-      if (messageType === "callback" && callbackData) {
-        const handled = await handleReviewCallback(
-          chatId, userId, callbackData,
-          session.current_context, session.version,
-        );
-        if (handled) {
-          updateLogRecord(chatId, messageId, ["flashcard_review"], Date.now() - startMs);
-          return;
-        }
-        // fall-through: callback not recognized by review-flow, continue normal path
-      }
+  if (session.mode !== "flashcard_review") {
+    return { shortCircuit: false, session, history };
+  }
 
-      // Explicit exit command → leave review mode
-      if (text && isExitCommand(text)) {
-        await exitReviewMode(chatId, session.current_context, session.version);
-        updateLogRecord(chatId, messageId, ["review_exit"], Date.now() - startMs);
-        return;
-      }
-
-      // Any other text → auto-exit review mode and fall through to conversation
-      if (text) {
-        await updateSession(chatId, session.version, {
-          mode: "conversation", current_tool: null, current_context: {},
-        });
-        session.mode = "conversation";
-        session.version += 1;
-        session.current_context = {};
-      }
-    }
-
-    // ── Build user message ──
-    let userMessage = text ?? "";
-    if (messageType === "callback" && callbackData) {
-      userMessage = `[Botón seleccionado: ${callbackData}]`;
-    } else if (messageType === "voice" && voiceFileId) {
-      await sendChatAction(chatId, "typing");
-      await sendTextPlain(chatId, "Transcribiendo tu audio... \ud83c\udfa4");
-      const transcription = await transcribeVoiceMessage(voiceFileId);
-      if (!transcription) {
-        await sendTextPlain(chatId, "No pude entender el audio. Probá enviando tu pregunta por texto. \ud83d\ude14");
-        updateLogRecord(chatId, messageId, ["voice_failed"], Date.now() - startMs);
-        return;
-      }
-      userMessage = transcription;
-      await sendTextPlain(chatId, `\ud83d\udcdd Escuché: "${transcription.slice(0, 200)}${transcription.length > 200 ? "..." : ""}"`);
-    }
-
-    if (!userMessage.trim()) {
-      await sendTextPlain(chatId, "No entendí tu mensaje. Probá escribiendo tu pregunta. \ud83d\ude0a");
-      return;
-    }
-
-    // ── Show typing indicator ──
-    await sendChatAction(chatId, "typing");
-
-    // ── Agentic Loop with Claude ──
-    const studentContext = await buildStudentContext(userId);
-    history.push({ role: "user", content: userMessage });
-
-    let finalText = "";
-    const toolsUsed: string[] = [];
-
-    const systemPrompt = TELEGRAM_SYSTEM_PROMPT.replace(
-      "{STUDENT_CONTEXT}",
-      studentContext || "No hay contexto adicional del alumno.",
+  // Callback button inside review mode → let review-flow handle it
+  if (messageType === "callback" && callbackData) {
+    const handled = await handleReviewCallback(
+      chatId, userId, callbackData,
+      session.current_context, session.version,
     );
+    if (handled) {
+      updateLogRecord(chatId, messageId, ["flashcard_review"], Date.now() - startMs);
+      return { shortCircuit: true };
+    }
+    // fall-through: callback not recognized, continue normal path
+  }
 
-    for (let iteration = 0; iteration < MAX_AGENTIC_ITERATIONS; iteration++) {
-      const response = await claudeChat({
-        messages: history,
-        systemPrompt,
-        tools: TELEGRAM_TOOLS,
-        model: iteration === 0 ? selectModelForTask(userMessage) : "sonnet",
-        temperature: 0.3,
-        maxTokens: 1024,
+  // Explicit exit command → leave review mode
+  if (text && isExitCommand(text)) {
+    await exitReviewMode(chatId, session.current_context, session.version);
+    updateLogRecord(chatId, messageId, ["review_exit"], Date.now() - startMs);
+    return { shortCircuit: true };
+  }
+
+  // Any other text → auto-exit review mode and fall through to conversation
+  if (text) {
+    await updateSession(chatId, session.version, {
+      mode: "conversation", current_tool: null, current_context: {},
+    });
+    session.mode = "conversation";
+    session.version += 1;
+    session.current_context = {};
+  }
+
+  return { shortCircuit: false, session, history };
+}
+
+/**
+ * Step 2: Normalize the incoming payload into a plain user message string.
+ * Handles text, callback buttons, and voice transcription (via Gemini).
+ * Returns null if the handler should return early (voice unreadable, or
+ * empty payload after normalization).
+ */
+async function processIncomingContent(
+  params: HandleMessageParams,
+  startMs: number,
+): Promise<string | null> {
+  const { chatId, messageId, messageType, text, callbackData, voiceFileId } = params;
+
+  let userMessage = text ?? "";
+
+  if (messageType === "callback" && callbackData) {
+    userMessage = `[Botón seleccionado: ${callbackData}]`;
+  } else if (messageType === "voice" && voiceFileId) {
+    await sendChatAction(chatId, "typing");
+    await sendTextPlain(chatId, "Transcribiendo tu audio... \ud83c\udfa4");
+    const transcription = await transcribeVoiceMessage(voiceFileId);
+    if (!transcription) {
+      await sendTextPlain(chatId, "No pude entender el audio. Probá enviando tu pregunta por texto. \ud83d\ude14");
+      updateLogRecord(chatId, messageId, ["voice_failed"], Date.now() - startMs);
+      return null;
+    }
+    userMessage = transcription;
+    await sendTextPlain(
+      chatId,
+      `\ud83d\udcdd Escuché: "${transcription.slice(0, 200)}${transcription.length > 200 ? "..." : ""}"`,
+    );
+  }
+
+  if (!userMessage.trim()) {
+    await sendTextPlain(chatId, "No entendí tu mensaje. Probá escribiendo tu pregunta. \ud83d\ude0a");
+    return null;
+  }
+
+  return userMessage;
+}
+
+/**
+ * Step 3: Run the Claude agentic loop. Mutates `history` in place with
+ * assistant/tool_result turns and returns the final assistant text plus
+ * the list of tools that were called. `shortCircuit` is true when the loop
+ * short-circuited the handler (e.g. entered review mode) and the caller
+ * must stop without sending a final reply or persisting state.
+ */
+interface AgenticLoopResult {
+  finalText: string;
+  toolsUsed: string[];
+  shortCircuit: boolean;
+}
+
+async function runAgenticLoop(
+  userMessage: string,
+  session: SessionRow,
+  history: ClaudeMessage[],
+  params: HandleMessageParams,
+  startMs: number,
+): Promise<AgenticLoopResult> {
+  const { chatId, userId, messageId } = params;
+
+  const studentContext = await buildStudentContext(userId);
+  history.push({ role: "user", content: userMessage });
+
+  const systemPrompt = TELEGRAM_SYSTEM_PROMPT.replace(
+    "{STUDENT_CONTEXT}",
+    studentContext || "No hay contexto adicional del alumno.",
+  );
+
+  const toolsUsed: string[] = [];
+  let finalText = "";
+
+  for (let iteration = 0; iteration < MAX_AGENTIC_ITERATIONS; iteration++) {
+    const response = await claudeChat({
+      messages: history,
+      systemPrompt,
+      tools: TELEGRAM_TOOLS,
+      model: iteration === 0 ? selectModelForTask(userMessage) : "sonnet",
+      temperature: 0.3,
+      maxTokens: 1024,
+    });
+
+    const toolUseBlock = response.content.find(
+      (b) => b.type === "tool_use",
+    ) as ClaudeContentBlock | undefined;
+
+    // Branch 1: Claude wants to call a tool
+    if (toolUseBlock?.name && toolUseBlock.id) {
+      const outcome = await processToolUseBlock({
+        chatId, userId, messageId, iteration, startMs,
+        sessionVersion: session.version,
+        sessionContext: session.current_context,
+        history, toolsUsed,
+        responseContent: response.content,
+        toolUseBlock,
       });
-
-      const toolUseBlock = response.content.find(
-        (b) => b.type === "tool_use",
-      ) as ClaudeContentBlock | undefined;
-
-      // Branch 1: Claude wants to call a tool
-      if (toolUseBlock?.name && toolUseBlock.id) {
-        const outcome = await processToolUseBlock({
-          chatId, userId, messageId, iteration, startMs,
-          sessionVersion: session.version,
-          sessionContext: session.current_context,
-          history, toolsUsed,
-          responseContent: response.content,
-          toolUseBlock,
-        });
-        if (outcome.kind === "return") return;
-        if (outcome.kind === "break") break;
-        continue;
+      if (outcome.kind === "return") {
+        return { finalText: "", toolsUsed, shortCircuit: true };
       }
+      if (outcome.kind === "break") break;
+      continue;
+    }
 
-      // Branch 2: Claude responded with plain text
-      const responseText = extractResponseText(response);
-      if (responseText) {
-        finalText = responseText;
-        history.push({ role: "assistant", content: finalText });
-        break;
-      }
-
-      // Branch 3: Empty response, bail out
-      console.warn(`[TG-Handler] Claude empty at iteration ${iteration}`);
+    // Branch 2: Claude responded with plain text
+    const responseText = extractResponseText(response);
+    if (responseText) {
+      finalText = responseText;
+      history.push({ role: "assistant", content: finalText });
       break;
     }
 
-    // ── Send response ──
+    // Branch 3: Empty response, bail out
+    console.warn(`[TG-Handler] Claude empty at iteration ${iteration}`);
+    break;
+  }
+
+  return { finalText, toolsUsed, shortCircuit: false };
+}
+
+// ─── Main Handler (thin orchestrator) ────────────────────
+
+export async function handleMessage(params: HandleMessageParams): Promise<void> {
+  const { chatId, messageId } = params;
+  const startMs = Date.now();
+
+  try {
+    // 1. Session + flashcard-review routing
+    const resolved = await resolveSession(params, startMs);
+    if (resolved.shortCircuit) return;
+    const { session, history } = resolved;
+
+    // 2. Normalize incoming content (text / callback / voice)
+    const userMessage = await processIncomingContent(params, startMs);
+    if (userMessage === null) return;
+
+    // 3. Agentic loop with Claude
+    await sendChatAction(chatId, "typing");
+    const { finalText, toolsUsed, shortCircuit } =
+      await runAgenticLoop(userMessage, session, history, params, startMs);
+    if (shortCircuit) return;
+
+    // 4. Send reply
     if (finalText) {
       const truncated = finalText.length > 4000 ? finalText.slice(0, 3997) + "..." : finalText;
       await sendTextPlain(chatId, truncated);
     }
 
-    // ── Update session ──
+    // 5. Persist session
     const updated = await updateSession(chatId, session.version, {
       history: trimHistory(history),
       last_message_id: String(messageId),
