@@ -135,7 +135,7 @@ Deno.test("validateReviewItem: whitespace-only instrument_type", () => {
   assertEquals(result.error, "reviews[1].instrument_type must be a non-empty string");
 });
 
-Deno.test("validateReviewItem: grade below 0", () => {
+Deno.test("validateReviewItem: grade below 1", () => {
   const item = {
     item_id: "550e8400-e29b-41d4-a716-446655440000",
     instrument_type: "flashcard",
@@ -143,7 +143,7 @@ Deno.test("validateReviewItem: grade below 0", () => {
   };
 
   const result = validateReviewItem(item, 0);
-  assertEquals(result.error, "reviews[0].grade must be in [0, 5]");
+  assertEquals(result.error, "reviews[0].grade must be in [1, 5]");
 });
 
 Deno.test("validateReviewItem: grade above 5", () => {
@@ -154,10 +154,10 @@ Deno.test("validateReviewItem: grade above 5", () => {
   };
 
   const result = validateReviewItem(item, 3);
-  assertEquals(result.error, "reviews[3].grade must be in [0, 5]");
+  assertEquals(result.error, "reviews[3].grade must be in [1, 5]");
 });
 
-Deno.test("validateReviewItem: grade boundary 0 is valid", () => {
+Deno.test("validateReviewItem: grade 0 is rejected (UI rating 0 not valid)", () => {
   const item = {
     item_id: "550e8400-e29b-41d4-a716-446655440000",
     instrument_type: "flashcard",
@@ -165,8 +165,7 @@ Deno.test("validateReviewItem: grade boundary 0 is valid", () => {
   };
 
   const result = validateReviewItem(item, 0);
-  assertEquals(result.error, null);
-  assertEquals(result.valid?.grade, 0);
+  assertEquals(result.error, "reviews[0].grade must be in [1, 5]");
 });
 
 Deno.test("validateReviewItem: grade boundary 5 is valid", () => {
