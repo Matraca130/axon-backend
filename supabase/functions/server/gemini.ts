@@ -9,9 +9,8 @@
  *
  * Legacy (still exported for backward compat):
  *   generateText()        — Gemini text generation (DEPRECATED — use claude-ai.ts)
- *   parseGeminiJson()     — JSON parser (DEPRECATED — use parseClaudeJson from claude-ai.ts)
  *
- * REMOVED function:
+ * REMOVED functions:
  *   generateEmbedding()   — HARD ERROR: Use openai-embeddings.ts instead (D57)
  *
  * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
@@ -266,17 +265,4 @@ export async function extractTextFromPdf(
   };
 }
 
-// ─── Parse JSON safely from Gemini output ───────────────────────
-
-export function parseGeminiJson<T = unknown>(text: string): T {
-  let cleaned = text.trim();
-  if (cleaned.startsWith("```json")) {
-    cleaned = cleaned.slice(7);
-  } else if (cleaned.startsWith("```")) {
-    cleaned = cleaned.slice(3);
-  }
-  if (cleaned.endsWith("```")) {
-    cleaned = cleaned.slice(0, -3);
-  }
-  return JSON.parse(cleaned.trim()) as T;
-}
+// parseGeminiJson() removed — use parseClaudeJson from claude-ai.ts

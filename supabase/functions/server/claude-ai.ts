@@ -409,8 +409,7 @@ export async function generateTextStream(
 }
 
 // ─── Parse JSON safely from Claude output ─────────────────
-// Claude sometimes wraps JSON in markdown code blocks.
-// Same logic as gemini.ts parseGeminiJson (drop-in replacement).
+// Strips markdown code fences (```json / ```) before parsing.
 
 export function parseClaudeJson<T = unknown>(text: string): T {
   let cleaned = text.trim();
