@@ -44,48 +44,15 @@ export { getApiKey as getClaudeApiKey };
 
 // ─── Fetch with Timeout + Retry ──────────────────────────
 
-export async function fetchWithRetry(
+import { fetchWithRetry as _fetchWithRetry } from "./lib/fetch-with-retry.ts";
+
+export function fetchWithRetry(
   url: string,
   init: RequestInit,
   timeoutMs: number,
   maxRetries = 3,
 ): Promise<Response> {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const res = await fetch(url, { ...init, signal: controller.signal });
-      clearTimeout(timer);
-
-      if ((res.status === 429 || res.status === 529 || res.status === 503) && attempt < maxRetries) {
-        const delay = Math.min(1000 * 2 ** attempt, 8000);
-        console.warn(
-          `[Claude] ${res.status}, retry ${attempt + 1}/${maxRetries} in ${delay}ms`,
-        );
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
-      }
-
-      return res;
-    } catch (e) {
-      clearTimeout(timer);
-      if (e instanceof DOMException && e.name === "AbortError") {
-        throw new Error(
-          `Claude API timeout after ${timeoutMs}ms (attempt ${attempt + 1})`,
-        );
-      }
-      if (attempt < maxRetries) {
-        const delay = Math.min(1000 * 2 ** attempt, 8000);
-        console.warn(
-          `[Claude] Network error, retry ${attempt + 1}/${maxRetries} in ${delay}ms: ${(e as Error).message}`,
-        );
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
-      }
-      throw e;
-    }
-  }
-  throw new Error("Claude: max retries exceeded");
+  return _fetchWithRetry(url, init, timeoutMs, [429, 529, 503], "Claude", maxRetries);
 }
 
 // ─── Types ───────────────────────────────────────────────

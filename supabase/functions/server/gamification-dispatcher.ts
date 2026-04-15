@@ -26,6 +26,8 @@
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { getAdminClient } from "./db.ts";
 import { advisoryLockKey, withAdvisoryLock } from "./lib/advisory-lock.ts";
+import { evaluateSimpleCondition, evaluateCountBadge } from "./routes/gamification/helpers.ts";
+import { tryAwardBadge } from "./lib/badge-award.ts";
 
 // ─── Post-Award Evaluation ──────────────────────────────────────
 
@@ -94,12 +96,6 @@ async function _evaluateBadgesForStudent(
   studentId: string,
   institutionId: string,
 ): Promise<void> {
-  // Dynamically import to avoid circular dependency with badges.ts
-  const { evaluateSimpleCondition, evaluateCountBadge } = await import(
-    "./routes/gamification/helpers.ts"
-  );
-  const { awardXP } = await import("./xp-engine.ts");
-
   // 1. Fetch all active badge definitions
   const { data: allBadges, error: badgeErr } = await db
     .from("badge_definitions")
@@ -168,7 +164,7 @@ async function _evaluateBadgesForStudent(
     );
 
     if (allMet) {
-      const didAward = await _tryAwardBadge(db, studentId, institutionId, badge, awardXP);
+      const didAward = await tryAwardBadge(db, studentId, institutionId, badge);
       if (didAward) awarded++;
     }
   }
@@ -196,12 +192,11 @@ async function _evaluateBadgesForStudent(
 
     for (const result of evalResults) {
       if (result.status === "fulfilled" && result.value.met) {
-        const didAward = await _tryAwardBadge(
+        const didAward = await tryAwardBadge(
           db,
           studentId,
           institutionId,
           result.value.badge,
-          awardXP,
         );
         if (didAward) awarded++;
       }
@@ -215,70 +210,4 @@ async function _evaluateBadgesForStudent(
   }
 }
 
-// ─── Badge Award Helper ─────────────────────────────────────────
-
-/**
- * Attempt to award a single badge. Mirrors tryAwardBadge from badges.ts
- * with the same fresh-check + 23505 race handling.
- *
- * Returns true if the badge was newly awarded, false otherwise.
- */
-async function _tryAwardBadge(
-  db: SupabaseClient,
-  studentId: string,
-  institutionId: string,
-  badge: Record<string, unknown>,
-  // deno-lint-ignore no-explicit-any
-  awardXP: any,
-): Promise<boolean> {
-  // Fresh check: re-query to prevent stale-read double-awards
-  const { count: alreadyEarned } = await db
-    .from("student_badges")
-    .select("badge_id", { count: "exact", head: true })
-    .eq("student_id", studentId)
-    .eq("badge_id", badge.id as string);
-
-  if ((alreadyEarned ?? 0) > 0) return false;
-
-  const { error: insertErr } = await db
-    .from("student_badges")
-    .insert({
-      student_id: studentId,
-      badge_id: badge.id,
-      institution_id: institutionId,
-    });
-
-  if (insertErr) {
-    // 23505 = unique_violation (concurrent race)
-    if (insertErr.code === "23505") return false;
-    console.warn(
-      `[Gamification Dispatcher] Badge insert failed for "${badge.name}":`,
-      insertErr.message,
-    );
-    return false;
-  }
-
-  // Award badge XP reward
-  const xpReward = badge.xp_reward as number;
-  if (xpReward && xpReward > 0) {
-    try {
-      await awardXP({
-        db,
-        studentId,
-        institutionId,
-        action: `badge_${badge.slug}`,
-        xpBase: xpReward,
-        sourceType: "badge",
-        sourceId: badge.id as string,
-      });
-    } catch (e) {
-      console.warn(
-        `[Gamification Dispatcher] XP award for badge ${badge.slug} failed:`,
-        (e as Error).message,
-      );
-    }
-  }
-
-  return true;
-}
 

@@ -7,11 +7,9 @@
  *   extractTextFromPdf()  — Gemini 2.5 Flash multimodal PDF text extraction (Fase 7)
  *   fetchWithRetry()      — Shared fetch helper (also used by handler.ts)
  *
- * Legacy (still exported for backward compat):
- *   generateText()        — Gemini text generation (DEPRECATED — use claude-ai.ts)
- *
- * REMOVED functions:
- *   generateEmbedding()   — HARD ERROR: Use openai-embeddings.ts instead (D57)
+ * REMOVED functions (hard errors):
+ *   generateText()        — Use generateText() from claude-ai.ts
+ *   generateEmbedding()   — Use openai-embeddings.ts instead (D57)
  *
  * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
  *
@@ -22,7 +20,7 @@
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
-export const GENERATE_MODEL = "gemini-2.5-flash";
+export const GEMINI_GENERATE_MODEL = "gemini-2.5-flash";
 
 function getApiKey(): string {
   const key = Deno.env.get("GEMINI_API_KEY");
@@ -32,51 +30,18 @@ function getApiKey(): string {
 
 export { getApiKey };
 
-// ─── LA-02 + LA-06 FIX: Fetch with timeout + retry ─────────────
-// N3 FIX: Now exported so handler.ts callGemini can use retry logic
+// ─── Fetch with timeout + retry ─────────────────────────────────
+// N3 FIX: Exported so handler.ts callGemini can use retry logic
 
-export async function fetchWithRetry(
+import { fetchWithRetry as _fetchWithRetry } from "./lib/fetch-with-retry.ts";
+
+export function fetchWithRetry(
   url: string,
   init: RequestInit,
   timeoutMs: number,
   maxRetries = 3,
 ): Promise<Response> {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const res = await fetch(url, { ...init, signal: controller.signal });
-      clearTimeout(timer);
-
-      if ((res.status === 429 || res.status === 503) && attempt < maxRetries) {
-        const delay = Math.min(1000 * 2 ** attempt, 8000);
-        console.warn(
-          `[Gemini] ${res.status}, retry ${attempt + 1}/${maxRetries} in ${delay}ms`,
-        );
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
-      }
-
-      return res;
-    } catch (e) {
-      clearTimeout(timer);
-      if (e instanceof DOMException && e.name === "AbortError") {
-        throw new Error(
-          `Gemini API timeout after ${timeoutMs}ms (attempt ${attempt + 1})`,
-        );
-      }
-      if (attempt < maxRetries) {
-        const delay = Math.min(1000 * 2 ** attempt, 8000);
-        console.warn(
-          `[Gemini] Network error, retry ${attempt + 1}/${maxRetries} in ${delay}ms: ${(e as Error).message}`,
-        );
-        await new Promise((r) => setTimeout(r, delay));
-        continue;
-      }
-      throw e;
-    }
-  }
-  throw new Error("Gemini: max retries exceeded");
+  return _fetchWithRetry(url, init, timeoutMs, [429, 503], "Gemini", maxRetries);
 }
 
 // ─── Text Generation ────────────────────────────────────────────
@@ -94,56 +59,14 @@ interface GeminiGenerateResult {
   tokensUsed: { input: number; output: number };
 }
 
-export async function generateText(
-  opts: GeminiGenerateOpts,
-): Promise<GeminiGenerateResult> {
-  const key = getApiKey();
-  const model = GENERATE_MODEL;
-  const url = `${GEMINI_BASE}/${model}:generateContent?key=${key}`;
-
-  const body: Record<string, unknown> = {
-    contents: [{ parts: [{ text: opts.prompt }] }],
-    generationConfig: {
-      temperature: opts.temperature ?? 0.7,
-      maxOutputTokens: opts.maxTokens ?? 2048,
-      ...(opts.jsonMode && { responseMimeType: "application/json" }),
-    },
-  };
-
-  if (opts.systemPrompt) {
-    body.systemInstruction = {
-      parts: [{ text: opts.systemPrompt }],
-    };
-  }
-
-  const res = await fetchWithRetry(
-    url,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-    15_000,
+// deno-lint-ignore no-unused-vars
+export function generateText(_opts: GeminiGenerateOpts): never {
+  throw new Error(
+    "[Axon Fatal] gemini.ts generateText() is REMOVED. " +
+    "Use generateText() from claude-ai.ts instead. " +
+    "All text generation has moved to Claude (claude-sonnet-4-20250514). " +
+    "Gemini is used ONLY for multimodal/PDF extraction (extractTextFromPdf).",
   );
-
-  if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`Gemini API error ${res.status}: ${errBody}`);
-  }
-
-  const data = await res.json();
-  const candidate = data.candidates?.[0];
-  if (!candidate?.content?.parts?.[0]?.text) {
-    throw new Error("Gemini returned no content");
-  }
-
-  return {
-    text: candidate.content.parts[0].text,
-    tokensUsed: {
-      input: data.usageMetadata?.promptTokenCount ?? 0,
-      output: data.usageMetadata?.candidatesTokenCount ?? 0,
-    },
-  };
 }
 
 // ─── Embeddings (REMOVED — W7-RAG01) ────────────────────────────
@@ -201,7 +124,7 @@ export async function extractTextFromPdf(
   mimeType: string = "application/pdf",
 ): Promise<PdfExtractResult> {
   const key = getApiKey();
-  const model = GENERATE_MODEL;
+  const model = GEMINI_GENERATE_MODEL;
   const url = `${GEMINI_BASE}/${model}:generateContent?key=${key}`;
 
   const body = {

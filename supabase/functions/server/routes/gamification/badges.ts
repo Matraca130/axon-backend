@@ -30,7 +30,7 @@ import {
   evaluateCountBadge,
   type TriggerConfig,
 } from "./helpers.ts";
-import { awardXP } from "../../xp-engine.ts";
+import { tryAwardBadge } from "../../lib/badge-award.ts";
 
 export const badgeRoutes = new Hono();
 
@@ -164,7 +164,8 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
     );
 
     if (allMet) {
-      await tryAwardBadge(adminDb, user.id, institutionId, badge, newBadges);
+      const awarded = await tryAwardBadge(adminDb, user.id, institutionId, badge);
+      if (awarded) newBadges.push(badge);
     }
   }
 
@@ -208,13 +209,8 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
     // Sequential award: only badges that passed evaluation
     for (const result of evalResults) {
       if (result.status === "fulfilled" && result.value.met) {
-        await tryAwardBadge(
-          adminDb,
-          user.id,
-          institutionId,
-          result.value.badge,
-          newBadges,
-        );
+        const awarded = await tryAwardBadge(adminDb, user.id, institutionId, result.value.badge);
+        if (awarded) newBadges.push(result.value.badge);
       } else if (result.status === "rejected") {
         console.error(
           `[Badges] COUNT eval failed:`,
@@ -230,75 +226,6 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
     awarded: newBadges.length,
   });
 });
-
-// ─── Shared badge award helper (DRY: Phase 1 + Phase 2) ─────
-//
-// Inserts student_badges row, pushes to newBadges array,
-// and awards XP. Handles 23505 duplicate key gracefully
-// (concurrent check-badges race condition).
-//
-// CONCURRENCY FIX: Fresh DB check before insert prevents double-award
-// when two concurrent check-badges requests both read the same stale
-// earnedIds set and both attempt to award the same badge.
-
-async function tryAwardBadge(
-  adminDb: ReturnType<typeof getAdminClient>,
-  studentId: string,
-  institutionId: string,
-  badge: Record<string, unknown>,
-  newBadges: Array<Record<string, unknown>>,
-): Promise<void> {
-  // Fresh check: re-query DB to see if badge was already awarded
-  // (guards against stale earnedIds from concurrent requests)
-  const { count: alreadyEarned } = await adminDb
-    .from("student_badges")
-    .select("badge_id", { count: "exact", head: true })
-    .eq("student_id", studentId)
-    .eq("badge_id", badge.id as string);
-
-  if ((alreadyEarned ?? 0) > 0) return;
-
-  // G-002 FIX: Include institution_id in student_badges INSERT
-  const { error: insertErr } = await adminDb
-    .from("student_badges")
-    .insert({
-      student_id: studentId,
-      badge_id: badge.id,
-      institution_id: institutionId,
-    });
-
-  if (insertErr) {
-    // 23505 = unique_violation (race condition on concurrent calls)
-    if (insertErr.code === "23505") return;
-    console.error(
-      `[Badges] Insert failed for "${badge.name}":`,
-      insertErr.message,
-    );
-    return;
-  }
-
-  newBadges.push(badge);
-
-  const xpReward = badge.xp_reward as number;
-  if (xpReward && xpReward > 0) {
-    try {
-      await awardXP({
-        db: adminDb,
-        studentId,
-        institutionId,
-        action: `badge_${badge.slug}`,
-        xpBase: xpReward,
-        sourceType: "badge",
-        sourceId: badge.id as string,
-      });
-    } catch (e) {
-      console.error(
-        `[Badges] XP award for badge ${badge.slug} failed:`,
-        (e as Error).message,
-      );
-    }
-  }
-}
 
 // --- GET /gamification/notifications ---
 badgeRoutes.get(`${PREFIX}/gamification/notifications`, async (c: Context) => {
