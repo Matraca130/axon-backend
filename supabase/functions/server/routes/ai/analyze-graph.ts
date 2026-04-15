@@ -31,6 +31,7 @@ import {
   GENERATE_MODEL,
 } from "../../claude-ai.ts";
 import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 export const aiAnalyzeGraphRoutes = new Hono();
 
@@ -92,12 +93,9 @@ aiAnalyzeGraphRoutes.post(
       return err(c, "topic_id is required (valid UUID)", 400);
 
     // ── Step 3: Resolve institution from topic ─────────────────
-    const { data: instId, error: instErr } = await db.rpc(
-      "resolve_parent_institution",
-      { p_table: "topics", p_id: topicId },
-    );
+    const instId = await resolveInstitutionViaRpc(db, "topics", topicId);
 
-    if (instErr || !instId)
+    if (!instId)
       return err(c, "Topic not found or not linked to an institution", 404);
 
     // ── Step 4: Verify membership (any role can analyze) ───────

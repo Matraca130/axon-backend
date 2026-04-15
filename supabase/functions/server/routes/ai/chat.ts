@@ -74,6 +74,7 @@ import {
 import { generateText, generateTextStream, GENERATE_MODEL } from "../../claude-ai.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { xpHookForRagQuestion } from "../../xp-hooks.ts";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 // Fase 6: Import strategy functions + shared MatchedChunk type
 import {
@@ -697,18 +698,10 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
 
   let institutionId: string | null = null;
   if (summaryId) {
-    const { data: instId } = await db.rpc("resolve_parent_institution", {
-      p_table: "summaries",
-      p_id: summaryId,
-    });
-    institutionId = instId as string;
+    institutionId = await resolveInstitutionViaRpc(db, "summaries", summaryId);
   }
   if (!institutionId && topicId) {
-    const { data: instId } = await db.rpc("resolve_parent_institution", {
-      p_table: "topics",
-      p_id: topicId,
-    });
-    institutionId = instId as string;
+    institutionId = await resolveInstitutionViaRpc(db, "topics", topicId);
   }
   if (!institutionId) {
     const { data: membership } = await db

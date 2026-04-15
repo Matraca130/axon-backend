@@ -34,6 +34,7 @@ import {
   ALL_ROLES,
 } from "../../auth-helpers.ts";
 import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 export const aiRealtimeRoutes = new Hono();
 
@@ -208,11 +209,7 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
   // 1. Resolve institution (same pattern as chat.ts)
   let institutionId: string | null = null;
   if (summaryId) {
-    const { data: instId } = await db.rpc("resolve_parent_institution", {
-      p_table: "summaries",
-      p_id: summaryId,
-    });
-    institutionId = instId as string;
+    institutionId = await resolveInstitutionViaRpc(db, "summaries", summaryId);
   }
   if (!institutionId) {
     const { data: membership } = await db
