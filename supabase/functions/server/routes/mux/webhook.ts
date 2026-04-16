@@ -40,6 +40,34 @@ muxWebhookRoutes.post(`${PREFIX}/webhooks/mux`, async (c: Context) => {
 
   const admin = getAdminClient();
 
+  // O-7 FIX: Idempotency via INSERT-first to avoid TOCTOU race.
+  // Uses the unique index idx_pwe_event_id_source on (event_id, source).
+  // If unique violation (23505) occurs, this is a duplicate delivery; short-circuit.
+  // Mux event id comes from event.data.id (asset id); fall back if missing.
+  const eventId: string | undefined = event.data?.id;
+  if (eventId) {
+    const { error: insertErr } = await admin
+      .from("processed_webhook_events")
+      .insert({
+        event_id: eventId,
+        event_type: event.type,
+        source: "mux",
+      });
+
+    if (insertErr) {
+      if ((insertErr as { code?: string }).code === "23505") {
+        console.warn(`[Mux Webhook] Duplicate event ${eventId}, skipping`);
+        return ok(c, { received: true, deduplicated: true });
+      }
+      // Table missing or other error: log and proceed (best-effort).
+      // Strict atomicity requires the DB-level unique constraint on
+      // (event_id, source) from migration 20260227000006.
+      console.warn(
+        `[Mux Webhook] processed_webhook_events insert failed (non-fatal): ${insertErr.message}`,
+      );
+    }
+  }
+
   if (event.type === "video.asset.ready") {
     const assetId    = event.data.id;
     const uploadId   = event.data.upload_id;

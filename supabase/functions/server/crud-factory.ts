@@ -38,6 +38,7 @@
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "./db.ts";
 import { safeErr } from "./lib/safe-error.ts";
+import { isUuid } from "./validate.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -286,7 +287,12 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     if (cfg.optionalFilters) {
       for (const f of cfg.optionalFilters) {
         const v = c.req.query(f);
-        if (v) query = query.eq(f, v);
+        if (v) {
+          if (f.endsWith("_id") && !isUuid(v)) {
+            return err(c, `${f} must be a valid UUID`, 400);
+          }
+          query = query.eq(f, v);
+        }
       }
     }
 
