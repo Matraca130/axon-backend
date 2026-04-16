@@ -615,5 +615,15 @@ Deno.test({ name: "awardXP: bktPKnow at 0.29 is NOT in flow zone", sanitizeOps: 
   assertExists(result);
 }});
 
-// Restore Math.random after all awardXP tests
-Math.random = _origRandom;
+// Math.random stays stubbed for the whole file.
+//
+// DO NOT restore at top-level: top-level code runs BEFORE any Deno.test
+// body executes, so `Math.random = _origRandom` here would un-stub before
+// a single test runs. That intermittently fires the +1.0 variable-reward
+// bonus in awardXP and broke "awardXP: returns AwardResult on successful
+// RPC" in CI (expects 10, sometimes got 20).
+//
+// Deno isolates test files in their own worker so leaving Math.random
+// stubbed does not leak to other test files. If a future test needs the
+// real Math.random, stub+restore locally inside that test's fn body.
+void _origRandom;
