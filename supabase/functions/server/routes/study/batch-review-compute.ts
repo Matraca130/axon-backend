@@ -28,9 +28,9 @@
  *      FSRS last-wins on flashcard_id.
  */
 
-import { computeFsrsV4Update } from "../../lib/fsrs-v4.ts";
+import { computeFsrsV4Update, DEFAULT_WEIGHTS } from "../../lib/fsrs-v4.ts";
 import { computeBktV4Update } from "../../lib/bkt-v4.ts";
-import { THRESHOLDS } from "../../lib/types.ts";
+import { THRESHOLDS, BKT_PARAMS } from "../../lib/types.ts";
 import type { FsrsCardState } from "../../lib/types.ts";
 import type { ReviewItem, ComputedResult } from "./batch-review-validators.ts";
 import { mapToFsrsGrade } from "./batch-review-validators.ts";
@@ -209,7 +209,7 @@ export function computeReviewBatch(input: ComputeInput): ComputeOutput {
         if (existingBkt) {
           const maxPKnow = existingBkt.max_p_know ?? 0;
           const pKnow = existingBkt.p_know ?? 0;
-          isRecovering = maxPKnow > 0.50 && pKnow < maxPKnow;
+          isRecovering = maxPKnow > BKT_PARAMS.MIN_MASTERY_FOR_RECOVERY && pKnow < maxPKnow;
         }
       }
 
@@ -217,7 +217,7 @@ export function computeReviewBatch(input: ComputeInput): ComputeOutput {
 
       const fsrsResult = computeFsrsV4Update({
         currentStability: existingFsrs?.stability ?? 0,
-        currentDifficulty: existingFsrs?.difficulty ?? 5.0,
+        currentDifficulty: existingFsrs?.difficulty ?? DEFAULT_WEIGHTS.w4,
         currentReps: existingFsrs?.reps ?? 0,
         currentLapses: existingFsrs?.lapses ?? 0,
         currentState: (existingFsrs?.state as FsrsCardState) ?? "new",
@@ -290,7 +290,7 @@ export function computeReviewBatch(input: ComputeInput): ComputeOutput {
           subtopic_id: item.subtopic_id,
           p_know: bktResult.p_know,
           max_p_know: bktResult.max_p_know,
-          p_transit: existingBkt?.p_transit ?? 0.18,
+          p_transit: existingBkt?.p_transit ?? BKT_PARAMS.P_LEARN,
           p_slip: existingBkt?.p_slip ?? 0.10,
           p_guess: existingBkt?.p_guess ?? 0.25,
           delta: bktResult.delta,

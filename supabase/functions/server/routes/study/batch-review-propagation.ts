@@ -23,6 +23,7 @@ export async function propagateKeywordBkt(
   isCorrect: boolean,
   sourceSubtopicId: string | undefined,
   precomputedKeywordId?: string,
+  nowFn: () => Date = () => new Date(),
 ): Promise<string | undefined> {
   try {
     if (!["quiz", "flashcard"].includes(instrumentType)) {
@@ -71,7 +72,7 @@ export async function propagateKeywordBkt(
       ? BKT_WEIGHTS.quiz
       : BKT_WEIGHTS.flashcard;
 
-    const nowIso = new Date().toISOString();
+    const nowIso = nowFn().toISOString();
 
     const targetSubtopics = subtopics.filter(s => s.id !== sourceSubtopicId);
     if (targetSubtopics.length === 0) return;

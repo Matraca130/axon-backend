@@ -89,17 +89,22 @@ async function loadLeechThreshold(db: SupabaseClient): Promise<number> {
   }
 }
 
-interface StateMaps {
+export interface StateMaps {
   fsrsMap: Map<string, FsrsStateRow>;
   bktMap: Map<string, BktStateRow>;
   itemKeywordMap: Map<string, string>;
 }
 
-async function preloadStateMaps(
+export interface StateMapsResult {
+  data: StateMaps | null;
+  error: string | null;
+}
+
+export async function preloadStateMaps(
   db: SupabaseClient,
   userId: string,
   items: ReviewItem[],
-): Promise<StateMaps> {
+): Promise<StateMapsResult> {
   const allFlashcardIds = items.filter(i => i.item_id).map(i => i.item_id);
   const allBktSubtopicIds = [...new Set(
     items.filter(i => i.subtopic_id).map(i => i.subtopic_id as string),
@@ -110,37 +115,46 @@ async function preloadStateMaps(
 
   // All four DB reads are independent — run them in parallel. Pre-refactor
   // was serial for no reason, adding ~4 round-trips of latency per batch.
-  //
-  // TODO(arch): each query destructures only `.data`; a DB `error` silently
-  // yields an empty Map and the compute loop treats the card as fresh.
-  // Callers cannot distinguish "no prior state" from "lookup failed."
-  // Fix in a follow-up PR that also threads error surfacing into the
-  // orchestrator's response body.
-  const [
-    { data: allFsrs },
-    { data: allBkt },
-    { data: flashcardsKw },
-    { data: quizKw },
-  ] = await Promise.all([
+  const [fsrsRes, bktRes, fcKwRes, qKwRes] = await Promise.all([
     allFlashcardIds.length > 0
       ? db.from("fsrs_states")
           .select("flashcard_id, stability, difficulty, reps, lapses, state, last_review_at, consecutive_lapses, is_leech")
           .in("flashcard_id", allFlashcardIds)
           .eq("student_id", userId)
-      : Promise.resolve({ data: [] as FsrsStateRow[] }),
+      : Promise.resolve({ data: [] as FsrsStateRow[], error: null }),
     allBktSubtopicIds.length > 0
       ? db.from("bkt_states")
           .select("subtopic_id, p_know, max_p_know, total_attempts, correct_attempts, p_transit, p_slip, p_guess")
           .in("subtopic_id", allBktSubtopicIds)
           .eq("student_id", userId)
-      : Promise.resolve({ data: [] as BktStateRow[] }),
+      : Promise.resolve({ data: [] as BktStateRow[], error: null }),
     flashcardItemIds.length > 0
       ? db.from("flashcards").select("id, keyword_id").in("id", flashcardItemIds)
-      : Promise.resolve({ data: [] as Array<{ id: string; keyword_id: string | null }> }),
+      : Promise.resolve({ data: [] as Array<{ id: string; keyword_id: string | null }>, error: null }),
     quizItemIds.length > 0
       ? db.from("quiz_questions").select("id, keyword_id").in("id", quizItemIds)
-      : Promise.resolve({ data: [] as Array<{ id: string; keyword_id: string | null }> }),
+      : Promise.resolve({ data: [] as Array<{ id: string; keyword_id: string | null }>, error: null }),
   ]);
+
+  // Surface any DB error: a silent empty-Map fallback would make the
+  // compute loop treat cards as fresh, corrupting FSRS/BKT state on write.
+  const checks: Array<[string, { error: unknown }]> = [
+    ["fsrs_states", fsrsRes],
+    ["bkt_states", bktRes],
+    ["flashcards", fcKwRes],
+    ["quiz_questions", qKwRes],
+  ];
+  for (const [table, res] of checks) {
+    const e = res.error as { message?: string } | null | undefined;
+    if (e) {
+      return { data: null, error: `Preload ${table} failed: ${e.message ?? "unknown error"}` };
+    }
+  }
+
+  const { data: allFsrs } = fsrsRes;
+  const { data: allBkt } = bktRes;
+  const { data: flashcardsKw } = fcKwRes;
+  const { data: quizKw } = qKwRes;
 
   const fsrsMap = new Map<string, FsrsStateRow>(
     allFsrs?.map(s => [s.flashcard_id as string, s as FsrsStateRow]) ?? [],
@@ -156,7 +170,7 @@ async function preloadStateMaps(
     if (row.keyword_id) itemKeywordMap.set(row.id as string, row.keyword_id as string);
   }
 
-  return { fsrsMap, bktMap, itemKeywordMap };
+  return { data: { fsrsMap, bktMap, itemKeywordMap }, error: null };
 }
 
 interface PersistResult {
@@ -296,7 +310,17 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
 
   // ── 4. Pre-load state + leech threshold ──────────────────
   const leechThreshold = await loadLeechThreshold(db);
-  const { fsrsMap, bktMap, itemKeywordMap } = await preloadStateMaps(db, user.id, validatedItems);
+  const preloaded = await preloadStateMaps(db, user.id, validatedItems);
+  if (preloaded.error || !preloaded.data) {
+    return c.json({
+      error: preloaded.error ?? "Preload failed",
+      processed: validatedItems.length,
+      reviews_created: 0,
+      fsrs_updated: 0,
+      bkt_updated: 0,
+    }, 500);
+  }
+  const { fsrsMap, bktMap, itemKeywordMap } = preloaded.data;
 
   // ── 5. Pure compute + dedupe ─────────────────────────────
   const computed = computeReviewBatch({
