@@ -37,7 +37,16 @@ webhookRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
   const verified = await verifyStripeSignature(rawBody, signature, webhookSecret);
   if (!verified) return err(c, "Invalid webhook signature", 400);
 
-  const event = JSON.parse(rawBody);
+  // deno-lint-ignore no-explicit-any
+  let event: any;
+  try {
+    event = JSON.parse(rawBody);
+  } catch (e) {
+    console.error(
+      `[Stripe Webhook] Invalid JSON payload (body length ${rawBody.length}): ${(e as Error).message}`,
+    );
+    return err(c, "Invalid JSON payload", 400);
+  }
   const admin = getAdminClient();
 
   // O-7 FIX: Idempotency check
