@@ -75,9 +75,6 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
   if (!isEmail(email)) {
     return err(c, "email must be a valid email address", 400);
   }
-  if (!isNonEmpty(password)) {
-    return err(c, "password must be a non-empty string", 400);
-  }
   if (typeof password !== "string" || password.length < 8) {
     return err(c, "Password must be at least 8 characters", 400);
   }
