@@ -177,3 +177,22 @@ Deno.test("advisoryLockKey: post_eval suffix produces consistent key", () => {
   const manual = advisoryLockKey(`${studentId}:post_eval`);
   assertEquals(key, manual);
 });
+
+// ═══ ADVISORY LOCK — Pinning Tests (FNV-1a 32-bit unsigned) ═══
+// Pin exact hash values so any accidental algorithm change (e.g. switching
+// back to djb2 or changing encoding) fails the suite. Regenerate via:
+//   deno eval 'import {advisoryLockKey} from "./.../advisory-lock.ts"; console.log(advisoryLockKey("..."))'
+Deno.test("advisoryLockKey: pinned value — empty string (FNV offset basis)", () => {
+  assertEquals(advisoryLockKey(""), 2166136261); // 0x811c9dc5
+});
+
+Deno.test("advisoryLockKey: pinned value — 'test'", () => {
+  assertEquals(advisoryLockKey("test"), 2949673445);
+});
+
+Deno.test("advisoryLockKey: pinned values — gamification lock key suffixes", () => {
+  const studentId = "550e8400-e29b-41d4-a716-446655440000";
+  assertEquals(advisoryLockKey(`${studentId}:post_eval`), 991361007);
+  assertEquals(advisoryLockKey(`${studentId}:streak_freeze`), 3093196886);
+  assertEquals(advisoryLockKey(`${studentId}:streak_repair`), 440929696);
+});
