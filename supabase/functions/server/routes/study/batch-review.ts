@@ -111,9 +111,12 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     validatedItems.push(result.valid);
   }
 
+  // Preserve pre-refactor behavior: batch-review returned 404 for both
+  // "not found" and "lookup failed". Leave as-is so the contract is
+  // unchanged; a future PR can differentiate if desired.
   const ownership = await verifySessionOwnership(db, sessionId, user.id);
   if (!ownership.ok) {
-    return err(c, ownership.message, ownership.reason === "not_found" ? 404 : 500);
+    return err(c, ownership.message, 404);
   }
 
   // ── Load leech threshold from algorithm_config ──
