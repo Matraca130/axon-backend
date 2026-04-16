@@ -44,16 +44,26 @@ export async function tryAcquireAdvisoryLock(
 /**
  * Libera el advisory lock.
  * Fire-and-forget safe: absorbe errores con console.warn en lugar de lanzarlos.
- * Siempre debe llamarse en un bloque finally.
+ * Siempre debe llamarse en un bloque finally — nunca debe propagar errores
+ * que enmascaren la excepción original del bloque try.
  */
 export async function releaseAdvisoryLock(
   db: SupabaseClient,
   lockKey: number,
   label: string,
 ): Promise<void> {
-  const { error } = await db.rpc("advisory_unlock", { lock_key: lockKey });
-  if (error) {
-    console.warn(`[Advisory Lock] release failed for ${label}:`, error.message);
+  try {
+    const { error } = await db.rpc("advisory_unlock", { lock_key: lockKey });
+    if (error) {
+      console.warn(`[Advisory Lock] release failed for ${label}:`, error.message);
+    }
+  } catch (e) {
+    // Network/transport errors thrown by the Supabase client must not escape:
+    // this function is called from finally blocks and would mask the original error.
+    console.warn(
+      `[Advisory Lock] release threw for ${label}:`,
+      (e as Error)?.message ?? String(e),
+    );
   }
 }
 
