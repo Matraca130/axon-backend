@@ -5,9 +5,10 @@
  * Migrated from Gemini function_declarations to Claude tool_use format.
  *
  * Phase 3 changes:
- *   S14: handle_voice_message now uses Gemini multimodal STT
  *   S15: ask_academic_question uses full RAG pipeline
  *        (embeddings + hybrid search + re-ranking)
+ *   Note: voice messages are transcribed in transcribeVoiceMessage() (handler.ts)
+ *         before the agentic loop; handle_voice_message tool was removed post-migration.
  *
  * N8 FIX: Integrated formatters for check_progress, get_schedule,
  *         browse_content. Claude gets pre-formatted WhatsApp text.
