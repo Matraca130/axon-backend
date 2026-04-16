@@ -43,26 +43,10 @@ import {
   validateReviewItem,
 } from "./batch-review-validators.ts";
 
+// ── Shared session ownership ─────────────────────────────────
+import { verifySessionOwnership } from "./session-ownership.ts";
+
 export const batchReviewRoutes = new Hono();
-
-// ─── Session Ownership (same logic as reviews.ts) ───────────────
-
-async function verifySessionOwnership(
-  db: SupabaseClient,
-  sessionId: string,
-  userId: string,
-): Promise<string | null> {
-  const { data: session, error: sessionErr } = await db
-    .from("study_sessions")
-    .select("id")
-    .eq("id", sessionId)
-    .eq("student_id", userId)
-    .maybeSingle();
-
-  if (sessionErr) return `Session lookup failed: ${sessionErr.message}`;
-  if (!session) return "Session not found or does not belong to you";
-  return null;
-}
 
 // ─── Leech Threshold Loader ─────────────────────────────────
 
@@ -272,9 +256,9 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     validatedItems.push(result.valid);
   }
 
-  const ownershipErr = await verifySessionOwnership(db, sessionId, user.id);
-  if (ownershipErr) {
-    return err(c, ownershipErr, 404);
+  const ownership = await verifySessionOwnership(db, sessionId, user.id);
+  if (!ownership.ok) {
+    return err(c, ownership.message, ownership.reason === "not_found" ? 404 : 500);
   }
 
   // ── Load leech threshold from algorithm_config ──
