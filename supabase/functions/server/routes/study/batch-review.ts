@@ -62,6 +62,15 @@ export const batchReviewRoutes = new Hono();
 // Helpers — DB-touching, scoped to this handler
 // ═══════════════════════════════════════════════════════════════
 
+/**
+ * Loads the global leech threshold from algorithm_config.
+ *
+ * TODO(arch): the try/catch and implicit destructure swallow DB errors —
+ * any transient failure silently degrades to DEFAULT_LEECH_THRESHOLD with
+ * no warning in the response. Preserved here for zero-behavior-change;
+ * a follow-up PR should surface the fallback via a warning and
+ * log-and-rethrow on unexpected exceptions.
+ */
 async function loadLeechThreshold(db: SupabaseClient): Promise<number> {
   try {
     const { data } = await db
@@ -95,18 +104,42 @@ async function preloadStateMaps(
     items.filter(i => i.subtopic_id).map(i => i.subtopic_id as string),
   )];
 
-  const { data: allFsrs } = allFlashcardIds.length > 0
-    ? await db.from("fsrs_states")
-        .select("flashcard_id, stability, difficulty, reps, lapses, state, last_review_at, consecutive_lapses, is_leech")
-        .in("flashcard_id", allFlashcardIds)
-        .eq("student_id", userId)
-    : { data: [] };
-  const { data: allBkt } = allBktSubtopicIds.length > 0
-    ? await db.from("bkt_states")
-        .select("subtopic_id, p_know, max_p_know, total_attempts, correct_attempts, p_transit, p_slip, p_guess")
-        .in("subtopic_id", allBktSubtopicIds)
-        .eq("student_id", userId)
-    : { data: [] };
+  const flashcardItemIds = items.filter(i => i.instrument_type === "flashcard").map(i => i.item_id);
+  const quizItemIds = items.filter(i => i.instrument_type === "quiz").map(i => i.item_id);
+
+  // All four DB reads are independent — run them in parallel. Pre-refactor
+  // was serial for no reason, adding ~4 round-trips of latency per batch.
+  //
+  // TODO(arch): each query destructures only `.data`; a DB `error` silently
+  // yields an empty Map and the compute loop treats the card as fresh.
+  // Callers cannot distinguish "no prior state" from "lookup failed."
+  // Fix in a follow-up PR that also threads error surfacing into the
+  // orchestrator's response body.
+  const [
+    { data: allFsrs },
+    { data: allBkt },
+    { data: flashcardsKw },
+    { data: quizKw },
+  ] = await Promise.all([
+    allFlashcardIds.length > 0
+      ? db.from("fsrs_states")
+          .select("flashcard_id, stability, difficulty, reps, lapses, state, last_review_at, consecutive_lapses, is_leech")
+          .in("flashcard_id", allFlashcardIds)
+          .eq("student_id", userId)
+      : Promise.resolve({ data: [] as FsrsStateRow[] }),
+    allBktSubtopicIds.length > 0
+      ? db.from("bkt_states")
+          .select("subtopic_id, p_know, max_p_know, total_attempts, correct_attempts, p_transit, p_slip, p_guess")
+          .in("subtopic_id", allBktSubtopicIds)
+          .eq("student_id", userId)
+      : Promise.resolve({ data: [] as BktStateRow[] }),
+    flashcardItemIds.length > 0
+      ? db.from("flashcards").select("id, keyword_id").in("id", flashcardItemIds)
+      : Promise.resolve({ data: [] as Array<{ id: string; keyword_id: string | null }> }),
+    quizItemIds.length > 0
+      ? db.from("quiz_questions").select("id, keyword_id").in("id", quizItemIds)
+      : Promise.resolve({ data: [] as Array<{ id: string; keyword_id: string | null }> }),
+  ]);
 
   const fsrsMap = new Map<string, FsrsStateRow>(
     allFsrs?.map(s => [s.flashcard_id as string, s as FsrsStateRow]) ?? [],
@@ -114,25 +147,12 @@ async function preloadStateMaps(
   const bktMap = new Map<string, BktStateRow>(
     allBkt?.map(s => [s.subtopic_id as string, s as BktStateRow]) ?? [],
   );
-
-  // Pre-resolve keyword_id per item so the compute loop can build the
-  // propagation-by-keyword map without extra DB round-trips. Grouped
-  // by instrument table — only one IN(...) query per table.
-  const flashcardItemIds = items.filter(i => i.instrument_type === "flashcard").map(i => i.item_id);
-  const quizItemIds = items.filter(i => i.instrument_type === "quiz").map(i => i.item_id);
   const itemKeywordMap = new Map<string, string>();
-
-  if (flashcardItemIds.length > 0) {
-    const { data } = await db.from("flashcards").select("id, keyword_id").in("id", flashcardItemIds);
-    for (const row of data ?? []) {
-      if (row.keyword_id) itemKeywordMap.set(row.id as string, row.keyword_id as string);
-    }
+  for (const row of flashcardsKw ?? []) {
+    if (row.keyword_id) itemKeywordMap.set(row.id as string, row.keyword_id as string);
   }
-  if (quizItemIds.length > 0) {
-    const { data } = await db.from("quiz_questions").select("id, keyword_id").in("id", quizItemIds);
-    for (const row of data ?? []) {
-      if (row.keyword_id) itemKeywordMap.set(row.id as string, row.keyword_id as string);
-    }
+  for (const row of quizKw ?? []) {
+    if (row.keyword_id) itemKeywordMap.set(row.id as string, row.keyword_id as string);
   }
 
   return { fsrsMap, bktMap, itemKeywordMap };
