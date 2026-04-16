@@ -411,3 +411,68 @@ export function dedupePayloads(input: {
     dedupedBktRows: [...bktDeduped.values()],
   };
 }
+
+// ═══════════════════════════════════════════════════════════════
+// selectBatchResponseStatus — pure HTTP status + body shaping
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Shapes the final HTTP response for a batch review request.
+ *
+ * Tri-state selection:
+ *   - Every item failed (errors.length > 0 && reviewsCreated === 0) → 500
+ *   - Some items failed (errors.length > 0 && reviewsCreated > 0)   → 207
+ *   - Otherwise                                                     → 200
+ *
+ * `reviewsCreated === 0` is the strongest "nothing persisted" signal: without
+ * a review row, downstream FSRS/BKT upserts would be semantically orphan, so
+ * the RPC declining to insert is treated as a full rollback.
+ *
+ * Pure — no Hono/Context coupling. The handler adapts the returned
+ * `{ status, body }` into the framework-specific response.
+ */
+export interface BatchPersistSummary {
+  reviewsCreated: number;
+  fsrsUpdated: number;
+  bktUpdated: number;
+}
+
+export interface BatchResponseInput {
+  processed: number;
+  errors: ComputeError[];
+  computedResults: ComputedResult[];
+  persist: BatchPersistSummary;
+  propagationWarnings: string[];
+}
+
+export interface BatchResponseSelection {
+  status: 200 | 207 | 500;
+  body: Record<string, unknown>;
+}
+
+export function selectBatchResponseStatus(
+  input: BatchResponseInput,
+): BatchResponseSelection {
+  const { processed, errors, computedResults, persist, propagationWarnings } = input;
+
+  const hasPartialFailure = errors.length > 0 && persist.reviewsCreated > 0;
+  const totalFailure = errors.length > 0 && persist.reviewsCreated === 0;
+
+  const body: Record<string, unknown> = {
+    processed,
+    reviews_created: persist.reviewsCreated,
+    fsrs_updated: persist.fsrsUpdated,
+    bkt_updated: persist.bktUpdated,
+    errors: errors.length > 0 ? errors : undefined,
+    results: computedResults.length > 0 ? computedResults : undefined,
+    propagation_warnings: propagationWarnings.length > 0 ? propagationWarnings : undefined,
+  };
+
+  if (totalFailure) {
+    return { status: 500, body: { error: "All reviews in batch failed", ...body } };
+  }
+  if (hasPartialFailure) {
+    return { status: 207, body };
+  }
+  return { status: 200, body };
+}

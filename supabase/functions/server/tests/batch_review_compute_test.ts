@@ -19,6 +19,7 @@ import {
 import {
   computeReviewBatch,
   dedupePayloads,
+  selectBatchResponseStatus,
 } from "../routes/study/batch-review-compute.ts";
 
 import type {
@@ -373,4 +374,71 @@ Deno.test("compute: successfulReviews length always equals input length", () => 
 
   assertEquals(out.successfulReviews.length, 3);
   assertEquals(out.reviewRows.length, 3);
+});
+
+// ═════════════════════════════════════════════════════════════════
+// selectBatchResponseStatus — pure HTTP response shaping
+// ═════════════════════════════════════════════════════════════════
+
+Deno.test("selectBatchResponseStatus: no errors → 200 with clean body", () => {
+  const sel = selectBatchResponseStatus({
+    processed: 2,
+    errors: [],
+    computedResults: [{ item_id: ITEM_1, fsrs: { due_at: "x", stability: 1, difficulty: 1, state: "review", reps: 1, lapses: 0, consecutive_lapses: 0, is_leech: false } }],
+    persist: { reviewsCreated: 2, fsrsUpdated: 2, bktUpdated: 0 },
+    propagationWarnings: [],
+  });
+
+  assertEquals(sel.status, 200);
+  assertEquals(sel.body.processed, 2);
+  assertEquals(sel.body.reviews_created, 2);
+  // Empty arrays should be omitted (undefined) so the body stays tight.
+  assertEquals(sel.body.errors, undefined);
+  assertEquals(sel.body.propagation_warnings, undefined);
+  // Non-empty arrays survive.
+  assertExists(sel.body.results);
+});
+
+Deno.test("selectBatchResponseStatus: some errors + some persisted → 207 partial", () => {
+  const sel = selectBatchResponseStatus({
+    processed: 3,
+    errors: [{ index: 2, step: "fsrs", message: "boom" }],
+    computedResults: [{ item_id: ITEM_1 }, { item_id: ITEM_2 }] as never,
+    persist: { reviewsCreated: 2, fsrsUpdated: 2, bktUpdated: 0 },
+    propagationWarnings: [],
+  });
+
+  assertEquals(sel.status, 207);
+  assertEquals((sel.body.errors as unknown[]).length, 1);
+  assertEquals(sel.body.reviews_created, 2);
+  // 207 does NOT add the "All reviews in batch failed" prefix.
+  assertEquals(sel.body.error, undefined);
+});
+
+Deno.test("selectBatchResponseStatus: errors + zero persisted → 500 total failure", () => {
+  const sel = selectBatchResponseStatus({
+    processed: 1,
+    errors: [{ index: 0, step: "bkt", message: "rpc exploded" }],
+    computedResults: [],
+    persist: { reviewsCreated: 0, fsrsUpdated: 0, bktUpdated: 0 },
+    propagationWarnings: [],
+  });
+
+  assertEquals(sel.status, 500);
+  // 500 prepends the human-readable error string for client retry logic.
+  assertEquals(sel.body.error, "All reviews in batch failed");
+  assertEquals((sel.body.errors as unknown[]).length, 1);
+});
+
+Deno.test("selectBatchResponseStatus: propagation warnings ride along on 200", () => {
+  const sel = selectBatchResponseStatus({
+    processed: 1,
+    errors: [],
+    computedResults: [{ item_id: ITEM_1 }] as never,
+    persist: { reviewsCreated: 1, fsrsUpdated: 0, bktUpdated: 1 },
+    propagationWarnings: ["keyword lookup failed for kw_X"],
+  });
+
+  assertEquals(sel.status, 200);
+  assertEquals(sel.body.propagation_warnings, ["keyword lookup failed for kw_X"]);
 });
