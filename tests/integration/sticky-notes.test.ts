@@ -9,7 +9,6 @@
  *   - POST   /sticky-notes  { summary_id, content }  (upsert, validation)
  *   - DELETE /sticky-notes?summary_id=<uuid>  (idempotent)
  *   - 20 000-char content cap
- *   - Cross-student RLS isolation
  *   - Anonymous (no auth) rejection
  *
  * Run:
@@ -32,11 +31,10 @@ import {
 
 let userToken = "";
 let userId = "";
-let adminToken = "";
 
 // Two summary IDs that the student has access to. We need REAL summary IDs
 // because the route validates the FK on summary_id. We resolve them at setup
-// time from /topic-progress (returns summaries the caller can read).
+// time from /topics-overview (returns summaries the caller can read).
 let summaryIdA = "";
 let summaryIdB = "";
 
@@ -48,7 +46,7 @@ async function setup() {
   userToken = auth.access_token;
   userId = auth.user.id;
 
-  // Resolve two summary IDs the student can read. We try /topic-progress
+  // Resolve two summary IDs the student can read. We try /topics-overview
   // for any topic the student has, then pick the first two summaries.
   // If we can't find two, the cross-summary tests will be skipped gracefully.
   try {
