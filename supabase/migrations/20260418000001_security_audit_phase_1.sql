@@ -28,10 +28,14 @@ BEGIN;
 
 -- #1 CRITICAL — increment_block_mastery_attempts granted to ANON in live DB
 -- Iter 15 #3 / iter 20 #2. Body trusts caller-supplied p_student_id.
+-- PHASE 1 SCOPE: revoke from anon + PUBLIC only. `authenticated` grant is
+-- REQUIRED by routes/study/block-review.ts:159 which calls this RPC with the
+-- user's JWT. A follow-up migration in Phase 2 will add an internal
+-- `IF p_student_id <> auth.uid() THEN RAISE` check inside the function body,
+-- at which point the `authenticated` grant becomes safe.
 REVOKE EXECUTE ON FUNCTION public.increment_block_mastery_attempts(uuid, uuid, integer, integer)
-  FROM anon, authenticated, PUBLIC;
-GRANT EXECUTE ON FUNCTION public.increment_block_mastery_attempts(uuid, uuid, integer, integer)
-  TO service_role;
+  FROM anon, PUBLIC;
+-- authenticated grant preserved intentionally — see Phase 2 body hardening.
 
 -- #2 HIGH — rag_analytics_summary granted to anon/authenticated (iter 17
 -- re-audit claimed REVOKEd; live DB says otherwise)
@@ -190,6 +194,17 @@ DROP POLICY IF EXISTS "Allow public read access to axon-images" ON storage.objec
 --      since removing it breaks list() API; doc in README that it's intentional.
 --      (No change here — just documented.)
 
+-- 5e — axonmed-images: drop the "Anon update axonmed" UPDATE policy.
+--      Iter 1 #242 planned this (PR #242 + follow-up fcb9201 on branch
+--      security/storage-buckets-2026-04-16) but never merged to main.
+--      Live DB still has anon UPDATE access to storage.objects in
+--      axonmed-images — any unauth caller can modify existing objects.
+--      All legitimate uploads use service_role via backend.
+DROP POLICY IF EXISTS "Anon update axonmed" ON storage.objects;
+-- "Anon upload axonmed" was apparently already dropped (advisor
+-- no longer flags INSERT on axonmed-images), but drop defensively.
+DROP POLICY IF EXISTS "Anon upload axonmed" ON storage.objects;
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- SECTION 6: Verification block
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -200,17 +215,33 @@ DECLARE
   v_bad_search_path int;
   v_rls_disabled text[];
 BEGIN
-  -- Check REVOKE took effect on the 4 over-granted RPCs
+  -- Check REVOKE from anon on the 5 RPCs
   SELECT count(*) INTO v_bad_grants
     FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid
    WHERE n.nspname = 'public'
      AND p.proname IN (
        'increment_block_mastery_attempts', 'rag_analytics_summary',
-       'rag_coarse_to_fine_search', 'rag_embedding_coverage'
+       'rag_coarse_to_fine_search', 'rag_embedding_coverage',
+       'resolve_parent_institution'
      )
      AND has_function_privilege('anon', p.oid, 'EXECUTE');
   IF v_bad_grants > 0 THEN
     RAISE EXCEPTION 'REVOKE from anon failed on % RPCs', v_bad_grants;
+  END IF;
+
+  -- Check REVOKE from authenticated on the 3 admin-only RAG RPCs
+  -- (NOT increment_block_mastery_attempts — authenticated grant is
+  --  intentionally preserved pending Phase 2 body hardening)
+  SELECT count(*) INTO v_bad_grants
+    FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid
+   WHERE n.nspname = 'public'
+     AND p.proname IN (
+       'rag_analytics_summary', 'rag_coarse_to_fine_search',
+       'rag_embedding_coverage'
+     )
+     AND has_function_privilege('authenticated', p.oid, 'EXECUTE');
+  IF v_bad_grants > 0 THEN
+    RAISE EXCEPTION 'REVOKE from authenticated failed on % RAG RPCs', v_bad_grants;
   END IF;
 
   -- Check search_path was set for resolve_parent_institution
