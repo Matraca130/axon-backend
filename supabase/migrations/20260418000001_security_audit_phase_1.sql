@@ -94,7 +94,7 @@ ALTER FUNCTION public.rag_hybrid_search(vector, text, uuid, uuid, integer, doubl
   SET search_path = public, pg_temp;
 
 -- award_xp had settings=null
-ALTER FUNCTION public.award_xp(uuid, uuid, text, integer, numeric, text, text, text)
+ALTER FUNCTION public.award_xp(uuid, uuid, text, integer, numeric, text, text, uuid)
   SET search_path = public, pg_temp;
 
 -- get_course_summary_ids had settings=null
