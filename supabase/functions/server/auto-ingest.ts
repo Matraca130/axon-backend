@@ -156,7 +156,7 @@ export async function autoChunkAndEmbed(
 ): Promise<AutoIngestResult> {
   const t0 = Date.now();
   const adminDb = getAdminClient();
-  const lockKey = advisoryLockKey(summaryId);
+  const lockKey = advisoryLockKey(`auto-ingest:${summaryId}`);
 
   const result = await withAdvisoryLock(
     adminDb,
