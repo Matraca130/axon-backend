@@ -7,7 +7,9 @@
  *   PUT  /me      — Update profile (full_name, avatar_url)
  *
  * Signup flow:
- *   1. Creates auth.users row via admin client (email_confirm: true)
+ *   1. Creates auth.users row via admin client (email_confirm: false — user
+ *      must confirm email before first usable login). Profile row is
+ *      created synchronously. NO auto-join — membership is admin-gated.
  *   2. Creates profiles row with same id
  *   3. Auto-joins user to first active institution as 'student'
  *   On profiles failure, rolls back auth.users row
@@ -86,6 +88,11 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
   const admin = getAdminClient();
 
   // Step 1: Create auth user
+  // SEC-PHASE-2.1 FIX (audit 2026-04-17 iter 11 #1): email_confirm=false so
+  // Supabase sends the confirmation link. Previously email_confirm=true let
+  // anyone-with-email-shaped-string create an active account and (combined
+  // with auto-join) get a real membership without owning the inbox. Now
+  // membership creation is gated by email verification.
   const { data: userData, error: authError } =
     await admin.auth.admin.createUser({
       email,
@@ -93,7 +100,7 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
       user_metadata: {
         full_name: typeof full_name === "string" ? full_name : "",
       },
-      email_confirm: true,
+      email_confirm: false,
     });
 
   if (authError) {
@@ -127,41 +134,26 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
     return safeErr(c, "Profile creation (auth rolled back)", profileError);
   }
 
-  // Step 3: Auto-join first active institution as 'student'
-  // This ensures new signups land directly in the platform.
-  // Non-critical: if it fails, user is still created — admin can add them later.
-  try {
-    const { data: firstInst } = await admin
-      .from("institutions")
-      .select("id")
-      .eq("is_active", true)
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .single();
+  // Step 3: NO auto-join.
+  // SEC-PHASE-2.2 FIX (audit 2026-04-17 iter 3 auth HIGH-2, kill-chain v3
+  // multi-chain prereq): the prior flow auto-attached every new signup as
+  // `student` to the OLDEST active institution. In a multi-tenant deploy,
+  // that gave anyone-who-signed-up a real membership in tenant #1, enabling
+  // cross-tenant content exfil (Chain 1), plan upgrade (Chain 2), refund
+  // abuse (Chain 8), and more.
+  //
+  // New flow: signup creates auth user + profile only. Membership happens
+  // via one of:
+  //   - Admin adds the user via POST /memberships
+  //   - Invite-token flow (future migration; see remediation plan Phase 2.2)
+  //   - Self-serve org creation via POST /institutions (user becomes owner
+  //     of their own fresh tenant)
+  //
+  // Until the invite-token flow lands, newly-verified users without a
+  // membership will land on a "pending-admin-approval" screen in the
+  // frontend (follow-up UI change).
 
-    if (firstInst) {
-      const { error: memberError } = await admin.from("memberships").insert({
-        user_id: userId,
-        institution_id: firstInst.id,
-        role: "student",
-        is_active: true,
-      });
-      if (memberError) {
-        // Log but don't fail signup — membership can be added manually
-        console.warn(
-          `[Axon] Auto-join failed for ${userId} → institution ${firstInst.id}: ${memberError.message}`,
-        );
-      } else {
-        console.log(`[Axon] Auto-joined ${userId} → institution ${firstInst.id} as student`);
-      }
-    } else {
-      console.warn("[Axon] No active institution found for auto-join");
-    }
-  } catch (e) {
-    console.warn(`[Axon] Auto-join exception: ${(e as Error).message}`);
-  }
-
-  return ok(c, { id: userId, email }, 201);
+  return ok(c, { id: userId, email, requires_email_confirmation: true }, 201);
 });
 
 // ─── GET /me ───────────────────────────────────────────────────
