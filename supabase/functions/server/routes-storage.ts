@@ -30,14 +30,26 @@ const MAX_BATCH_PATHS = 100;
 
 /**
  * SEC-AUDIT FIX: strict ownership check for storage paths.
- * Must start with "<validFolder>/<user.id>/" and must not contain traversal
- * or empty segments. The previous `p.includes(`/${user.id}/`)` accepted the
- * user UUID anywhere in the path, permitting crafted paths like
- * `x/<attacker>/../<victim>/file` to bypass the check.
+ * Must start with "<validFolder>/<user.id>/" and must not contain traversal,
+ * empty segments, backslashes, null bytes, or other control characters.
+ * The previous `p.includes(`/${user.id}/`)` accepted the user UUID anywhere
+ * in the path, permitting crafted paths like `x/<attacker>/../<victim>/file`
+ * to bypass the check.
+ *
+ * Upload paths are generated server-side as `${folder}/${user.id}/...`, so
+ * legitimate objects always satisfy this prefix. Anything else is refused.
  */
+// deno-lint-ignore no-control-regex
+const CONTROL_CHARS_RE = /[\x00-\x1f\x7f]/;
+
 function isOwnedStoragePath(path: string, userId: string): boolean {
   if (typeof path !== "string" || path.length === 0) return false;
-  if (path.includes("..") || path.includes("//") || path.startsWith("/")) return false;
+  if (path.length > 1024) return false; // Supabase storage key size guard
+  if (CONTROL_CHARS_RE.test(path)) return false;
+  if (path.includes("..")) return false;
+  if (path.includes("//")) return false;
+  if (path.includes("\\")) return false;
+  if (path.startsWith("/")) return false;
   return VALID_FOLDERS.some((folder) => path.startsWith(`${folder}/${userId}/`));
 }
 

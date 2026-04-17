@@ -5,7 +5,7 @@
  * and username. No phone hashing needed.
  *
  * Flow:
- *   1. Web UI: POST /telegram/link-code → generates 6-digit code
+ *   1. Web UI: POST /telegram/link-code → generates 10-digit code
  *   2. Telegram: User sends code to bot
  *   3. Bot: verifyLinkCode() → creates telegram_links row
  */
@@ -13,6 +13,7 @@
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, getAdminClient } from "../../db.ts";
 import { sendTextPlain } from "./tg-client.ts";
+import { createLinkingAttemptsTracker } from "../_messaging/linking-attempts.ts";
 
 // ─── Constants ───────────────────────────────────────────
 
@@ -21,6 +22,10 @@ const CODE_LENGTH = 10;          // SEC-AUDIT FIX: 6 digits (10^6) was brute-for
                                  // against concurrent linking sessions. 10 digits
                                  // (10^10) makes it infeasible under the existing
                                  // 10 msg/min rate limit for unlinked chat_ids.
+
+// SEC-AUDIT FIX: lock a chat out after 5 failed linking attempts per hour
+// as defense-in-depth on top of the entropy bump.
+const attempts = createLinkingAttemptsTracker("TG-Link");
 
 // ─── Code Generation ─────────────────────────────────────
 
@@ -106,7 +111,15 @@ export async function verifyLinkCode(
   chatId: number,
   username: string | undefined,
   code: string,
-): Promise<{ success: boolean; userId?: string }> {
+): Promise<{ success: boolean; userId?: string; lockedOut?: boolean }> {
+  const attemptKey = `tg:${chatId}`;
+
+  // SEC-AUDIT FIX: lock out chat after 5 failed attempts per hour.
+  if (!attempts.allow(attemptKey)) {
+    console.warn(`[TG-Link] Chat ${chatId} locked out (too many failed attempts)`);
+    return { success: false, lockedOut: true };
+  }
+
   const db = getAdminClient();
 
   const { data: sessions, error: searchError } = await db
@@ -130,6 +143,7 @@ export async function verifyLinkCode(
   });
 
   if (!matchingSession) {
+    attempts.recordFailure(attemptKey);
     return { success: false };
   }
 
@@ -172,6 +186,7 @@ export async function verifyLinkCode(
     .delete()
     .eq("chat_id", matchingSession.chat_id);
 
+  attempts.reset(attemptKey);
   console.warn(`[TG-Link] Telegram linked for user ${userId}. Chat: ${chatId}`);
 
   return { success: true, userId };

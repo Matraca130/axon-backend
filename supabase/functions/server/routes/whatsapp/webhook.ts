@@ -388,6 +388,12 @@ export async function handleIncoming(c: Context): Promise<Response> {
             "\u2022 \"C\u00f3mo voy en mis cursos?\"\n" +
             "\u2022 O cualquier pregunta acad\u00e9mica",
           );
+        } else if (result.lockedOut) {
+          await sendText(
+            from,
+            "Demasiados intentos fallidos. \u274c\n\n" +
+            "Esper\u00e1 una hora antes de volver a intentar vincular.",
+          );
         } else {
           await sendText(
             from,
