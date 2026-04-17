@@ -4,9 +4,10 @@ Historical + living record of security reviews on the Axon backend.
 
 ## Index
 
-| Audit | Date | Iterations | Findings | Status |
-|---|---|---|---|---|
-| [`2026-04-17-audit-full.md`](./2026-04-17-audit-full.md) | 2026-04-17 | 27 | 188 (6 CRITICAL + 65 HIGH + 99 MED + 18 LOW) | documented, remediation pending |
+| File | Type | Date | Scope |
+|---|---|---|---|
+| [`2026-04-17-audit-full.md`](./2026-04-17-audit-full.md) | Audit record | 2026-04-17 | 27 iterations, 188 findings, 15 attack chains |
+| [`2026-04-17-remediation-plan.md`](./2026-04-17-remediation-plan.md) | Action plan | 2026-04-17 | 5 phases, ~3-5 days of focused work, breaks 14/15 chains |
 
 ## Audit methodology
 
