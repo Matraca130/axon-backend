@@ -17,14 +17,28 @@ import { sendTextPlain } from "./tg-client.ts";
 // ─── Constants ───────────────────────────────────────────
 
 const CODE_EXPIRY_SECONDS = 300; // 5 minutes
+const CODE_LENGTH = 10;          // SEC-AUDIT FIX: 6 digits (10^6) was brute-forceable
+                                 // against concurrent linking sessions. 10 digits
+                                 // (10^10) makes it infeasible under the existing
+                                 // 10 msg/min rate limit for unlinked chat_ids.
 
 // ─── Code Generation ─────────────────────────────────────
 
 function generateCode(): string {
-  const array = new Uint32Array(1);
-  crypto.getRandomValues(array);
-  const code = 100_000 + (array[0] % 900_000);
-  return code.toString();
+  // Rejection sampling over 32-bit values to avoid modulo bias.
+  // We need a number in [0, 10^10). Each Uint32 gives 32 bits ≈ 4.29e9.
+  // Use two Uint32 values combined via BigInt for unbiased sampling.
+  const max = 10_000_000_000n; // 10^10
+  // 2^64 / 10^10 rounded down * 10^10 gives the largest unbiased upper bound.
+  const limit = (1n << 64n) - ((1n << 64n) % max);
+  while (true) {
+    const buf = new Uint32Array(2);
+    crypto.getRandomValues(buf);
+    const value = (BigInt(buf[0]) << 32n) | BigInt(buf[1]);
+    if (value < limit) {
+      return (value % max).toString().padStart(CODE_LENGTH, "0");
+    }
+  }
 }
 
 // ─── Web Endpoint: Generate Link Code ────────────────────
@@ -164,7 +178,7 @@ export async function verifyLinkCode(
 }
 
 export function isLinkingCode(text: string): boolean {
-  return /^\d{6}$/.test(text.trim());
+  return new RegExp(`^\\d{${CODE_LENGTH}}$`).test(text.trim());
 }
 
 // ─── Link Status ────────────────────────────────────────

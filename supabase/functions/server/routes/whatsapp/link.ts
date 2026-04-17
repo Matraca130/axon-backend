@@ -13,14 +13,24 @@ import { computeLookupHash } from "./webhook.ts";
 // ─── Constants ───────────────────────────────────────────
 
 const CODE_EXPIRY_SECONDS = 300; // 5 minutes
+const CODE_LENGTH = 10;          // SEC-AUDIT FIX: aligned with Telegram linking.
+                                 // Although WhatsApp ingress is gated by Meta HMAC,
+                                 // bumping entropy removes brute-force risk as
+                                 // defense-in-depth.
 
 // ─── Code Generation ─────────────────────────────────────
 
 function generateCode(): string {
-  const array = new Uint32Array(1);
-  crypto.getRandomValues(array);
-  const code = 100_000 + (array[0] % 900_000);
-  return code.toString();
+  const max = 10_000_000_000n; // 10^10
+  const limit = (1n << 64n) - ((1n << 64n) % max);
+  while (true) {
+    const buf = new Uint32Array(2);
+    crypto.getRandomValues(buf);
+    const value = (BigInt(buf[0]) << 32n) | BigInt(buf[1]);
+    if (value < limit) {
+      return (value % max).toString().padStart(CODE_LENGTH, "0");
+    }
+  }
 }
 
 // ─── Web Endpoint: Generate Link Code ─────────────────────
@@ -160,7 +170,7 @@ export async function verifyLinkCode(
 }
 
 export function isLinkingCode(text: string): boolean {
-  return /^\d{6}$/.test(text.trim());
+  return new RegExp(`^\\d{${CODE_LENGTH}}$`).test(text.trim());
 }
 
 // ─── Unlink Phone ───────────────────────────────────────
