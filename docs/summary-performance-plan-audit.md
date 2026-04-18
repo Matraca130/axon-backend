@@ -84,7 +84,39 @@ Por cada commit:
 - [ ] Smoke test manual (si hay dev deployment): `curl` un POST `/summaries/:id/publish` y verificar que la respuesta tiene `chunks_count > 0` y `blocks_embedded = total_blocks`.
 - [ ] Revisar logs: el string `[Auto-Ingest] Done:` debe seguir apareciendo con misma estructura.
 
-### 3.3 Post-Commit 3 (validación final)
+### 3.3 Mid-plan checkpoint — Verificación de paridad de embeddings (post-Commit 1, pre-Commit 2)
+
+Bloqueante. El Commit 1 no cambia comportamiento (solo evita un SELECT duplicado), por lo que es el punto natural para validar que el pipeline actual de embeddings sobre el JSON de bloques funciona correctamente. Si hay un bug latente, debe detectarse aquí — antes de que los Commits 2-3 cambien la generación masiva.
+
+Para 5 summaries reales con bloques (mezcla de tipos: `prose`, `key_point`, `comparison`, `list_detail`):
+
+- [ ] **C1 — Validez del flatten**:
+  - Ejecutar `flattenBlocksToMarkdown(blocks)` sobre cada summary.
+  - Comparar contra `summaries.content_markdown`. Divergencias son esperables si hubo edits post-publish; logear y aceptar.
+  - Verificar que el output no es vacío y no contiene literales `[object Object]` (indicaría un tipo de bloque sin handler).
+
+- [ ] **C2 — Validez de embeddings recién generados**:
+  - Llamar `generateEmbedding(flattened)` para cada summary.
+  - Verificar `embedding.length === 1536`.
+  - Verificar ausencia de `NaN` / `Infinity`: `embedding.every(Number.isFinite)`.
+  - Verificar norma L2 ≈ 1.0 (OpenAI los devuelve normalizados): `Math.abs(Math.sqrt(sum) - 1.0) < 0.01`.
+
+- [ ] **C3 — Paridad con embeddings almacenados**:
+  - Para cada bloque, calcular cosine similarity entre el embedding nuevo y el de `summary_block_embeddings.embedding`.
+  - **Criterio de paso**: similarity ≥ 0.999 si el contenido del bloque no cambió.
+  - Similarity entre 0.95-0.999: drift moderado (probable cambio en flatten o truncation) — investigar pero no bloquear.
+  - Similarity < 0.95: drift severo, **bloquear** los Commits 2-3 hasta entender la causa (modelo cambió, dimensión cambió, flatten roto).
+
+- [ ] **C4 — Sanity semántica**:
+  - Dos bloques `prose` del mismo summary (mismo tema): cosine ≥ 0.7.
+  - Dos bloques de summaries distintos sobre temas no relacionados: cosine < 0.5.
+  - Si falla, indica que los embeddings no capturan semántica (probable bug en flatten que produce texto basura).
+
+**Cómo ejecutar**: script ad-hoc Deno bajo `scripts/diagnostics/verify_embedding_parity.ts` (no commitear; ejecutar localmente con service role key). Salida: tabla con summary_id, block_id, similarity, pass/fail.
+
+**Si todos los chequeos pasan**: continuar con Commits 2-3 con confianza — solo cambian el *cómo* (batch + bulk insert), no el *qué* (mismo modelo, mismo flatten → mismos embeddings).
+
+### 3.4 Post-Commit 3 (validación final)
 
 - [ ] **Re-medir** el escenario baseline (mismo summary, mismo hardware). Calcular speedup p50 y p95.
 - [ ] **Query de sanidad**:
@@ -98,7 +130,7 @@ Por cada commit:
 - [ ] Verificar `summary_block_embeddings` no tiene duplicados por `block_id`.
 - [ ] Push + PR draft con comparativa baseline/post en la descripción.
 
-### 3.4 Herramientas / ejecución paralela
+### 3.5 Herramientas / ejecución paralela
 
 Para minimizar wall-clock del desarrollo:
 
