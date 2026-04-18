@@ -22,7 +22,7 @@ Frontend (React) --> Supabase Gateway --> Hono Edge Function --> PostgreSQL (RLS
 - **Framework:** Hono
 - **Database:** Supabase PostgreSQL with Row Level Security
 - **Auth:** Supabase Auth (JWT) with dual-header pattern
-- **AI:** Gemini 2.5 Flash (generation) + gemini-embedding-001 (embeddings, 768 dims)
+- **AI:** Claude (generation via `claude-ai.ts`) + gemini-embedding-001 (embeddings, 768 dims)
 - **CI/CD:** GitHub Actions auto-deploys to Supabase on push to `main`
 
 ## Backend Files
@@ -33,7 +33,8 @@ Frontend (React) --> Supabase Gateway --> Hono Edge Function --> PostgreSQL (RLS
 | `db.ts` | Supabase clients (admin/user), JWT auth, response helpers |
 | `crud-factory.ts` | Generic CRUD route generator (LIST/GET/POST/PUT/DELETE/RESTORE) |
 | `validate.ts` | Runtime validation guards (UUID, email, ranges, probabilities) |
-| `gemini.ts` | Gemini API helpers: `generateText()`, `generateEmbedding()`, `GENERATE_MODEL` constant |
+| `claude-ai.ts` | Claude API helpers for text generation: `generateText()`, `parseClaudeJson()`, `chat()`, model selectors |
+| `gemini.ts` | Gemini API helpers: `generateEmbedding()`, `extractTextFromPdf()`, `GENERATE_MODEL` constant (embedding-only — text generation lives in `claude-ai.ts`) |
 | `auth-helpers.ts` | Role-based access control: `requireInstitutionRole()`, role constants |
 | `rate-limit.ts` | In-memory sliding window rate limiter (120 req/min) |
 | `timing-safe.ts` | Constant-time string comparison for webhook signatures |

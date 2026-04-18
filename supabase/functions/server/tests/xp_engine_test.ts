@@ -155,106 +155,121 @@ Deno.test("XP_TABLE: complete_plan is the highest-value action", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// Stub Math.random for all awardXP tests
-// The 10% variable reward (Math.random < 0.1) makes tests flaky.
-// Stub globally before awardXP section; restore after last test.
-// ═══════════════════════════════════════════════════════════════
-const _origRandom = Math.random;
-Math.random = () => 0.5; // > 0.1, variable reward never triggers
-
-// ═══════════════════════════════════════════════════════════════
 // 2. awardXP — RPC Success Path
 // Note: awardXP uses getAdminClient().rpc() which hits 127.0.0.1:1
 // (ECONNREFUSED), so the RPC always fails and falls to JS fallback.
 // sanitizeOps/Resources: false needed because Supabase client
 // starts an autoRefreshToken interval.
+//
+// Math.random is stubbed per-test (try/finally) to prevent the 10%
+// variable reward (Skinner VR schedule) from making assertions flaky.
+// A module-level stub does NOT work because Deno.test() only
+// *registers* callbacks — they run after all top-level code finishes,
+// so a top-level restore would undo the stub before any test executes.
 // ═══════════════════════════════════════════════════════════════
 
 Deno.test({ name: "awardXP: returns AwardResult on successful RPC", sanitizeOps: false, sanitizeResources: false, fn: async () => {
-  const db = mockDb({
-    selectResult: {
-      data: { total_xp: 90, xp_today: 0, xp_this_week: 0 },
-      error: null,
-    },
-  });
+  const origRandom = Math.random;
+  Math.random = () => 0.5; // > 0.1, variable reward never triggers
+  try {
+    const db = mockDb({
+      selectResult: {
+        data: { total_xp: 90, xp_today: 0, xp_this_week: 0 },
+        error: null,
+      },
+    });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "review_correct",
-    xpBase: 10,
-  });
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "review_correct",
+      xpBase: 10,
+    });
 
-  assertExists(result);
-  assertEquals(result!.xp_awarded, 10);
-  assertEquals(result!.level, 2); // 90 + 10 = 100 XP → level 2
+    assertExists(result);
+    assertEquals(result!.xp_awarded, 10);
+    assertEquals(result!.level, 2); // 90 + 10 = 100 XP → level 2
+  } finally {
+    Math.random = origRandom;
+  }
 }});
 
 Deno.test({ name: "awardXP: on-time bonus adds +0.5 to multiplier", sanitizeOps: false, sanitizeResources: false, fn: async () => {
-  // Provide fsrsDueAt within 24h of now
-  const now = new Date();
-  const dueAt = new Date(now.getTime() - 1 * 60 * 60 * 1000); // 1h ago
+  const origRandom = Math.random;
+  Math.random = () => 0.5; // > 0.1, variable reward never triggers
+  try {
+    // Provide fsrsDueAt within 24h of now
+    const now = new Date();
+    const dueAt = new Date(now.getTime() - 1 * 60 * 60 * 1000); // 1h ago
 
-  const db = mockDb({
-    rpcResult: {
-      data: {
-        xp_awarded: 15,
-        xp_base: 10,
-        multiplier: 1.5,
-        bonus_type: "on_time",
-        daily_used: 15,
-        daily_cap: 500,
-        total_xp: 115,
-        level: 2,
+    const db = mockDb({
+      rpcResult: {
+        data: {
+          xp_awarded: 15,
+          xp_base: 10,
+          multiplier: 1.5,
+          bonus_type: "on_time",
+          daily_used: 15,
+          daily_cap: 500,
+          total_xp: 115,
+          level: 2,
+        },
+        error: null,
       },
-      error: null,
-    },
-  });
+    });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "review_correct",
-    xpBase: 10,
-    fsrsDueAt: dueAt.toISOString(),
-  });
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "review_correct",
+      xpBase: 10,
+      fsrsDueAt: dueAt.toISOString(),
+    });
 
-  assertExists(result);
-  // The RPC was called with multiplier >= 1.5 (on_time adds 0.5)
-  // We can't verify the exact RPC params, but the mock returns what we set
-  assertEquals(result!.xp_awarded, 15);
+    assertExists(result);
+    // Fallback path computes: xpBase(10) * multiplier(1.5 on_time) = 15
+    assertEquals(result!.xp_awarded, 15);
+  } finally {
+    Math.random = origRandom;
+  }
 }});
 
 Deno.test({ name: "awardXP: flow zone bonus for BKT p_know in [0.3, 0.7]", sanitizeOps: false, sanitizeResources: false, fn: async () => {
-  const db = mockDb({
-    rpcResult: {
-      data: {
-        xp_awarded: 13,
-        xp_base: 10,
-        multiplier: 1.25,
-        bonus_type: "flow_zone",
-        daily_used: 13,
-        daily_cap: 500,
-        total_xp: 113,
-        level: 2,
+  const origRandom = Math.random;
+  Math.random = () => 0.5; // > 0.1, variable reward never triggers
+  try {
+    const db = mockDb({
+      rpcResult: {
+        data: {
+          xp_awarded: 13,
+          xp_base: 10,
+          multiplier: 1.25,
+          bonus_type: "flow_zone",
+          daily_used: 13,
+          daily_cap: 500,
+          total_xp: 113,
+          level: 2,
+        },
+        error: null,
       },
-      error: null,
-    },
-  });
+    });
 
-  const result = await awardXP({
-    db,
-    studentId: "student-123",
-    institutionId: "inst-456",
-    action: "review_correct",
-    xpBase: 10,
-    bktPKnow: 0.5, // In flow zone [0.3, 0.7]
-  });
+    const result = await awardXP({
+      db,
+      studentId: "student-123",
+      institutionId: "inst-456",
+      action: "review_correct",
+      xpBase: 10,
+      bktPKnow: 0.5, // In flow zone [0.3, 0.7]
+    });
 
-  assertExists(result);
-  assertEquals(result!.bonus_type, "flow_zone");
+    assertExists(result);
+    assertEquals(result!.bonus_type, "flow_zone");
+  } finally {
+    Math.random = origRandom;
+  }
 }});
 
 Deno.test({ name: "awardXP: BKT p_know outside flow zone (0.9) gets no flow bonus", sanitizeOps: false, sanitizeResources: false, fn: async () => {
@@ -615,5 +630,3 @@ Deno.test({ name: "awardXP: bktPKnow at 0.29 is NOT in flow zone", sanitizeOps: 
   assertExists(result);
 }});
 
-// Restore Math.random after all awardXP tests
-Math.random = _origRandom;

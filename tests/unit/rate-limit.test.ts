@@ -21,17 +21,14 @@ import {
   checkRateLimitLocal,
 } from "../../supabase/functions/server/rate-limit.ts";
 
-Deno.test("extractKey: decodes JWT payload and returns uid prefix", () => {
-  // Valid JWT with sub claim
+Deno.test("extractKey: valid JWT → sig: prefix (no longer decodes payload)", () => {
   const validJWT =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3OC1hYmNkLWVmMDEtMjM0NSIsIm5hbWUiOiJKb2huIERvZSJ9.TJVA95OrM7E2cBab30RMHrHDcEfxjoYZgeFONFh7HgQ";
   const key = extractKey(validJWT);
-  assert(key.startsWith("uid:"), "Should extract user ID from JWT");
-  assertEquals(key, "uid:12345678-abcd-ef01-2345");
+  assert(key.startsWith("sig:"), "Should use signature-based key (SEC: no JWT decode)");
 });
 
-Deno.test("extractKey: uses signature as fallback when payload is invalid", () => {
-  // JWT with invalid payload (will fail base64 decode)
+Deno.test("extractKey: invalid payload JWT → sig: prefix", () => {
   const invalidPayloadJWT =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.!!!invalid!!!.signature";
   const key = extractKey(invalidPayloadJWT);
@@ -44,12 +41,11 @@ Deno.test("extractKey: uses raw fallback for malformed tokens", () => {
   assert(key.startsWith("raw:"), "Should fall back to raw token suffix");
 });
 
-Deno.test("extractKey: handles JWT without sub claim", () => {
-  // JWT without sub field
+Deno.test("extractKey: JWT without sub → sig: prefix", () => {
   const noSubJWT =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1lIjoiSm9obiBEb2UifQ.PpQMBWGQr14Huk5gSwuRwuMqk-3mOWs4pKYh9F1YXc8";
   const key = extractKey(noSubJWT);
-  assert(key.startsWith("sig:"), "Should fall back to signature when sub is missing");
+  assert(key.startsWith("sig:"), "Should use signature-based key");
 });
 
 Deno.test("checkRateLimitLocal: allows first request", () => {
@@ -290,4 +286,5 @@ Deno.test("extractKey: consistent for same JWT", () => {
   const key1 = extractKey(jwt);
   const key2 = extractKey(jwt);
   assertEquals(key1, key2, "Same JWT should always produce same key");
+  assert(key1.startsWith("sig:"), "Should use sig: prefix");
 });

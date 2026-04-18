@@ -8,17 +8,18 @@
 
 | Funcion | Modelo | Dims | Constante en codigo |
 |---------|--------|------|---------------------|
-| Generacion (flashcards, quiz) | `gemini-2.5-flash` | — | `GENERATE_MODEL` en `gemini.ts` |
+| Generacion (flashcards, quiz) | Claude (modelo via `getModelId`) | — | `claude-ai.ts` |
 | Embeddings | `gemini-embedding-001` | 3072 -> truncado a 768 via `outputDimensionality` | hardcoded en `generateEmbedding()` |
-| RAG Chat (respuesta) | `gemini-2.5-flash` | — | usa `generateText()` internamente |
+| RAG Chat (respuesta) | Claude | — | usa `generateText()` de `claude-ai.ts` |
 
-> Para cambiar el modelo de generacion, edita SOLO `GENERATE_MODEL` en `gemini.ts`. Todos los endpoints lo importan de ahi (single source of truth, fix D-18).
+> Para cambiar el modelo de generacion, edita el selector en `claude-ai.ts` (`getModelId`). Todos los endpoints lo importan de ahi (single source of truth).
 
 ### Archivos del modulo AI
 
 ```
 supabase/functions/server/
-├─ gemini.ts                    ← Helpers: generateText(), generateEmbedding(), parseGeminiJson(), GENERATE_MODEL
+├─ claude-ai.ts                 ← Helpers: generateText(), parseClaudeJson(), chat(), getModelId
+├─ gemini.ts                    ← Helpers: generateEmbedding(), extractTextFromPdf(), GENERATE_MODEL (legacy tag)
 └─ routes/ai/
    ├─ index.ts                  ← Combiner: monta los 4 sub-modulos
    ├─ generate.ts               ← POST /ai/generate (flashcards + quiz)
@@ -185,7 +186,7 @@ Pregunta con busqueda semantica hibrida (pgvector cosine + full-text via `to_tsv
 3. Llama RPC `rag_hybrid_search()` (pgvector cosine 70% + `ts_rank` FTS 30%, threshold 0.3, top 5)
 4. Fetch perfil del alumno via `get_student_knowledge_context()` RPC
 5. Construye prompt con contexto RAG + perfil + historial
-6. Genera respuesta con `generateText()` (temp 0.5, max 1500 tokens)
+6. Genera respuesta con `generateText()` de `claude-ai.ts` (temp 0.5, max 1500 tokens)
 
 ---
 

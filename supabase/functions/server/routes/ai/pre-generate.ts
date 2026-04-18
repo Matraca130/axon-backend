@@ -80,6 +80,7 @@ import { truncateForPrompt } from "./generate-smart-helpers.ts";
 import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
 import { validateQuizQuestion, validateFlashcard } from "../../lib/validate-llm-output.ts";
 import { checkPlanLimit } from "../plans/access.ts";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 export const aiPreGenerateRoutes = new Hono();
 
@@ -147,10 +148,7 @@ aiPreGenerateRoutes.post(
     // This DB call MUST happen before any Claude call.
     // authenticate() only decodes JWT locally; PostgREST validates
     // the cryptographic signature when this RPC executes.
-    const { data: institutionId } = await db.rpc(
-      "resolve_parent_institution",
-      { p_table: "summaries", p_id: summaryId },
-    );
+    const institutionId = await resolveInstitutionViaRpc(db, "summaries", summaryId);
     if (!institutionId)
       return err(c, "Summary not found or inaccessible", 404);
 
@@ -158,7 +156,7 @@ aiPreGenerateRoutes.post(
     const roleCheck = await requireInstitutionRole(
       db,
       user.id,
-      institutionId as string,
+      institutionId,
       CONTENT_WRITE_ROLES,
     );
     if (isDenied(roleCheck))

@@ -40,7 +40,7 @@
  */
 
 import type { Context, Next } from "npm:hono";
-import { extractToken, verifyJwt } from "./db.ts";
+// extractToken import removed — no longer used for rate-limit keying (SEC fix)
 
 // ─── Configuration ─────────────────────────────────────────────────
 
@@ -61,45 +61,25 @@ const CLEANUP_INTERVAL_MS = 5 * 60_000;
 // ─── Key Extraction ─────────────────────────────────────────────
 
 /**
- * Extract a stable per-user key from the JWT token.
+ * Extract a rate-limit key from a client IP address.
  *
- * C-1 FIX: The old implementation used token.substring(0, 32) which
- * returned the JWT header — identical for ALL Supabase HS256 tokens.
- * All users shared one 120 req/min bucket.
+ * SEC: Previously extracted `sub` from JWT payload via atob() without
+ * signature verification (C-1 FIX). An attacker could forge a JWT with
+ * any `sub` to hijack another user's rate-limit bucket or spread
+ * requests across fake buckets. Now uses only IP for pre-auth keying.
+ * Post-auth rate limiting (e.g. AI routes) should use the verified
+ * user ID from authenticate().
  *
- * Strategy:
- *   1. Primary: Decode JWT payload → extract `sub` (user UUID).
- *   2. Fallback: JWT signature (last segment), unique per token.
- *
- * Prefixes (uid:/sig:) prevent collisions between strategies.
+ * @deprecated extractKey(token) is no longer used. Kept for backward
+ * compatibility with any external callers during transition.
  */
 export function extractKey(token: string): string {
-  // ── Primary: decode JWT payload and use `sub` (user UUID) ──
-  try {
-    const parts = token.split(".");
-    if (parts.length === 3) {
-      let base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-      const pad = base64.length % 4;
-      if (pad === 1) throw new Error("invalid base64");
-      if (pad) base64 += "=".repeat(4 - pad);
-
-      const payload = JSON.parse(atob(base64));
-      if (typeof payload.sub === "string" && payload.sub.length > 0) {
-        return `uid:${payload.sub}`;
-      }
-    }
-  } catch {
-    // Decode failed — fall through to signature-based key
-  }
-
-  // ── Fallback: use JWT signature (unique per token issuance) ──
+  // Return a signature-based key as a safe fallback if anyone still calls this.
   const lastDot = token.lastIndexOf(".");
   if (lastDot !== -1 && lastDot < token.length - 1) {
     const sig = token.substring(lastDot + 1);
     return `sig:${sig.substring(0, 32)}`;
   }
-
-  // ── Last resort ──
   return `raw:${token.substring(Math.max(0, token.length - 32))}`;
 }
 
@@ -160,29 +140,14 @@ export async function rateLimitMiddleware(
     return next();
   }
 
-  // AUTH-014 FIX: Rate-limit both authenticated and unauthenticated requests.
-  //
-  // SEC-AUDIT FIX: JWT is verified cryptographically via jose (same path as
-  // `authenticate()`). A forged token can no longer pick an arbitrary `sub`
-  // to spawn a fresh rate-limit bucket — invalid tokens collapse to the
-  // IP-based bucket, so an attacker rotating forged payloads shares one
-  // limit with their IP. jose caches JWKS in-memory (~0.3ms after warm-up),
-  // so the extra verification is effectively free.
-  const token = extractToken(c);
-  const ipHeader = c.req.header("x-forwarded-for")?.split(",")[0]?.trim()
+  // SEC: Always use client IP for pre-auth rate limiting. The previous
+  // approach decoded JWT sub via atob() without signature verification,
+  // allowing bucket hijacking. Post-auth rate limiting (e.g. AI routes)
+  // uses the verified user ID from authenticate().
+  const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim()
     || c.req.header("x-real-ip")
     || "unknown";
-  let key: string;
-  if (token) {
-    const verified = await verifyJwt(token);
-    if ("sub" in verified) {
-      key = `uid:${verified.sub}`;
-    } else {
-      key = `ip:${ipHeader}`;
-    }
-  } else {
-    key = `ip:${ipHeader}`;
-  }
+  const key = `ip:${ip}`;
   const now = Date.now();
 
   // Periodic cleanup of expired entries

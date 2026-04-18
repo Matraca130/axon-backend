@@ -41,6 +41,7 @@ import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import { requireInstitutionRole, isDenied, ALL_ROLES } from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 export const subtopicsBatchRoutes = new Hono();
 
@@ -81,12 +82,9 @@ subtopicsBatchRoutes.get(
     }
 
     // ACCESS-005 FIX: Verify institution membership via first keyword
-    const { data: institutionId, error: resolveErr } = await db.rpc(
-      "resolve_parent_institution",
-      { p_table: "keywords", p_id: ids[0] },
-    );
+    const institutionId = await resolveInstitutionViaRpc(db, "keywords", ids[0]);
 
-    if (resolveErr || !institutionId) {
+    if (!institutionId) {
       return err(c, "Keyword not found or not accessible", 404);
     }
 

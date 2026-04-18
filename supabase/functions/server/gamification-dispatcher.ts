@@ -25,29 +25,9 @@
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { getAdminClient } from "./db.ts";
-
-// ─── Lock Key Derivation ────────────────────────────────────────
-
-/**
- * FNV-1a 32-bit hash → BigInt lock key.
- * Deterministic, fast, good distribution for advisory locks.
- */
-function fnv1a32(input: string): number {
-  let hash = 0x811c9dc5; // FNV offset basis
-  for (let i = 0; i < input.length; i++) {
-    hash ^= input.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193); // FNV prime
-  }
-  // Ensure positive 32-bit integer (pg advisory lock accepts bigint)
-  return hash >>> 0;
-}
-
-/**
- * Derive a deterministic advisory lock key for post-award evaluation.
- */
-function postEvalLockKey(studentId: string): number {
-  return fnv1a32(`${studentId}:post_eval`);
-}
+import { advisoryLockKey, withAdvisoryLock } from "./lib/advisory-lock.ts";
+import { evaluateSimpleCondition, evaluateCountBadge } from "./routes/gamification/helpers.ts";
+import { tryAwardBadge } from "./lib/badge-award.ts";
 
 // ─── Post-Award Evaluation ──────────────────────────────────────
 
@@ -84,78 +64,24 @@ export async function _postAwardEvaluation(
   institutionId: string,
 ): Promise<void> {
   const db: SupabaseClient = getAdminClient();
-  const lockKey = postEvalLockKey(studentId);
+  const lockKey = advisoryLockKey(`${studentId}:post_eval`);
 
-  // ── Step 1: Try to acquire advisory lock ──
-  let acquired = false;
-  try {
-    const { data, error } = await db.rpc("try_advisory_lock", {
-      lock_key: lockKey,
-    });
-
-    if (error) {
-      console.warn(
-        `[Gamification Dispatcher] try_advisory_lock RPC failed for student=${studentId}:`,
-        error.message,
+  await withAdvisoryLock(
+    db,
+    lockKey,
+    `post-eval:${studentId}`,
+    async () => {
+      console.info(
+        `[Gamification Dispatcher] Lock acquired for student=${studentId}, ` +
+          `lockKey=${lockKey}. Running post-award badge evaluation.`,
       );
-      // If the lock RPC itself fails, skip evaluation to be safe.
-      // The next XP event will retry.
-      return;
-    }
-
-    acquired = data === true;
-  } catch (e) {
-    console.warn(
-      `[Gamification Dispatcher] try_advisory_lock exception for student=${studentId}:`,
-      (e as Error).message,
-    );
-    return;
-  }
-
-  if (!acquired) {
-    console.info(
+      await _evaluateBadgesForStudent(db, studentId, institutionId);
+    },
+    () => console.info(
       `[Gamification Dispatcher] Lock not acquired for student=${studentId}, ` +
         `lockKey=${lockKey} — another request is already evaluating. Skipping.`,
-    );
-    return;
-  }
-
-  console.info(
-    `[Gamification Dispatcher] Lock acquired for student=${studentId}, ` +
-      `lockKey=${lockKey}. Running post-award badge evaluation.`,
+    ),
   );
-
-  // ── Step 2: Run badge evaluation (protected by lock) ──
-  try {
-    await _evaluateBadgesForStudent(db, studentId, institutionId);
-  } catch (e) {
-    console.warn(
-      `[Gamification Dispatcher] Badge evaluation failed for student=${studentId}:`,
-      (e as Error).message,
-    );
-  } finally {
-    // ── Step 3: Always release the lock ──
-    try {
-      const { error: unlockErr } = await db.rpc("advisory_unlock", {
-        lock_key: lockKey,
-      });
-      if (unlockErr) {
-        console.warn(
-          `[Gamification Dispatcher] advisory_unlock failed for student=${studentId}:`,
-          unlockErr.message,
-        );
-      } else {
-        console.info(
-          `[Gamification Dispatcher] Lock released for student=${studentId}, lockKey=${lockKey}.`,
-        );
-      }
-    } catch (e) {
-      console.warn(
-        `[Gamification Dispatcher] advisory_unlock exception for student=${studentId}:`,
-        (e as Error).message,
-      );
-    }
-  }
 }
 
 // ─── Badge Evaluation (mirrors check-badges route logic) ────────
@@ -170,12 +96,6 @@ async function _evaluateBadgesForStudent(
   studentId: string,
   institutionId: string,
 ): Promise<void> {
-  // Dynamically import to avoid circular dependency with badges.ts
-  const { evaluateSimpleCondition, evaluateCountBadge } = await import(
-    "./routes/gamification/helpers.ts"
-  );
-  const { awardXP } = await import("./xp-engine.ts");
-
   // 1. Fetch all active badge definitions
   const { data: allBadges, error: badgeErr } = await db
     .from("badge_definitions")
@@ -244,7 +164,7 @@ async function _evaluateBadgesForStudent(
     );
 
     if (allMet) {
-      const didAward = await _tryAwardBadge(db, studentId, institutionId, badge, awardXP);
+      const didAward = await tryAwardBadge(db, studentId, institutionId, badge);
       if (didAward) awarded++;
     }
   }
@@ -272,12 +192,11 @@ async function _evaluateBadgesForStudent(
 
     for (const result of evalResults) {
       if (result.status === "fulfilled" && result.value.met) {
-        const didAward = await _tryAwardBadge(
+        const didAward = await tryAwardBadge(
           db,
           studentId,
           institutionId,
           result.value.badge,
-          awardXP,
         );
         if (didAward) awarded++;
       }
@@ -291,72 +210,4 @@ async function _evaluateBadgesForStudent(
   }
 }
 
-// ─── Badge Award Helper ─────────────────────────────────────────
 
-/**
- * Attempt to award a single badge. Mirrors tryAwardBadge from badges.ts
- * with the same fresh-check + 23505 race handling.
- *
- * Returns true if the badge was newly awarded, false otherwise.
- */
-async function _tryAwardBadge(
-  db: SupabaseClient,
-  studentId: string,
-  institutionId: string,
-  badge: Record<string, unknown>,
-  // deno-lint-ignore no-explicit-any
-  awardXP: any,
-): Promise<boolean> {
-  // Fresh check: re-query to prevent stale-read double-awards
-  const { count: alreadyEarned } = await db
-    .from("student_badges")
-    .select("badge_id", { count: "exact", head: true })
-    .eq("student_id", studentId)
-    .eq("badge_id", badge.id as string);
-
-  if ((alreadyEarned ?? 0) > 0) return false;
-
-  const { error: insertErr } = await db
-    .from("student_badges")
-    .insert({
-      student_id: studentId,
-      badge_id: badge.id,
-      institution_id: institutionId,
-    });
-
-  if (insertErr) {
-    // 23505 = unique_violation (concurrent race)
-    if (insertErr.code === "23505") return false;
-    console.warn(
-      `[Gamification Dispatcher] Badge insert failed for "${badge.name}":`,
-      insertErr.message,
-    );
-    return false;
-  }
-
-  // Award badge XP reward
-  const xpReward = badge.xp_reward as number;
-  if (xpReward && xpReward > 0) {
-    try {
-      await awardXP({
-        db,
-        studentId,
-        institutionId,
-        action: `badge_${badge.slug}`,
-        xpBase: xpReward,
-        sourceType: "badge",
-        sourceId: badge.id as string,
-      });
-    } catch (e) {
-      console.warn(
-        `[Gamification Dispatcher] XP award for badge ${badge.slug} failed:`,
-        (e as Error).message,
-      );
-    }
-  }
-
-  return true;
-}
-
-// ─── Exported for testing ───────────────────────────────────────
-export { fnv1a32, postEvalLockKey };
