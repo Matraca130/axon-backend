@@ -5,18 +5,18 @@
  *
  * Active functions:
  *   extractTextFromPdf()  — Gemini 2.5 Flash multimodal PDF text extraction (Fase 7)
- *   fetchWithRetry()      — Shared fetch helper (also used by handler.ts)
+ *   fetchWithRetry()      — Thin wrapper over lib/fetch-with-retry.ts (429, 503)
+ *   parseGeminiJson()     — Backward-compat re-export of parseLlmJson
  *
  * REMOVED functions (hard errors):
  *   generateText()        — Use generateText() from claude-ai.ts
  *   generateEmbedding()   — Use openai-embeddings.ts instead (D57)
  *
  * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
- *
- * LA-02 FIX: Added AbortController timeout (30s for PDF extraction)
- * LA-06 FIX: Added retry with exponential backoff for 429/503
- * N3 FIX: Export fetchWithRetry so handler.ts can use it for callGemini
  */
+
+import { fetchWithRetry as _fetchWithRetry } from "./lib/fetch-with-retry.ts";
+import { parseLlmJson } from "./lib/parse-llm-json.ts";
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -32,8 +32,6 @@ export { getApiKey };
 
 // ─── Fetch with timeout + retry ─────────────────────────────────
 // N3 FIX: Exported so handler.ts callGemini can use retry logic
-
-import { fetchWithRetry as _fetchWithRetry } from "./lib/fetch-with-retry.ts";
 
 export function fetchWithRetry(
   url: string,
@@ -63,7 +61,6 @@ export function generateText(_opts: GeminiGenerateOpts): never {
     "Gemini is used ONLY for multimodal/PDF extraction (extractTextFromPdf).",
   );
 }
-
 
 // ─── Embeddings (REMOVED — W7-RAG01) ────────────────────────────
 //
@@ -184,4 +181,8 @@ export async function extractTextFromPdf(
   };
 }
 
-// parseGeminiJson() removed — use parseClaudeJson from claude-ai.ts
+// ─── Parse JSON safely from Gemini output ───────────────────────
+// Shared implementation in lib/parse-llm-json.ts. Re-exported for
+// backward compatibility; no consumers currently import this name.
+
+export const parseGeminiJson = parseLlmJson;

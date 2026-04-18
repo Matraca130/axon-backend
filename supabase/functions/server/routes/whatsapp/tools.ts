@@ -6,9 +6,10 @@
  * (handle_voice_message) stays inline here.
  *
  * Phase 3 changes:
- *   S14: handle_voice_message now uses Gemini multimodal STT
  *   S15: ask_academic_question uses full RAG pipeline
  *        (embeddings + hybrid search + re-ranking)
+ *   Note: voice messages are transcribed in transcribeVoiceMessage() (handler.ts)
+ *         before the agentic loop; handle_voice_message tool was removed post-migration.
  *
  * N8 FIX: Integrated formatters for check_progress, get_schedule,
  *         browse_content. Claude gets pre-formatted WhatsApp text.
@@ -45,8 +46,6 @@ import {
   type ToolExecutionResult,
 } from "../_messaging/tools-base.ts";
 
-export type { ToolExecutionResult, GeminiFunctionDeclaration };
-export { convertClaudeToolsToGemini };
 
 // ─── Tool Declarations for Claude API ─────────────────────
 
@@ -148,20 +147,6 @@ export const WHATSAPP_TOOLS: ClaudeTool[] = [
       properties: {},
     },
   },
-  {
-    name: "handle_voice_message",
-    description:
-      "Procesa un mensaje de voz: transcribe y responde. " +
-      "Se activa automaticamente cuando el alumno envia un audio.",
-    input_schema: {
-      type: "object",
-      properties: {
-        audio_base64: { type: "string", description: "Audio en base64" },
-        mime_type: { type: "string", description: "MIME type (e.g., audio/ogg)" },
-      },
-      required: ["audio_base64", "mime_type"],
-    },
-  },
 ];
 
 // ─── System Prompt ──────────────────────────────────────
@@ -255,16 +240,6 @@ export async function executeToolCall(
         return handleGenerateWeeklyReport(name, WA_SHARED_CONFIG);
 
       // ─── WhatsApp-only cases ───────────────────────────
-
-      case "handle_voice_message": {
-        return {
-          name,
-          result: {
-            message: "La transcripcion de voz se procesa automaticamente. " +
-              "El texto transcrito se envia como mensaje normal.",
-          },
-        };
-      }
 
       default:
         return { name, result: null, error: `Unknown tool: ${name}` };

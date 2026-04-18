@@ -26,7 +26,6 @@ import {
   WHATSAPP_TOOLS,
   WHATSAPP_SYSTEM_PROMPT,
   executeToolCall,
-  convertClaudeToolsToGemini,
 } from "./tools.ts";
 import {
   enterReviewMode,
@@ -69,70 +68,6 @@ interface SessionRow {
 const MAX_AGENTIC_ITERATIONS = 5;
 const MAX_HISTORY_TURNS = 6;
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
-
-// ─── Gemini Tool-Call Helper ─────────────────────────────
-// When calling Gemini with WHATSAPP_TOOLS (defined in Claude format),
-// we MUST convert input_schema → parameters via the adapter.
-// Without this, Gemini silently ignores the schemas and tool calls fail 100%.
-
-const GEMINI_TOOLS_CONVERTED = convertClaudeToolsToGemini(WHATSAPP_TOOLS);
-
-/**
- * Call Gemini generateContent with function-calling support.
- * Uses the pre-converted tool declarations so Gemini receives
- * `parameters` (not Claude's `input_schema`).
- */
-async function callGemini(
-  userMessage: string,
-  systemPrompt?: string,
-): Promise<{ text?: string; functionCall?: { name: string; args: Record<string, unknown> } }> {
-  const apiKey = getGeminiKey();
-  const url = `${GEMINI_BASE}/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
-
-  const body: Record<string, unknown> = {
-    contents: [{ parts: [{ text: userMessage }] }],
-    tools: [{ function_declarations: GEMINI_TOOLS_CONVERTED }],
-    generationConfig: {
-      temperature: 0.3,
-      maxOutputTokens: 1024,
-    },
-  };
-
-  if (systemPrompt) {
-    body.systemInstruction = { parts: [{ text: systemPrompt }] };
-  }
-
-  const res = await geminiFetchWithRetry(
-    url,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-    20_000,
-    2,
-  );
-
-  if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`Gemini API error ${res.status}: ${errBody}`);
-  }
-
-  const data = await res.json();
-  const candidate = data.candidates?.[0];
-  const part = candidate?.content?.parts?.[0];
-
-  if (part?.functionCall) {
-    return {
-      functionCall: {
-        name: part.functionCall.name,
-        args: part.functionCall.args ?? {},
-      },
-    };
-  }
-
-  return { text: part?.text ?? "" };
-}
 
 // ─── Session Management ─────────────────────────────────
 

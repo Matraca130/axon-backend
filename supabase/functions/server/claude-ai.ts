@@ -15,6 +15,9 @@
  * Environment: Reads ANTHROPIC_API_KEY from Deno.env (set via supabase secrets).
  */
 
+import { fetchWithRetry as _fetchWithRetry } from "./lib/fetch-retry.ts";
+import { parseLlmJson } from "./lib/parse-llm-json.ts";
+
 const CLAUDE_BASE = "https://api.anthropic.com/v1";
 const ANTHROPIC_VERSION = "2023-06-01";
 
@@ -43,6 +46,7 @@ function getApiKey(): string {
 export { getApiKey as getClaudeApiKey };
 
 // ─── Fetch with Timeout + Retry ──────────────────────────
+// Shared implementation in lib/fetch-retry.ts. Claude retries on 429, 503, 529.
 
 import { fetchWithRetry as _fetchWithRetry } from "./lib/fetch-with-retry.ts";
 
@@ -378,15 +382,4 @@ export async function generateTextStream(
 // ─── Parse JSON safely from Claude output ─────────────────
 // Strips markdown code fences (```json / ```) before parsing.
 
-export function parseClaudeJson<T = unknown>(text: string): T {
-  let cleaned = text.trim();
-  if (cleaned.startsWith("```json")) {
-    cleaned = cleaned.slice(7);
-  } else if (cleaned.startsWith("```")) {
-    cleaned = cleaned.slice(3);
-  }
-  if (cleaned.endsWith("```")) {
-    cleaned = cleaned.slice(0, -3);
-  }
-  return JSON.parse(cleaned.trim()) as T;
-}
+export const parseClaudeJson = parseLlmJson;
