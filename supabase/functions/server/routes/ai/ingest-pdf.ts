@@ -178,9 +178,17 @@ aiIngestPdfRoutes.post(`${PREFIX}/ai/ingest-pdf`, async (c: Context) => {
   const summaryId = newSummary.id as string;
 
   // Step 9: Upload PDF to Storage (non-critical)
+  // SEC: strip any path components and ".." from the filename before using it
+  // as a storage key, otherwise a crafted filename like "../other-tenant/x.pdf"
+  // could escape the tenant prefix and cross-write storage.
   let storagePath: string | null = null;
   try {
-    const filePath = `${institutionId}/${summaryId}/${originalFilename}`;
+    const safeFilename =
+      (originalFilename.split(/[\\/]/).pop() ?? "upload.pdf")
+        .replace(/\.\.+/g, "_")
+        .replace(/[^A-Za-z0-9._-]/g, "_")
+        .slice(0, 160) || "upload.pdf";
+    const filePath = `${institutionId}/${summaryId}/${safeFilename}`;
     const fileBuffer = await file.arrayBuffer();
     const { error: uploadErr } = await adminDb.storage
       .from(STORAGE_BUCKET)

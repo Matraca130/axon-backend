@@ -12,6 +12,7 @@ import type { AfterWriteParams } from "./crud-factory.ts";
 import { awardXP, XP_TABLE } from "./xp-engine.ts";
 import { getAdminClient } from "./db.ts";
 import { postAwardEvaluation } from "./gamification-dispatcher.ts";
+import { resolveInstitutionViaRpc, resolveInstitutionFromCourse } from "./lib/institution-resolver.ts";
 
 // --- Helper: Resolve institution_id from study session ---
 async function resolveInstitutionFromSession(
@@ -25,12 +26,7 @@ async function resolveInstitutionFromSession(
       .eq("id", sessionId)
       .single();
     if (!session?.course_id) return null;
-    const { data: course } = await db
-      .from("courses")
-      .select("institution_id")
-      .eq("id", session.course_id)
-      .single();
-    return course?.institution_id ?? null;
+    return resolveInstitutionFromCourse(db, session.course_id as string);
   } catch {
     return null;
   }
@@ -49,11 +45,7 @@ async function resolveInstitutionFromQuizQuestion(
       .eq("id", quizQuestionId)
       .single();
     if (!qq?.summary_id) return null;
-    const { data: instId } = await db.rpc("resolve_parent_institution", {
-      p_table: "summaries",
-      p_id: qq.summary_id,
-    });
-    return instId as string | null;
+    return resolveInstitutionViaRpc(db, "summaries", qq.summary_id as string);
   } catch {
     return null;
   }
@@ -275,10 +267,7 @@ export function xpHookForReadingComplete(params: AfterWriteParams): void {
       const summaryId = row.summary_id as string;
       if (!summaryId) return;
       const db = getAdminClient();
-      const { data: instId } = await db.rpc("resolve_parent_institution", {
-        p_table: "summaries",
-        p_id: summaryId,
-      });
+      const instId = await resolveInstitutionViaRpc(db, "summaries", summaryId);
       if (!instId) return;
       const bonus = await getBonusContext(userId);
       const result = await awardXP({

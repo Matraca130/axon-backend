@@ -21,6 +21,7 @@ import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
+import { isUuid } from "../../validate.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -94,6 +95,7 @@ trashRestoreRoutes.post(`${PREFIX}/restore/:table/:id`, async (c: Context) => {
 
   const tableParam = c.req.param("table");
   const id = c.req.param("id");
+  if (!isUuid(id)) return err(c, "id must be a valid UUID", 400);
   const realTable = RESTORE_WHITELIST[tableParam];
   if (!realTable) {
     return err(

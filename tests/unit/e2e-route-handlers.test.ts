@@ -35,26 +35,25 @@ function safeErrLocal(operation: string, _error: any, status = 500) {
 
 // ═══ RATE LIMITING — extractKey ═══
 
-Deno.test("extractKey: extracts sub from valid JWT payload as uid: prefix", () => {
-  // Build a fake JWT with a known sub
+Deno.test("extractKey: valid JWT → sig: prefix (SEC: no JWT decode)", () => {
   const payload = { sub: "550e8400-e29b-41d4-a716-446655440000", email: "test@test.com" };
   const h = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const b = btoa(JSON.stringify(payload)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   const token = `${h}.${b}.fake-signature`;
 
   const key = extractKey(token);
-  assertEquals(key, "uid:550e8400-e29b-41d4-a716-446655440000");
+  assert(key.startsWith("sig:"), `Expected sig: prefix, got: ${key}`);
 });
 
-Deno.test("extractKey: different users get different keys", () => {
-  function makeToken(sub: string): string {
+Deno.test("extractKey: different signatures get different keys", () => {
+  function makeToken(sub: string, sig: string): string {
     const h = btoa(JSON.stringify({ alg: "HS256" }));
     const b = btoa(JSON.stringify({ sub })).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-    return `${h}.${b}.sig`;
+    return `${h}.${b}.${sig}`;
   }
-  const key1 = extractKey(makeToken("user-111"));
-  const key2 = extractKey(makeToken("user-222"));
-  assert(key1 !== key2, "Different users must have different rate limit keys");
+  const key1 = extractKey(makeToken("user-111", "sig-aaa"));
+  const key2 = extractKey(makeToken("user-222", "sig-bbb"));
+  assert(key1 !== key2, "Different signatures must produce different rate limit keys");
 });
 
 Deno.test("extractKey: fallback to sig: prefix for invalid payload", () => {

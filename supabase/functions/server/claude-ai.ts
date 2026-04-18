@@ -48,13 +48,15 @@ export { getApiKey as getClaudeApiKey };
 // ─── Fetch with Timeout + Retry ──────────────────────────
 // Shared implementation in lib/fetch-retry.ts. Claude retries on 429, 503, 529.
 
-export async function fetchWithRetry(
+import { fetchWithRetry as _fetchWithRetry } from "./lib/fetch-with-retry.ts";
+
+export function fetchWithRetry(
   url: string,
   init: RequestInit,
   timeoutMs: number,
   maxRetries = 3,
 ): Promise<Response> {
-  return _fetchWithRetry(url, init, timeoutMs, maxRetries, [429, 503, 529]);
+  return _fetchWithRetry(url, init, timeoutMs, [429, 529, 503], "Claude", maxRetries);
 }
 
 // ─── Types ───────────────────────────────────────────────
@@ -378,7 +380,6 @@ export async function generateTextStream(
 }
 
 // ─── Parse JSON safely from Claude output ─────────────────
-// Shared implementation in lib/parse-llm-json.ts. Re-exported here for
-// backward compatibility with existing consumer imports.
+// Strips markdown code fences (```json / ```) before parsing.
 
 export const parseClaudeJson = parseLlmJson;

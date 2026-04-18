@@ -52,6 +52,7 @@ import {
   ALL_ROLES,
 } from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 export const flashcardsByTopicRoutes = new Hono();
 
@@ -76,15 +77,12 @@ flashcardsByTopicRoutes.get(
     }
 
     // ── Defense-in-depth: resolve institution + verify membership ──
-    const { data: institutionId } = await db.rpc("resolve_parent_institution", {
-      p_table: "topics",
-      p_id: topicId,
-    });
+    const institutionId = await resolveInstitutionViaRpc(db, "topics", topicId);
     if (!institutionId) {
       return err(c, "Topic not found or not linked to an institution", 404);
     }
     const roleCheck = await requireInstitutionRole(
-      db, user.id, institutionId as string, ALL_ROLES,
+      db, user.id, institutionId, ALL_ROLES,
     );
     if (isDenied(roleCheck)) {
       return err(c, roleCheck.message, roleCheck.status);

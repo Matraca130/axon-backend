@@ -17,15 +17,16 @@
  * because ALL bytes are always compared via XOR accumulation.
  */
 export function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-
   const encoder = new TextEncoder();
   const aBuf = encoder.encode(a);
   const bBuf = encoder.encode(b);
 
-  let result = 0;
-  for (let i = 0; i < aBuf.length; i++) {
-    result |= aBuf[i] ^ bBuf[i];
+  const maxLen = Math.max(aBuf.length, bBuf.length);
+  let result = aBuf.length ^ bBuf.length;
+  for (let i = 0; i < maxLen; i++) {
+    const aByte = i < aBuf.length ? aBuf[i] : 0;
+    const bByte = i < bBuf.length ? bBuf[i] : 0;
+    result |= aByte ^ bByte;
   }
 
   return result === 0;

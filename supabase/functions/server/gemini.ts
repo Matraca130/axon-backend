@@ -1,26 +1,26 @@
 /**
  * gemini.ts — Gemini API helpers for Axon v4.4
  *
- * ⚠️  MULTIMODAL / IMAGE ONLY — Text generation has moved to claude-ai.ts.
+ * ⚠️  MULTIMODAL / IMAGE ONLY — Text generation lives in claude-ai.ts.
  *
  * Active functions:
  *   extractTextFromPdf()  — Gemini 2.5 Flash multimodal PDF text extraction (Fase 7)
- *   fetchWithRetry()      — Thin wrapper over lib/fetch-retry.ts (429, 503)
+ *   fetchWithRetry()      — Thin wrapper over lib/fetch-with-retry.ts (429, 503)
  *   parseGeminiJson()     — Backward-compat re-export of parseLlmJson
  *
- * REMOVED functions:
- *   generateText()        — Text generation migrated to claude-ai.ts
- *   generateEmbedding()   — HARD ERROR: Use openai-embeddings.ts instead (D57)
+ * REMOVED functions (hard errors):
+ *   generateText()        — Use generateText() from claude-ai.ts
+ *   generateEmbedding()   — Use openai-embeddings.ts instead (D57)
  *
  * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
  */
 
-import { fetchWithRetry as _fetchWithRetry } from "./lib/fetch-retry.ts";
+import { fetchWithRetry as _fetchWithRetry } from "./lib/fetch-with-retry.ts";
 import { parseLlmJson } from "./lib/parse-llm-json.ts";
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
-export const GENERATE_MODEL = "gemini-2.5-flash";
+export const GEMINI_GENERATE_MODEL = "gemini-2.5-flash";
 
 function getApiKey(): string {
   const key = Deno.env.get("GEMINI_API_KEY");
@@ -30,16 +30,36 @@ function getApiKey(): string {
 
 export { getApiKey };
 
-// ─── Fetch with timeout + retry ─────────────
-// Shared implementation in lib/fetch-retry.ts. Gemini retries on 429, 503.
+// ─── Fetch with timeout + retry ─────────────────────────────────
+// N3 FIX: Exported so handler.ts callGemini can use retry logic
 
-export async function fetchWithRetry(
+export function fetchWithRetry(
   url: string,
   init: RequestInit,
   timeoutMs: number,
   maxRetries = 3,
 ): Promise<Response> {
-  return _fetchWithRetry(url, init, timeoutMs, maxRetries, [429, 503]);
+  return _fetchWithRetry(url, init, timeoutMs, [429, 503], "Gemini", maxRetries);
+}
+
+// ─── Text Generation ────────────────────────────────────────────
+
+interface GeminiGenerateOpts {
+  prompt: string;
+  systemPrompt?: string;
+  jsonMode?: boolean;
+  temperature?: number;
+  maxTokens?: number;
+}
+
+// deno-lint-ignore no-unused-vars
+export function generateText(_opts: GeminiGenerateOpts): never {
+  throw new Error(
+    "[Axon Fatal] gemini.ts generateText() is REMOVED. " +
+    "Use generateText() from claude-ai.ts instead. " +
+    "All text generation has moved to Claude (claude-sonnet-4-20250514). " +
+    "Gemini is used ONLY for multimodal/PDF extraction (extractTextFromPdf).",
+  );
 }
 
 // ─── Embeddings (REMOVED — W7-RAG01) ────────────────────────────
@@ -97,7 +117,7 @@ export async function extractTextFromPdf(
   mimeType: string = "application/pdf",
 ): Promise<PdfExtractResult> {
   const key = getApiKey();
-  const model = GENERATE_MODEL;
+  const model = GEMINI_GENERATE_MODEL;
   const url = `${GEMINI_BASE}/${model}:generateContent?key=${key}`;
 
   const body = {

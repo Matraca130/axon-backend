@@ -39,6 +39,7 @@ import {
   CONTENT_WRITE_ROLES,
 } from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 export const keywordConnectionRoutes = new Hono();
 
@@ -76,23 +77,6 @@ const CONNECTION_SELECT = [
 /**
  * H-5 helper: resolve institution_id from a keyword_id or connection ID.
  */
-async function resolveInstitution(
-  db: any,
-  table: string,
-  id: string,
-): Promise<string | null> {
-  try {
-    const { data, error } = await db.rpc("resolve_parent_institution", {
-      p_table: table,
-      p_id: id,
-    });
-    if (error || !data) return null;
-    return data as string;
-  } catch {
-    return null;
-  }
-}
-
 // LIST — get connections for a keyword (either side)
 // F1 FIX: Now joins keyword names to avoid N+1 on the frontend.
 // F3 FIX: Students only see connections where BOTH sides are published.
@@ -106,7 +90,7 @@ keywordConnectionRoutes.get(connBase, async (c: Context) => {
     return err(c, "Missing required query param: keyword_id", 400);
 
   // H-5 FIX: Verify caller is a member of the keyword's institution
-  const institutionId = await resolveInstitution(db, "keywords", keywordId);
+  const institutionId = await resolveInstitutionViaRpc(db, "keywords", keywordId);
   if (!institutionId) return err(c, "Keyword not found", 404);
   const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
@@ -174,7 +158,7 @@ keywordConnectionRoutes.get(`${connBase}/:id`, async (c: Context) => {
   const id = c.req.param("id");
 
   // H-5 FIX: Verify caller is a member of the connection's institution
-  const institutionId = await resolveInstitution(db, "keyword_connections", id);
+  const institutionId = await resolveInstitutionViaRpc(db, "keyword_connections", id);
   if (!institutionId) return err(c, "Connection not found", 404);
   const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
@@ -243,10 +227,10 @@ keywordConnectionRoutes.post(connBase, async (c: Context) => {
   }
 
   // H-5 FIX: Verify caller has write access + both keywords are in the same institution
-  const instA = await resolveInstitution(db, "keywords", keyword_a_id);
+  const instA = await resolveInstitutionViaRpc(db, "keywords", keyword_a_id);
   if (!instA) return err(c, "Keyword A not found", 404);
 
-  const instB = await resolveInstitution(db, "keywords", keyword_b_id);
+  const instB = await resolveInstitutionViaRpc(db, "keywords", keyword_b_id);
   if (!instB) return err(c, "Keyword B not found", 404);
 
   if (instA !== instB) {
@@ -295,7 +279,7 @@ keywordConnectionRoutes.delete(`${connBase}/:id`, async (c: Context) => {
   const id = c.req.param("id");
 
   // H-5 FIX: Verify caller has write access in the connection's institution
-  const institutionId = await resolveInstitution(db, "keyword_connections", id);
+  const institutionId = await resolveInstitutionViaRpc(db, "keyword_connections", id);
   if (!institutionId) return err(c, "Connection not found", 404);
   const roleCheck = await requireInstitutionRole(db, user.id, institutionId, CONTENT_WRITE_ROLES);
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);

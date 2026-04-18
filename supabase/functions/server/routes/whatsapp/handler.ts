@@ -14,7 +14,7 @@
  */
 
 import { getAdminClient } from "../../db.ts";
-import { getApiKey as getGeminiKey, GENERATE_MODEL as GEMINI_MODEL, fetchWithRetry as geminiFetchWithRetry } from "../../gemini.ts";
+import { getApiKey as getGeminiKey, GEMINI_GENERATE_MODEL as GEMINI_MODEL, fetchWithRetry as geminiFetchWithRetry } from "../../gemini.ts";
 import {
   chat as claudeChat,
   selectModelForTask,
