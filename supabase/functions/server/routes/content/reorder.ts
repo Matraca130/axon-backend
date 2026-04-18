@@ -22,6 +22,7 @@ import {
   CONTENT_WRITE_ROLES,
 } from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 export const reorderRoutes = new Hono();
 
@@ -148,12 +149,9 @@ reorderRoutes.put(`${PREFIX}/reorder`, async (c: Context) => {
   // their parents are user-scoped — checking would fail with 404.
   if (INSTITUTION_RESOLVABLE_TABLES.has(table)) {
     try {
-      const { data: institutionId, error: resolveErr } = await db.rpc(
-        "resolve_parent_institution",
-        { p_table: table, p_id: typedItems[0].id },
-      );
+      const institutionId = await resolveInstitutionViaRpc(db, table, typedItems[0].id as string);
 
-      if (resolveErr || !institutionId) {
+      if (!institutionId) {
         return err(c, "Cannot resolve institution for reorder items", 404);
       }
 

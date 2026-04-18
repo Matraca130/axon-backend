@@ -38,12 +38,14 @@
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "./db.ts";
 import { safeErr } from "./lib/safe-error.ts";
+import { isUuid } from "./validate.ts";
 import {
   requireInstitutionRole,
   isDenied,
   ALL_ROLES,
   CONTENT_WRITE_ROLES,
 } from "./auth-helpers.ts";
+import { resolveInstitutionViaRpc } from "./lib/institution-resolver.ts";
 import type { Context } from "npm:hono";
 
 // ─── Constants ────────────────────────────────────────────────────
@@ -167,16 +169,7 @@ async function resolveInstitutionFromParent(
   const parentTable = PARENT_KEY_TO_TABLE[parentKey];
   if (!parentTable) return null; // Unknown parent key → fail-closed
 
-  try {
-    const { data, error } = await db.rpc("resolve_parent_institution", {
-      p_table: parentTable,
-      p_id: parentValue,
-    });
-    if (error || !data) return null;
-    return data as string;
-  } catch {
-    return null;
-  }
+  return resolveInstitutionViaRpc(db, parentTable, parentValue);
 }
 
 /**
@@ -188,16 +181,7 @@ async function resolveInstitutionFromRow(
   table: string,
   rowId: string,
 ): Promise<string | null> {
-  try {
-    const { data, error } = await db.rpc("resolve_parent_institution", {
-      p_table: table,
-      p_id: rowId,
-    });
-    if (error || !data) return null;
-    return data as string;
-  } catch {
-    return null;
-  }
+  return resolveInstitutionViaRpc(db, table, rowId);
 }
 
 /**
@@ -286,7 +270,12 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     if (cfg.optionalFilters) {
       for (const f of cfg.optionalFilters) {
         const v = c.req.query(f);
-        if (v) query = query.eq(f, v);
+        if (v) {
+          if (f.endsWith("_id") && !isUuid(v)) {
+            return err(c, `${f} must be a valid UUID`, 400);
+          }
+          query = query.eq(f, v);
+        }
       }
     }
 

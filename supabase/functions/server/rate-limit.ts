@@ -12,16 +12,27 @@
  *         ~2-5ms latency per request for cross-isolate accuracy that
  *         Axon's current scale doesn't require. The DB table and RPC
  *         remain in PostgreSQL but are no longer called.
+ *   - RL-300: Bumped MAX_REQUESTS 120 → 300. The Smart Reader page
+ *         alone fires ~9 GETs in parallel on every summary load
+ *         (block-bookmarks, summary-blocks, chunks, keywords,
+ *         block-mastery, videos, text-annotations, sticky-notes,
+ *         reading-states), and a normal study session triggers
+ *         several reading-state PATCHes per minute. With the old
+ *         120/min cap, two summary loads + a chat exchange would
+ *         trip the limiter and surface "Limite de solicitudes de
+ *         IA excedido" to the user despite no abuse. 300 gives
+ *         5x headroom for the chat path while staying conservative
+ *         enough to detect a runaway client.
  *
  * Architecture:
  *   - Primary: In-memory Map (per-isolate, ~0ms overhead).
  *   - Trade-off: Each Deno isolate has its own counter. A user hitting
  *     N isolates gets up to N × MAX_REQUESTS per window. At Axon's
- *     scale (~1-2 isolates), this is 120-240 req/min — acceptable.
+ *     scale (~1-2 isolates), this is 300-600 req/min — acceptable.
  *
  * Configuration:
  *   - WINDOW_MS: 60,000ms (1 minute)
- *   - MAX_REQUESTS: 120 requests per window per user
+ *   - MAX_REQUESTS: 300 requests per window per user
  *
  * Exemptions:
  *   - Health check (/health)
@@ -29,12 +40,12 @@
  */
 
 import type { Context, Next } from "npm:hono";
-import { extractToken } from "./db.ts";
+// extractToken import removed — no longer used for rate-limit keying (SEC fix)
 
 // ─── Configuration ─────────────────────────────────────────────────
 
 export const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
-export const RATE_LIMIT_MAX_REQUESTS = 120;  // 120 req/min/user
+export const RATE_LIMIT_MAX_REQUESTS = 300;  // 300 req/min/user
 
 // ─── In-Memory State ────────────────────────────────────────────
 
@@ -50,45 +61,25 @@ const CLEANUP_INTERVAL_MS = 5 * 60_000;
 // ─── Key Extraction ─────────────────────────────────────────────
 
 /**
- * Extract a stable per-user key from the JWT token.
+ * Extract a rate-limit key from a client IP address.
  *
- * C-1 FIX: The old implementation used token.substring(0, 32) which
- * returned the JWT header — identical for ALL Supabase HS256 tokens.
- * All users shared one 120 req/min bucket.
+ * SEC: Previously extracted `sub` from JWT payload via atob() without
+ * signature verification (C-1 FIX). An attacker could forge a JWT with
+ * any `sub` to hijack another user's rate-limit bucket or spread
+ * requests across fake buckets. Now uses only IP for pre-auth keying.
+ * Post-auth rate limiting (e.g. AI routes) should use the verified
+ * user ID from authenticate().
  *
- * Strategy:
- *   1. Primary: Decode JWT payload → extract `sub` (user UUID).
- *   2. Fallback: JWT signature (last segment), unique per token.
- *
- * Prefixes (uid:/sig:) prevent collisions between strategies.
+ * @deprecated extractKey(token) is no longer used. Kept for backward
+ * compatibility with any external callers during transition.
  */
 export function extractKey(token: string): string {
-  // ── Primary: decode JWT payload and use `sub` (user UUID) ──
-  try {
-    const parts = token.split(".");
-    if (parts.length === 3) {
-      let base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-      const pad = base64.length % 4;
-      if (pad === 1) throw new Error("invalid base64");
-      if (pad) base64 += "=".repeat(4 - pad);
-
-      const payload = JSON.parse(atob(base64));
-      if (typeof payload.sub === "string" && payload.sub.length > 0) {
-        return `uid:${payload.sub}`;
-      }
-    }
-  } catch {
-    // Decode failed — fall through to signature-based key
-  }
-
-  // ── Fallback: use JWT signature (unique per token issuance) ──
+  // Return a signature-based key as a safe fallback if anyone still calls this.
   const lastDot = token.lastIndexOf(".");
   if (lastDot !== -1 && lastDot < token.length - 1) {
     const sig = token.substring(lastDot + 1);
     return `sig:${sig.substring(0, 32)}`;
   }
-
-  // ── Last resort ──
   return `raw:${token.substring(Math.max(0, token.length - 32))}`;
 }
 
@@ -149,18 +140,14 @@ export async function rateLimitMiddleware(
     return next();
   }
 
-  // AUTH-014 FIX: Rate-limit both authenticated and unauthenticated requests.
-  // Authenticated: key from JWT sub. Unauthenticated: key from client IP.
-  const token = extractToken(c);
-  let key: string;
-  if (token) {
-    key = extractKey(token);
-  } else {
-    const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim()
-      || c.req.header("x-real-ip")
-      || "unknown";
-    key = `ip:${ip}`;
-  }
+  // SEC: Always use client IP for pre-auth rate limiting. The previous
+  // approach decoded JWT sub via atob() without signature verification,
+  // allowing bucket hijacking. Post-auth rate limiting (e.g. AI routes)
+  // uses the verified user ID from authenticate().
+  const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim()
+    || c.req.header("x-real-ip")
+    || "unknown";
+  const key = `ip:${ip}`;
   const now = Date.now();
 
   // Periodic cleanup of expired entries

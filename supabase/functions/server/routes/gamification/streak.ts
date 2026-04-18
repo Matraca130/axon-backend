@@ -20,6 +20,7 @@ import { isUuid } from "../../validate.ts";
 import { computeStreakStatus, performDailyCheckIn } from "../../streak-engine.ts";
 import { awardXP, XP_TABLE } from "../../xp-engine.ts";
 import { FREEZE_COST_XP, MAX_FREEZES, REPAIR_BASE_COST_XP } from "./helpers.ts";
+import { advisoryLockKey, tryAcquireAdvisoryLock, releaseAdvisoryLock } from "../../lib/advisory-lock.ts";
 
 export const streakRoutes = new Hono();
 
@@ -149,10 +150,13 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
 
   // --- Fallback path: read-then-write with advisory lock (C-003) ---
   // Advisory lock serializes concurrent freeze-buy requests per student.
-  const lockKey = Math.abs(hashCode(user.id + ":streak_freeze"));
-  const { data: lockAcquired } = await adminDb.rpc("try_advisory_lock", {
-    lock_key: lockKey,
-  });
+  const lockKey = advisoryLockKey(`${user.id}:streak_freeze`);
+  let lockAcquired: boolean;
+  try {
+    lockAcquired = await tryAcquireAdvisoryLock(adminDb, lockKey);
+  } catch (e) {
+    return safeErr(c, "Advisory lock (streak-freeze)", e instanceof Error ? e : null);
+  }
 
   if (!lockAcquired) {
     return err(c, "Otra operacion de compra esta en progreso. Intenta de nuevo.", 409);
@@ -198,6 +202,19 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
       );
     }
 
+    // RPC-ONLY RULE NOTE:
+    //   The primary path for this endpoint is the atomic `buy_streak_freeze`
+    //   RPC (see above, which handles UPDATE student_xp + INSERT
+    //   xp_transactions in a single transaction). This fallback only runs
+    //   when the RPC is not deployed / errors out.
+    //
+    //   awardXP() / award_xp RPC reject xpBase <= 0, so they cannot be used
+    //   for deductions. There is no dedicated `deduct_xp` RPC yet.
+    //
+    //   TODO: Create a `deduct_xp` RPC (mirror of award_xp) and replace this
+    //   manual UPDATE + xp_transactions INSERT. Until then, we defer the
+    //   streak_freezes INSERT until after the XP deduction succeeds and
+    //   roll back on failure to preserve transactional safety.
     const { error: deductErr } = await adminDb
       .from("student_xp")
       .update({
@@ -255,7 +272,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
       freezes_owned: (currentFreezes ?? 0) + 1,
     });
   } finally {
-    await adminDb.rpc("advisory_unlock", { lock_key: lockKey }).catch(() => {});
+    await releaseAdvisoryLock(adminDb, lockKey, "streak-freeze");
   }
 });
 
@@ -291,10 +308,13 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
   // double-spend. The lock key is derived from the student UUID hash so each
   // student gets their own lock, but concurrent repairs by the SAME student
   // are serialized.
-  const lockKey = Math.abs(hashCode(user.id + ":streak_repair"));
-  const { data: lockAcquired } = await adminDb.rpc("try_advisory_lock", {
-    lock_key: lockKey,
-  });
+  const lockKey = advisoryLockKey(`${user.id}:streak_repair`);
+  let lockAcquired: boolean;
+  try {
+    lockAcquired = await tryAcquireAdvisoryLock(adminDb, lockKey);
+  } catch (e) {
+    return safeErr(c, "Advisory lock (streak-repair)", e instanceof Error ? e : null);
+  }
 
   if (!lockAcquired) {
     return err(c, "Otra operacion de reparacion esta en progreso. Intenta de nuevo.", 409);
@@ -321,6 +341,18 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
       );
     }
 
+    // RPC-ONLY RULE NOTE:
+    //   awardXP() / award_xp RPC reject xpBase <= 0, so they cannot be used
+    //   for deductions. There is no dedicated `deduct_xp` RPC nor a
+    //   `repair_streak` RPC analogous to `buy_streak_freeze`.
+    //
+    //   TODO: Create either a `deduct_xp` RPC or an atomic
+    //   `repair_streak` RPC (modelled on `buy_streak_freeze`) that wraps
+    //   the XP deduction + xp_transactions INSERT + student_stats UPDATE
+    //   in a single transaction. Until then, we sequence the side-effects
+    //   (streak restore, repair record, tx log) AFTER the XP mutation and
+    //   roll back the deduction on streak-restore failure to keep this
+    //   transactionally safe within JS.
     const { error: deductErr } = await adminDb
       .from("student_xp")
       .update({
@@ -390,21 +422,7 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
       remaining_xp: totalXp - repairCost,
     });
   } finally {
-    await adminDb.rpc("advisory_unlock", { lock_key: lockKey }).catch(() => {});
+    await releaseAdvisoryLock(adminDb, lockKey, "streak-repair");
   }
 });
 
-// ─── Internal Helpers ────────────────────────────────────────
-
-/**
- * Simple string hash to generate advisory lock keys.
- * Returns a 32-bit integer (safe for pg_try_advisory_lock).
- */
-function hashCode(str: string): number {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const ch = str.charCodeAt(i);
-    hash = ((hash << 5) - hash + ch) | 0; // Convert to 32-bit int
-  }
-  return hash;
-}

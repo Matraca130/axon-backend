@@ -57,6 +57,10 @@ export async function verifyMuxWebhook(
     const v1 = parts["v1"];
     if (!timestamp || !v1) return false;
 
+    // SEC: Reject stale webhooks (>5 min) to prevent replay attacks
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (Math.abs(nowSec - parseInt(timestamp, 10)) > 300) return false;
+
     const signedPayload = `${timestamp}.${body}`;
     const sigBytes = new Uint8Array(
       v1.match(/.{2}/g)!.map((b) => parseInt(b, 16)),

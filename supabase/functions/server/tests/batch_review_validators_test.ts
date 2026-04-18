@@ -66,7 +66,7 @@ Deno.test("mapToFsrsGrade: 4 -> 4 (Easy)", () => {
   assertEquals(mapToFsrsGrade(4), 4);
 });
 
-Deno.test("mapToFsrsGrade: 5 -> 4 (legacy SM-2 grade 5 maps to Easy)", () => {
+Deno.test("mapToFsrsGrade: 5 -> 4 (UI rating 5 maps to FSRS Easy)", () => {
   assertEquals(mapToFsrsGrade(5), 4);
 });
 
@@ -139,11 +139,21 @@ Deno.test("validateReviewItem: missing instrument_type", () => {
   assertEquals(result.error!.includes("instrument_type"), true);
 });
 
-Deno.test("validateReviewItem: grade out of range", () => {
+Deno.test("validateReviewItem: grade out of range (high)", () => {
   const result = validateReviewItem({
     item_id: VALID_UUID,
     instrument_type: "flashcard",
     grade: 6,
+  }, 0);
+  assertEquals(result.valid, null);
+  assertEquals(result.error!.includes("grade"), true);
+});
+
+Deno.test("validateReviewItem: grade=0 rejected (prevents silent collapse to Again)", () => {
+  const result = validateReviewItem({
+    item_id: VALID_UUID,
+    instrument_type: "flashcard",
+    grade: 0,
   }, 0);
   assertEquals(result.valid, null);
   assertEquals(result.error!.includes("grade"), true);

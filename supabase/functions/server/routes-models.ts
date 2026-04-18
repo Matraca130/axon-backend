@@ -22,6 +22,7 @@ import {
   isDenied,
   ALL_ROLES,
 } from "./auth-helpers.ts";
+import { resolveInstitutionViaRpc } from "./lib/institution-resolver.ts";
 import type { Context } from "npm:hono";
 
 const modelRoutes = new Hono();
@@ -57,17 +58,14 @@ modelRoutes.get(`${PREFIX}/models-3d/batch`, async (c: Context) => {
   }
 
   try {
-    const { data: instData, error: instErr } = await db.rpc(
-      "resolve_parent_institution",
-      { p_table: "topics", p_id: topicIds[0] },
-    );
-    if (instErr || !instData) {
+    const instData = await resolveInstitutionViaRpc(db, "topics", topicIds[0]);
+    if (!instData) {
       return err(c, "Cannot resolve institution for this resource", 404);
     }
     const roleCheck = await requireInstitutionRole(
       db,
       user.id,
-      instData as string,
+      instData,
       ALL_ROLES,
     );
     if (isDenied(roleCheck)) {

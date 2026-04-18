@@ -35,26 +35,25 @@ function safeErrLocal(operation: string, _error: any, status = 500) {
 
 // ═══ RATE LIMITING — extractKey ═══
 
-Deno.test("extractKey: extracts sub from valid JWT payload as uid: prefix", () => {
-  // Build a fake JWT with a known sub
+Deno.test("extractKey: valid JWT → sig: prefix (SEC: no JWT decode)", () => {
   const payload = { sub: "550e8400-e29b-41d4-a716-446655440000", email: "test@test.com" };
   const h = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const b = btoa(JSON.stringify(payload)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   const token = `${h}.${b}.fake-signature`;
 
   const key = extractKey(token);
-  assertEquals(key, "uid:550e8400-e29b-41d4-a716-446655440000");
+  assert(key.startsWith("sig:"), `Expected sig: prefix, got: ${key}`);
 });
 
-Deno.test("extractKey: different users get different keys", () => {
-  function makeToken(sub: string): string {
+Deno.test("extractKey: different signatures get different keys", () => {
+  function makeToken(sub: string, sig: string): string {
     const h = btoa(JSON.stringify({ alg: "HS256" }));
     const b = btoa(JSON.stringify({ sub })).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-    return `${h}.${b}.sig`;
+    return `${h}.${b}.${sig}`;
   }
-  const key1 = extractKey(makeToken("user-111"));
-  const key2 = extractKey(makeToken("user-222"));
-  assert(key1 !== key2, "Different users must have different rate limit keys");
+  const key1 = extractKey(makeToken("user-111", "sig-aaa"));
+  const key2 = extractKey(makeToken("user-222", "sig-bbb"));
+  assert(key1 !== key2, "Different signatures must produce different rate limit keys");
 });
 
 Deno.test("extractKey: fallback to sig: prefix for invalid payload", () => {
@@ -76,25 +75,25 @@ Deno.test("rate limit: first request is allowed", () => {
   assertEquals(result.current, 1);
 });
 
-Deno.test("rate limit: 120 requests within window are allowed", () => {
+Deno.test("rate limit: requests within window are allowed up to MAX_REQUESTS", () => {
   rateLimitMap.clear();
   const now = Date.now();
   let result;
   for (let i = 0; i < RATE_LIMIT_MAX_REQUESTS; i++) {
     result = checkRateLimitLocal("test-user-2", now);
   }
-  assert(result!.allowed, "Request #120 should be allowed");
+  assert(result!.allowed, `Request #${RATE_LIMIT_MAX_REQUESTS} should be allowed`);
   assertEquals(result!.current, RATE_LIMIT_MAX_REQUESTS);
 });
 
-Deno.test("rate limit: request #121 is rejected", () => {
+Deno.test("rate limit: request beyond MAX_REQUESTS is rejected", () => {
   rateLimitMap.clear();
   const now = Date.now();
   for (let i = 0; i < RATE_LIMIT_MAX_REQUESTS; i++) {
     checkRateLimitLocal("test-user-3", now);
   }
   const result = checkRateLimitLocal("test-user-3", now);
-  assert(!result.allowed, "Request #121 should be rejected");
+  assert(!result.allowed, `Request #${RATE_LIMIT_MAX_REQUESTS + 1} should be rejected`);
   assert(result.retryAfterMs! > 0, "Should include retry-after");
 });
 
@@ -146,8 +145,18 @@ Deno.test("rate limit: window is 60 seconds", () => {
   assertEquals(RATE_LIMIT_WINDOW_MS, 60_000);
 });
 
-Deno.test("rate limit: max requests is 120 per window", () => {
-  assertEquals(RATE_LIMIT_MAX_REQUESTS, 120);
+Deno.test("rate limit: max requests is set to a sane positive integer", () => {
+  // Don't pin a specific number — the constant evolves (was 120, now 300)
+  // and the test should track the source of truth in rate-limit.ts.
+  // Just guard against accidental zero/negative/huge values.
+  assert(
+    Number.isInteger(RATE_LIMIT_MAX_REQUESTS),
+    "MAX_REQUESTS must be an integer",
+  );
+  assert(
+    RATE_LIMIT_MAX_REQUESTS > 0 && RATE_LIMIT_MAX_REQUESTS <= 10_000,
+    `MAX_REQUESTS must be in (0, 10000], got ${RATE_LIMIT_MAX_REQUESTS}`,
+  );
 });
 
 // ═══ CORS — Origin Validation ═══

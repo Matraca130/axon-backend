@@ -36,6 +36,8 @@ import {
 import { chunkSemantic, type SemanticChunkResult } from "./semantic-chunker.ts";
 import { generateEmbedding, generateEmbeddings } from "./openai-embeddings.ts";
 import { getAdminClient } from "./db.ts";
+import { flattenBlocksToMarkdown } from "./block-flatten.ts";
+import { advisoryLockKey, withAdvisoryLock } from "./lib/advisory-lock.ts";
 import { crypto } from "https://deno.land/std/crypto/mod.ts";
 import { encodeHex } from "https://deno.land/std/encoding/hex.ts";
 
@@ -98,21 +100,6 @@ export async function embedSummaryContent(
   }
 }
 
-// ─── Advisory Lock ──────────────────────────────────────────────────
-
-/**
- * Compute a stable advisory lock key from a UUID string.
- * pg_try_advisory_lock uses bigint; we hash the summaryId to get a
- * deterministic 32-bit integer (safe for advisory lock).
- */
-function advisoryLockKey(summaryId: string): number {
-  let hash = 0;
-  for (let i = 0; i < summaryId.length; i++) {
-    hash = ((hash << 5) - hash + summaryId.charCodeAt(i)) | 0;
-  }
-  return hash;
-}
-
 // ─── Retry with Exponential Backoff ─────────────────────────────────
 
 const MAX_RETRIES = 3;
@@ -169,17 +156,17 @@ export async function autoChunkAndEmbed(
 ): Promise<AutoIngestResult> {
   const t0 = Date.now();
   const adminDb = getAdminClient();
-  const lockKey = advisoryLockKey(summaryId);
+  const lockKey = advisoryLockKey(`auto-ingest:${summaryId}`);
 
-  // Acquire advisory lock to prevent concurrent ingest of the same summary
-  const { data: lockAcquired } = await adminDb.rpc("try_advisory_lock", {
-    lock_key: lockKey,
-  });
+  const result = await withAdvisoryLock(
+    adminDb,
+    lockKey,
+    `auto-ingest:${summaryId}`,
+    () => _autoChunkAndEmbedCore(adminDb, summaryId, institutionId, t0, options, strategy),
+    () => console.info(`[Auto-Ingest] Skipping summary ${summaryId} — advisory lock not acquired`),
+  );
 
-  if (!lockAcquired) {
-    console.info(
-      `[Auto-Ingest] Skipping summary ${summaryId} — advisory lock not acquired`,
-    );
+  if (result === null) {
     return {
       summary_id: summaryId,
       chunks_created: 0,
@@ -193,7 +180,17 @@ export async function autoChunkAndEmbed(
     };
   }
 
-  try {
+  return result;
+}
+
+async function _autoChunkAndEmbedCore(
+  adminDb: ReturnType<typeof getAdminClient>,
+  summaryId: string,
+  institutionId: string,
+  t0: number,
+  options?: ChunkOptions,
+  strategy?: "recursive" | "semantic" | "auto",
+): Promise<AutoIngestResult> {
   console.info(
     `[Auto-Ingest] Processing summary ${summaryId} (institution: ${institutionId})`,
   );
@@ -212,10 +209,48 @@ export async function autoChunkAndEmbed(
     );
   }
 
-  // Step 2: Guard empty content
-  const contentMarkdown = summary.content_markdown as string | null;
+  // Step 2: Resolve source-of-truth content for chunking.
+  //
+  // Block-based summaries (Smart Reader) store their canonical
+  // content in the summary_blocks table. content_markdown is
+  // only populated on explicit publish and goes stale after
+  // block edits. We prefer blocks when they exist and fall
+  // back to content_markdown for legacy / PDF-ingested summaries.
+  const title = (summary.title as string) ?? "";
+  const contentMarkdown = (summary.content_markdown as string | null) ?? "";
 
-  if (!contentMarkdown || contentMarkdown.trim().length === 0) {
+  let sourceText = "";
+  let sourceKind: "blocks" | "content_markdown" | "none" = "none";
+
+  const { data: blockRows, error: blocksErr } = await adminDb
+    .from("summary_blocks")
+    .select("id, type, content, order_index")
+    .eq("summary_id", summaryId)
+    .eq("is_active", true)
+    .order("order_index", { ascending: true });
+
+  if (blocksErr) {
+    console.warn(
+      `[Auto-Ingest] Could not fetch blocks for ${summaryId}: ${blocksErr.message}. ` +
+        `Falling back to content_markdown.`,
+    );
+  }
+
+  if (blockRows && blockRows.length > 0) {
+    // deno-lint-ignore no-explicit-any
+    const flattened = flattenBlocksToMarkdown(blockRows as any);
+    if (flattened.trim().length > 0) {
+      sourceText = flattened;
+      sourceKind = "blocks";
+    }
+  }
+
+  if (sourceKind === "none" && contentMarkdown.trim().length > 0) {
+    sourceText = contentMarkdown;
+    sourceKind = "content_markdown";
+  }
+
+  if (sourceKind === "none") {
     return {
       summary_id: summaryId,
       chunks_created: 0,
@@ -230,10 +265,9 @@ export async function autoChunkAndEmbed(
   }
 
   // Step 2b: Content hash check — skip re-chunking if content hasn't changed
-  const title = (summary.title as string) ?? "";
   const fullText = title.trim().length > 0
-    ? `${title}\n\n${contentMarkdown}`
-    : contentMarkdown;
+    ? `${title}\n\n${sourceText}`
+    : sourceText;
 
   const newContentHash = await computeContentHash(fullText);
 
@@ -449,10 +483,13 @@ export async function autoChunkAndEmbed(
   }
 
   // Step 8: Generate summary-level embedding
+  //
+  // Use the resolved source text (blocks-flattened or content_markdown)
+  // so block-based summaries get fresh summary embeddings too.
   let summaryEmbedded = false;
 
   try {
-    await embedSummaryContent(summaryId, title, contentMarkdown);
+    await embedSummaryContent(summaryId, title, sourceText);
     summaryEmbedded = true;
   } catch (e) {
     console.warn(
@@ -465,7 +502,7 @@ export async function autoChunkAndEmbed(
   const elapsed = Date.now() - t0;
 
   console.info(
-    `[Auto-Ingest] Done: ${summaryId} — ${chunks.length} chunks (${selectedStrategy}), ` +
+    `[Auto-Ingest] Done: ${summaryId} — ${chunks.length} chunks (${selectedStrategy}, source=${sourceKind}), ` +
       `${generated} embedded, ${failed} failed, ` +
       `summary_embed=${summaryEmbedded}, ${elapsed}ms`,
   );
@@ -481,11 +518,4 @@ export async function autoChunkAndEmbed(
     skipped_unchanged: false,
     elapsed_ms: elapsed,
   };
-
-  } finally {
-    // Release advisory lock
-    await adminDb.rpc("advisory_unlock", { lock_key: lockKey }).catch((e: Error) => {
-      console.warn(`[Auto-Ingest] Failed to release advisory lock for ${summaryId}:`, e.message);
-    });
-  }
 }

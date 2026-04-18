@@ -45,6 +45,7 @@ import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
 import { truncateForPrompt } from "./generate-smart-helpers.ts";
 import { validateQuizQuestion, validateFlashcard } from "../../lib/validate-llm-output.ts";
 import { checkPlanLimit } from "../plans/access.ts";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 export const aiGenerateRoutes = new Hono();
 
@@ -76,19 +77,16 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
   // authenticate() only decodes the JWT locally. The cryptographic signature
   // is validated by PostgREST when this RPC executes. Moving the Gemini call
   // before this point would allow forged JWTs to consume API credits.
-  const { data: instId } = await db.rpc("resolve_parent_institution", {
-    p_table: "summaries",
-    p_id: summaryId,
-  });
+  const instId = await resolveInstitutionViaRpc(db, "summaries", summaryId);
   if (!instId) return err(c, "Summary not found", 404);
   const roleCheck = await requireInstitutionRole(
-    db, user.id, instId as string, ALL_ROLES,
+    db, user.id, instId, ALL_ROLES,
   );
   if (isDenied(roleCheck))
     return err(c, roleCheck.message, roleCheck.status);
 
   // ── Plan limit enforcement ──────────────────────────────
-  const planCheck = await checkPlanLimit(db, user.id, instId as string);
+  const planCheck = await checkPlanLimit(db, user.id, instId);
   if (!planCheck.allowed) {
     return err(c, `Daily AI generation limit reached (${planCheck.limit}). Upgrade your plan.`, 429);
   }
@@ -164,7 +162,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
   // SEC-S9B: Use admin client for SECURITY DEFINER RPCs
   const { data: profile } = await getAdminClient().rpc("get_student_knowledge_context", {
     p_student_id: user.id,
-    p_institution_id: instId as string,
+    p_institution_id: instId,
   });
   if (profile) {
     profileContext = `\nPerfil del alumno: ${JSON.stringify(profile)}`;
