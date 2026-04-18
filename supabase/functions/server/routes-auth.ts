@@ -86,6 +86,11 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
   const admin = getAdminClient();
 
   // Step 1: Create auth user
+  // NOTE (audit 2026-04-17 iter 11 #1 — DEFERRED): email_confirm=false would
+  // be the secure default but breaks current frontend signup flow (no
+  // "check your email" UX, RequireAuth bounces user back to /login). Will
+  // flip to false in coordinated backend+frontend PR after the frontend
+  // ships /verify-email handling. Tracked as Phase 2.2-frontend.
   const { data: userData, error: authError } =
     await admin.auth.admin.createUser({
       email,
@@ -128,7 +133,13 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
   }
 
   // Step 3: Auto-join first active institution as 'student'
-  // This ensures new signups land directly in the platform.
+  // NOTE (audit 2026-04-17 iter 3 auth HIGH-2 — DEFERRED): removing
+  // auto-join would close kill-chain v3 prereq for Chains 1, 2, 3, 7, 8, 9
+  // but breaks the current frontend onboarding (PostLoginRouter sends
+  // 0-membership users to /login indefinitely; no invite-token UI exists).
+  // Will remove in coordinated backend+frontend PR with invite-flow ready.
+  // Tracked as Phase 2.2-frontend.
+  //
   // Non-critical: if it fails, user is still created — admin can add them later.
   try {
     const { data: firstInst } = await admin
@@ -147,7 +158,6 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
         is_active: true,
       });
       if (memberError) {
-        // Log but don't fail signup — membership can be added manually
         console.warn(
           `[Axon] Auto-join failed for ${userId} → institution ${firstInst.id}: ${memberError.message}`,
         );
