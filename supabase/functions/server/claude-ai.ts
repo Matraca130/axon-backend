@@ -15,7 +15,6 @@
  * Environment: Reads ANTHROPIC_API_KEY from Deno.env (set via supabase secrets).
  */
 
-import { fetchWithRetry as _fetchWithRetry } from "./lib/fetch-retry.ts";
 import { parseLlmJson } from "./lib/parse-llm-json.ts";
 
 const CLAUDE_BASE = "https://api.anthropic.com/v1";
@@ -46,7 +45,7 @@ function getApiKey(): string {
 export { getApiKey as getClaudeApiKey };
 
 // ─── Fetch with Timeout + Retry ──────────────────────────
-// Shared implementation in lib/fetch-retry.ts. Claude retries on 429, 503, 529.
+// Shared implementation in lib/fetch-with-retry.ts. Claude retries on 429, 503, 529.
 
 import { fetchWithRetry as _fetchWithRetry } from "./lib/fetch-with-retry.ts";
 
