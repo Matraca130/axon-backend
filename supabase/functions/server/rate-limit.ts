@@ -40,7 +40,7 @@
  */
 
 import type { Context, Next } from "npm:hono";
-import { extractToken } from "./db.ts";
+import { extractToken, verifyJwt } from "./db.ts";
 
 // ─── Configuration ─────────────────────────────────────────────────
 
@@ -161,16 +161,27 @@ export async function rateLimitMiddleware(
   }
 
   // AUTH-014 FIX: Rate-limit both authenticated and unauthenticated requests.
-  // Authenticated: key from JWT sub. Unauthenticated: key from client IP.
+  //
+  // SEC-AUDIT FIX: JWT is verified cryptographically via jose (same path as
+  // `authenticate()`). A forged token can no longer pick an arbitrary `sub`
+  // to spawn a fresh rate-limit bucket — invalid tokens collapse to the
+  // IP-based bucket, so an attacker rotating forged payloads shares one
+  // limit with their IP. jose caches JWKS in-memory (~0.3ms after warm-up),
+  // so the extra verification is effectively free.
   const token = extractToken(c);
+  const ipHeader = c.req.header("x-forwarded-for")?.split(",")[0]?.trim()
+    || c.req.header("x-real-ip")
+    || "unknown";
   let key: string;
   if (token) {
-    key = extractKey(token);
+    const verified = await verifyJwt(token);
+    if ("sub" in verified) {
+      key = `uid:${verified.sub}`;
+    } else {
+      key = `ip:${ipHeader}`;
+    }
   } else {
-    const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim()
-      || c.req.header("x-real-ip")
-      || "unknown";
-    key = `ip:${ip}`;
+    key = `ip:${ipHeader}`;
   }
   const now = Date.now();
 

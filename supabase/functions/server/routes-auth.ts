@@ -127,38 +127,49 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
     return safeErr(c, "Profile creation (auth rolled back)", profileError);
   }
 
-  // Step 3: Auto-join first active institution as 'student'
-  // This ensures new signups land directly in the platform.
-  // Non-critical: if it fails, user is still created — admin can add them later.
-  try {
-    const { data: firstInst } = await admin
-      .from("institutions")
-      .select("id")
-      .eq("is_active", true)
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .single();
+  // Step 3: Optional auto-join to a configured default institution.
+  //
+  // SEC-AUDIT FIX: previously every new signup was auto-joined as 'student'
+  // to the oldest active institution (`ORDER BY created_at LIMIT 1`). In a
+  // multi-tenant deployment that silently leaks cross-tenant access to
+  // whichever institution happened to be created first.
+  //
+  // Now opt-in: set AXON_DEFAULT_INSTITUTION_ID to a specific institution
+  // UUID to restore the convenience join (useful for single-tenant or demo
+  // deploys). If unset, new signups land without any institution membership
+  // and must be invited explicitly.
+  const defaultInstitutionId = Deno.env.get("AXON_DEFAULT_INSTITUTION_ID");
+  if (defaultInstitutionId) {
+    try {
+      const { data: inst } = await admin
+        .from("institutions")
+        .select("id")
+        .eq("id", defaultInstitutionId)
+        .eq("is_active", true)
+        .maybeSingle();
 
-    if (firstInst) {
-      const { error: memberError } = await admin.from("memberships").insert({
-        user_id: userId,
-        institution_id: firstInst.id,
-        role: "student",
-        is_active: true,
-      });
-      if (memberError) {
-        // Log but don't fail signup — membership can be added manually
-        console.warn(
-          `[Axon] Auto-join failed for ${userId} → institution ${firstInst.id}: ${memberError.message}`,
-        );
+      if (inst) {
+        const { error: memberError } = await admin.from("memberships").insert({
+          user_id: userId,
+          institution_id: inst.id,
+          role: "student",
+          is_active: true,
+        });
+        if (memberError) {
+          console.warn(
+            `[Axon] Default-institution join failed for ${userId} → ${inst.id}: ${memberError.message}`,
+          );
+        } else {
+          console.log(`[Axon] Joined ${userId} → default institution ${inst.id} as student`);
+        }
       } else {
-        console.log(`[Axon] Auto-joined ${userId} → institution ${firstInst.id} as student`);
+        console.warn(
+          `[Axon] AXON_DEFAULT_INSTITUTION_ID=${defaultInstitutionId} does not match an active institution`,
+        );
       }
-    } else {
-      console.warn("[Axon] No active institution found for auto-join");
+    } catch (e) {
+      console.warn(`[Axon] Default-institution join exception: ${(e as Error).message}`);
     }
-  } catch (e) {
-    console.warn(`[Axon] Auto-join exception: ${(e as Error).message}`);
   }
 
   return ok(c, { id: userId, email }, 201);

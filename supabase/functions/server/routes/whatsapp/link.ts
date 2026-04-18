@@ -11,32 +11,14 @@ import { authenticate, ok, err, getAdminClient } from "../../db.ts";
 import { hashPhone, generateSalt, sendText } from "./wa-client.ts";
 import { computeLookupHash } from "./webhook.ts";
 import { createLinkingAttemptsTracker } from "../_messaging/linking-attempts.ts";
+import { generateLinkingCode, isLinkingCode as sharedIsLinkingCode } from "../_messaging/linking-code.ts";
 
 // ─── Constants ───────────────────────────────────────────
 
 const CODE_EXPIRY_SECONDS = 300; // 5 minutes
-const CODE_LENGTH = 10;          // SEC-AUDIT FIX: aligned with Telegram linking.
-                                 // Although WhatsApp ingress is gated by Meta HMAC,
-                                 // bumping entropy removes brute-force risk as
-                                 // defense-in-depth.
 
 // SEC-AUDIT FIX: per-phone lockout after 5 failed linking attempts per hour.
 const attempts = createLinkingAttemptsTracker("WA-Link");
-
-// ─── Code Generation ─────────────────────────────────────
-
-function generateCode(): string {
-  const max = 10_000_000_000n; // 10^10
-  const limit = (1n << 64n) - ((1n << 64n) % max);
-  while (true) {
-    const buf = new Uint32Array(2);
-    crypto.getRandomValues(buf);
-    const value = (BigInt(buf[0]) << 32n) | BigInt(buf[1]);
-    if (value < limit) {
-      return (value % max).toString().padStart(CODE_LENGTH, "0");
-    }
-  }
-}
 
 // ─── Web Endpoint: Generate Link Code ─────────────────────
 
@@ -57,7 +39,7 @@ export async function generateLinkCode(c: Context): Promise<Response> {
     return err(c, "Ya ten\u00e9s un tel\u00e9fono vinculado. Desvincul\u00e1 primero para vincular otro.", 409);
   }
 
-  const code = generateCode();
+  const code = generateLinkingCode();
   const expiresAt = new Date(Date.now() + CODE_EXPIRY_SECONDS * 1000).toISOString();
 
   const linkingPhoneHash = `linking:${user.id}`;
@@ -184,9 +166,7 @@ export async function verifyLinkCode(
   return { success: true, userId, phoneHash };
 }
 
-export function isLinkingCode(text: string): boolean {
-  return new RegExp(`^\\d{${CODE_LENGTH}}$`).test(text.trim());
-}
+export const isLinkingCode = sharedIsLinkingCode;
 
 // ─── Unlink Phone ───────────────────────────────────────
 

@@ -42,7 +42,7 @@ const MAX_BATCH_PATHS = 100;
 // deno-lint-ignore no-control-regex
 const CONTROL_CHARS_RE = /[\x00-\x1f\x7f]/;
 
-function isOwnedStoragePath(path: string, userId: string): boolean {
+export function isOwnedStoragePath(path: string, userId: string): boolean {
   if (typeof path !== "string" || path.length === 0) return false;
   if (path.length > 1024) return false; // Supabase storage key size guard
   if (CONTROL_CHARS_RE.test(path)) return false;

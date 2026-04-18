@@ -14,37 +14,15 @@ import type { Context } from "npm:hono";
 import { authenticate, ok, err, getAdminClient } from "../../db.ts";
 import { sendTextPlain } from "./tg-client.ts";
 import { createLinkingAttemptsTracker } from "../_messaging/linking-attempts.ts";
+import { generateLinkingCode, isLinkingCode as sharedIsLinkingCode } from "../_messaging/linking-code.ts";
 
 // ─── Constants ───────────────────────────────────────────
 
 const CODE_EXPIRY_SECONDS = 300; // 5 minutes
-const CODE_LENGTH = 10;          // SEC-AUDIT FIX: 6 digits (10^6) was brute-forceable
-                                 // against concurrent linking sessions. 10 digits
-                                 // (10^10) makes it infeasible under the existing
-                                 // 10 msg/min rate limit for unlinked chat_ids.
 
 // SEC-AUDIT FIX: lock a chat out after 5 failed linking attempts per hour
 // as defense-in-depth on top of the entropy bump.
 const attempts = createLinkingAttemptsTracker("TG-Link");
-
-// ─── Code Generation ─────────────────────────────────────
-
-function generateCode(): string {
-  // Rejection sampling over 32-bit values to avoid modulo bias.
-  // We need a number in [0, 10^10). Each Uint32 gives 32 bits ≈ 4.29e9.
-  // Use two Uint32 values combined via BigInt for unbiased sampling.
-  const max = 10_000_000_000n; // 10^10
-  // 2^64 / 10^10 rounded down * 10^10 gives the largest unbiased upper bound.
-  const limit = (1n << 64n) - ((1n << 64n) % max);
-  while (true) {
-    const buf = new Uint32Array(2);
-    crypto.getRandomValues(buf);
-    const value = (BigInt(buf[0]) << 32n) | BigInt(buf[1]);
-    if (value < limit) {
-      return (value % max).toString().padStart(CODE_LENGTH, "0");
-    }
-  }
-}
 
 // ─── Web Endpoint: Generate Link Code ────────────────────
 
@@ -65,7 +43,7 @@ export async function generateLinkCode(c: Context): Promise<Response> {
     return err(c, "Ya tienes Telegram vinculado. Desvincula primero para vincular otro.", 409);
   }
 
-  const code = generateCode();
+  const code = generateLinkingCode();
   const expiresAt = new Date(Date.now() + CODE_EXPIRY_SECONDS * 1000).toISOString();
 
   // Store the linking code in a temporary telegram_session
@@ -192,9 +170,7 @@ export async function verifyLinkCode(
   return { success: true, userId };
 }
 
-export function isLinkingCode(text: string): boolean {
-  return new RegExp(`^\\d{${CODE_LENGTH}}$`).test(text.trim());
-}
+export const isLinkingCode = sharedIsLinkingCode;
 
 // ─── Link Status ────────────────────────────────────────
 
