@@ -7,9 +7,12 @@
  *   PUT  /me      — Update profile (full_name, avatar_url)
  *
  * Signup flow:
- *   1. Creates auth.users row via admin client (email_confirm: true)
+ *   1. Creates auth.users row via admin client (email_confirm: false — user
+ *      must confirm email before they can log in or obtain a JWT)
  *   2. Creates profiles row with same id
  *   3. Auto-joins user to first active institution as 'student'
+ *      (safe: membership is inert until email is confirmed)
+ *   4. Returns generic message regardless of outcome (anti-enumeration)
  *   On profiles failure, rolls back auth.users row
  *
  * GET /me auto-profile-creation:
@@ -44,6 +47,12 @@ const signupAttempts = new Map<string, { count: number; resetAt: number }>();
 
 function checkSignupLimit(ip: string): boolean {
   const now = Date.now();
+  // SEC: Periodic cleanup — remove expired entries to prevent unbounded Map growth
+  if (signupAttempts.size > 100) {
+    for (const [key, entry] of signupAttempts) {
+      if (now > entry.resetAt) signupAttempts.delete(key);
+    }
+  }
   const entry = signupAttempts.get(ip);
   if (!entry || now > entry.resetAt) {
     signupAttempts.set(ip, { count: 1, resetAt: now + 3_600_000 }); // 1 hour
@@ -96,15 +105,16 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
       user_metadata: {
         full_name: typeof full_name === "string" ? full_name : "",
       },
-      email_confirm: true,
+      email_confirm: false,
     });
 
   if (authError) {
     // Return user-friendly messages for common signup errors
     // instead of the generic "Signup failed" from safeErr
     const msg = authError.message?.toLowerCase() ?? "";
+    // SEC: Return generic message to prevent user enumeration (was 409)
     if (msg.includes("already been registered") || msg.includes("already registered") || msg.includes("duplicate")) {
-      return c.json({ error: "Este email ya esta registrado. Intenta iniciar sesion." }, 409);
+      return c.json({ message: "Si este email no esta registrado, recibiras un enlace de confirmacion." }, 200);
     }
     if (msg.includes("rate limit") || msg.includes("too many")) {
       return c.json({ error: "Demasiados intentos. Intenta de nuevo mas tarde." }, 429);
@@ -133,6 +143,9 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
   // Step 3: Auto-join first active institution as 'student'
   // This ensures new signups land directly in the platform.
   // Non-critical: if it fails, user is still created — admin can add them later.
+  // SEC: Safe because email_confirm is false — the user cannot obtain a JWT
+  // (and therefore cannot access any content behind RLS) until they confirm
+  // their email address. The membership row exists but is inert until then.
   try {
     const { data: firstInst } = await admin
       .from("institutions")
@@ -164,7 +177,9 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
     console.warn(`[Axon] Auto-join exception: ${(e as Error).message}`);
   }
 
-  return ok(c, { id: userId, email }, 201);
+  // SEC: Same generic message as the "already registered" path to prevent enumeration.
+  // User must confirm email before they can obtain a JWT and access content.
+  return c.json({ message: "Si este email no esta registrado, recibiras un enlace de confirmacion." }, 200);
 });
 
 // ─── GET /me ───────────────────────────────────────────────────
@@ -241,6 +256,14 @@ authRoutes.put(`${PREFIX}/me`, async (c: Context) => {
       "No valid fields to update (allowed: full_name, avatar_url)",
       400,
     );
+  }
+
+  // SEC: Reject non-HTTPS avatar URLs (prevents javascript: and other schemes)
+  if (patch.avatar_url !== undefined) {
+    const url = String(patch.avatar_url);
+    if (url && !url.startsWith("https://")) {
+      return err(c, "avatar_url must be a valid HTTPS URL", 400);
+    }
   }
 
   patch.updated_at = new Date().toISOString();

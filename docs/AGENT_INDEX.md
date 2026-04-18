@@ -61,7 +61,8 @@ supabase/functions/server/
 |-- auth-helpers.ts       <- Role-based access: requireInstitutionRole(), role constants
 |-- rate-limit.ts         <- 120 req/min sliding window
 |-- timing-safe.ts        <- Constant-time comparison
-|-- gemini.ts             <- Gemini API helpers (generateText, generateEmbedding, GENERATE_MODEL)
+|-- claude-ai.ts          <- Claude API helpers (generateText, parseClaudeJson, chat, getModelId)
+|-- gemini.ts             <- Gemini API helpers (generateEmbedding, extractTextFromPdf, GENERATE_MODEL)
 |-- xp-engine.ts          <- XP calculation + award_xp() RPC call + fallback
 |-- streak-engine.ts      <- Streak computation + daily check-in
 |-- xp-hooks.ts           <- 8 afterWrite hooks for XP awarding

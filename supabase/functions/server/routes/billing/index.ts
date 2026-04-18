@@ -24,6 +24,31 @@ import { webhookRoutes } from "./webhook.ts";
 
 const billingRoutes = new Hono();
 
+// ─── Redirect URL Validation ────────────────────────────────────
+// SEC: Prevent open-redirect attacks via Stripe callback URLs.
+// Must stay in sync with ALLOWED_ORIGINS / VERCEL_PREVIEW_RE in index.ts.
+const ALLOWED_HOSTS = new Set([
+  "axon-frontend.vercel.app",
+  "numero1-sseki-2325-55.vercel.app",
+  "localhost",
+  "127.0.0.1",
+]);
+
+const VERCEL_PREVIEW_RE = /^(numero1-sseki-2325-55|axon-frontend)-[a-z0-9-]+\.vercel\.app$/;
+
+function isAllowedRedirect(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+    const host = parsed.hostname;
+    if (ALLOWED_HOSTS.has(host)) return true;
+    if (VERCEL_PREVIEW_RE.test(host)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 // ─── POST /billing/checkout-session ──────────────────────────────
 
 billingRoutes.post(`${PREFIX}/billing/checkout-session`, async (c: Context) => {
@@ -40,6 +65,8 @@ billingRoutes.post(`${PREFIX}/billing/checkout-session`, async (c: Context) => {
   if (!isUuid(institution_id)) return err(c, "institution_id must be a valid UUID", 400);
   if (!isNonEmpty(success_url)) return err(c, "success_url is required", 400);
   if (!isNonEmpty(cancel_url)) return err(c, "cancel_url is required", 400);
+  if (!isAllowedRedirect(success_url)) return err(c, "success_url domain not allowed", 400);
+  if (!isAllowedRedirect(cancel_url)) return err(c, "cancel_url domain not allowed", 400);
 
   const { data: plan, error: planErr } = await db
     .from("institution_plans").select("*").eq("id", plan_id).single();
@@ -88,6 +115,7 @@ billingRoutes.post(`${PREFIX}/billing/portal-session`, async (c: Context) => {
   const { institution_id, return_url } = body as Record<string, string>;
   if (!isUuid(institution_id)) return err(c, "institution_id must be a valid UUID", 400);
   if (!isNonEmpty(return_url)) return err(c, "return_url is required", 400);
+  if (!isAllowedRedirect(return_url)) return err(c, "return_url domain not allowed", 400);
 
   const { data: sub } = await db
     .from("institution_subscriptions")

@@ -13,6 +13,7 @@
 
 import { getAdminClient } from "../db.ts";
 import { sanitizeForPrompt } from "../prompt-sanitize.ts";
+import { resolveInstitutionViaRpc } from "./institution-resolver.ts";
 import {
   selectStrategy,
   executeRetrievalEmbedding,
@@ -48,11 +49,7 @@ export async function ragSearch(
     let institutionId: string | null = null;
 
     if (summaryId) {
-      const { data: instId } = await db.rpc("resolve_parent_institution", {
-        p_table: "summaries",
-        p_id: summaryId,
-      });
-      institutionId = instId as string | null;
+      institutionId = await resolveInstitutionViaRpc(db, "summaries", summaryId);
     }
 
     if (!institutionId) {

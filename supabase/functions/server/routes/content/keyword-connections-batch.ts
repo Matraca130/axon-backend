@@ -48,6 +48,7 @@ import {
   ALL_ROLES,
 } from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 export const kwConnectionsBatchRoutes = new Hono();
 
@@ -67,24 +68,6 @@ const CONNECTION_SELECT = [
   "keyword_a:keywords!keyword_a_id(id, name, summary_id, definition)",
   "keyword_b:keywords!keyword_b_id(id, name, summary_id, definition)",
 ].join(", ");
-
-// ─── Helper: resolve institution from a keyword ──────────────────
-
-async function resolveInstitutionFromKeyword(
-  db: any,
-  keywordId: string,
-): Promise<string | null> {
-  try {
-    const { data, error } = await db.rpc("resolve_parent_institution", {
-      p_table: "keywords",
-      p_id: keywordId,
-    });
-    if (error || !data) return null;
-    return data as string;
-  } catch {
-    return null;
-  }
-}
 
 // ─── GET /keyword-connections-batch?keyword_ids=uuid1,uuid2,... ──
 
@@ -121,7 +104,7 @@ kwConnectionsBatchRoutes.get(
     // ── Verify institution membership via first keyword ───────
     // All keywords in a summary belong to the same institution.
     // Checking the first one is sufficient for authorization.
-    const institutionId = await resolveInstitutionFromKeyword(db, ids[0]);
+    const institutionId = await resolveInstitutionViaRpc(db, "keywords", ids[0]);
     if (!institutionId) {
       return err(c, "Keyword not found or not accessible", 404);
     }

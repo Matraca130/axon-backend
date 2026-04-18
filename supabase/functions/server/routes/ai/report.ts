@@ -36,6 +36,7 @@ import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 import { isUuid, isOneOf } from "../../validate.ts";
 import {
   requireInstitutionRole,
@@ -148,10 +149,7 @@ aiReportRoutes.post(`${PREFIX}/ai/report`, async (c: Context) => {
   }
 
   // ── Step 4: Resolve institution_id server-side (D2, E3) ────
-  const { data: institutionId } = await db.rpc(
-    "resolve_parent_institution",
-    { p_table: "summaries", p_id: content.summary_id },
-  );
+  const institutionId = await resolveInstitutionViaRpc(db, "summaries", content.summary_id);
   if (!institutionId)
     return err(c, "Summary not found or inaccessible", 404);
 
@@ -159,7 +157,7 @@ aiReportRoutes.post(`${PREFIX}/ai/report`, async (c: Context) => {
   const roleCheck = await requireInstitutionRole(
     db,
     user.id,
-    institutionId as string,
+    institutionId,
     ALL_ROLES,
   );
   if (isDenied(roleCheck))

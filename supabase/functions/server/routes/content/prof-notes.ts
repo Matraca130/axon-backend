@@ -18,6 +18,7 @@ import {
   CONTENT_WRITE_ROLES,
 } from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 export const profNotesRoutes = new Hono();
 
@@ -26,23 +27,6 @@ const profNotesBase = `${PREFIX}/kw-prof-notes`;
 /**
  * H-5 helper: resolve institution_id from a keyword or prof-note ID.
  */
-async function resolveInstitution(
-  db: any,
-  table: string,
-  id: string,
-): Promise<string | null> {
-  try {
-    const { data, error } = await db.rpc("resolve_parent_institution", {
-      p_table: table,
-      p_id: id,
-    });
-    if (error || !data) return null;
-    return data as string;
-  } catch {
-    return null;
-  }
-}
-
 // LIST — notes for a keyword (all professors' notes visible)
 profNotesRoutes.get(profNotesBase, async (c: Context) => {
   const auth = await authenticate(c);
@@ -54,7 +38,7 @@ profNotesRoutes.get(profNotesBase, async (c: Context) => {
     return err(c, "Missing required query param: keyword_id", 400);
 
   // H-5 FIX: Verify caller is a member of the keyword's institution
-  const institutionId = await resolveInstitution(db, "keywords", keywordId);
+  const institutionId = await resolveInstitutionViaRpc(db, "keywords", keywordId);
   if (!institutionId) return err(c, "Keyword not found", 404);
   const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
@@ -79,7 +63,7 @@ profNotesRoutes.get(`${profNotesBase}/:id`, async (c: Context) => {
   const id = c.req.param("id");
 
   // H-5 FIX: Verify caller is a member of the note's institution
-  const institutionId = await resolveInstitution(db, "kw_prof_notes", id);
+  const institutionId = await resolveInstitutionViaRpc(db, "kw_prof_notes", id);
   if (!institutionId) return err(c, "Note not found", 404);
   const roleCheck = await requireInstitutionRole(db, user.id, institutionId, ALL_ROLES);
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
@@ -111,7 +95,7 @@ profNotesRoutes.post(profNotesBase, async (c: Context) => {
   }
 
   // H-5 FIX: Verify caller has write access in the keyword's institution
-  const institutionId = await resolveInstitution(db, "keywords", keyword_id);
+  const institutionId = await resolveInstitutionViaRpc(db, "keywords", keyword_id);
   if (!institutionId) return err(c, "Keyword not found", 404);
   const roleCheck = await requireInstitutionRole(db, user.id, institutionId, CONTENT_WRITE_ROLES);
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
@@ -144,7 +128,7 @@ profNotesRoutes.delete(`${profNotesBase}/:id`, async (c: Context) => {
   const id = c.req.param("id");
 
   // H-5 FIX: Verify caller has write access in the note's institution
-  const institutionId = await resolveInstitution(db, "kw_prof_notes", id);
+  const institutionId = await resolveInstitutionViaRpc(db, "kw_prof_notes", id);
   if (!institutionId) return err(c, "Note not found", 404);
   const roleCheck = await requireInstitutionRole(db, user.id, institutionId, CONTENT_WRITE_ROLES);
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);

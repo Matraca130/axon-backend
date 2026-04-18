@@ -25,7 +25,7 @@ Este documento consolida todas as descobertas da auditoria realizada no backend 
 
 | Funcao | Modelo | Arquivo |
 |---|---|---|
-| Geracao de texto | Gemini 2.5 Flash | `gemini.ts` |
+| Geracao de texto | Claude Sonnet 4 (default), Opus 4, Haiku 4.5 | `claude-ai.ts` |
 | Extracao de PDF | Gemini 2.5 Flash | `gemini.ts` |
 | **Embeddings** | **OpenAI text-embedding-3-large (1536d)** | **`openai-embeddings.ts`** |
 

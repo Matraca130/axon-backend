@@ -25,6 +25,7 @@ import {
 import { isUuid } from "../../validate.ts";
 import { generateText, parseClaudeJson } from "../../claude-ai.ts";
 import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 export const aiSuggestConnectionsRoutes = new Hono();
 
@@ -103,18 +104,15 @@ aiSuggestConnectionsRoutes.post(
       return err(c, "existing_edge_ids must be an array of strings", 400);
 
     // ── 3. Resolve institution from topic ─────────────────────
-    const { data: instId, error: instErr } = await db.rpc(
-      "resolve_parent_institution",
-      { p_table: "topics", p_id: topic_id },
-    );
-    if (instErr || !instId)
+    const instId = await resolveInstitutionViaRpc(db, "topics", topic_id);
+    if (!instId)
       return err(c, "Could not resolve institution from topic", 404);
 
     // ── 4. Role check — any role ──────────────────────────────
     const roleCheck = await requireInstitutionRole(
       db,
       user.id,
-      instId as string,
+      instId,
       ALL_ROLES as unknown as string[],
     );
     if (isDenied(roleCheck))

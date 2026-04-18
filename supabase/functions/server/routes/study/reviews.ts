@@ -11,7 +11,6 @@
  */
 
 import { Hono } from "npm:hono";
-import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import {
@@ -23,6 +22,7 @@ import {
 } from "../../validate.ts";
 import type { Context } from "npm:hono";
 import { xpHookForReview, xpHookForQuizAttempt } from "../../xp-hooks.ts";
+import { verifySessionOwnership } from "./session-ownership.ts";
 
 export const reviewRoutes = new Hono();
 
@@ -30,34 +30,6 @@ export const reviewRoutes = new Hono();
 
 const MAX_PAGINATION_LIMIT = 500;
 const DEFAULT_PAGINATION_LIMIT = 100;
-
-// ─── Helper ─────────────────────────────────────────────────────
-
-/**
- * O-3 FIX: Verify that a study_session belongs to the authenticated user.
- * Called before any reviews operation to prevent cross-user access.
- */
-async function verifySessionOwnership(
-  c: Context,
-  db: SupabaseClient,
-  sessionId: string,
-  userId: string,
-): Promise<Response | null> {
-  const { data: session, error: sessionErr } = await db
-    .from("study_sessions")
-    .select("id")
-    .eq("id", sessionId)
-    .eq("student_id", userId)
-    .maybeSingle();
-
-  if (sessionErr) {
-    return safeErr(c, "Session lookup", sessionErr);
-  }
-  if (!session) {
-    return err(c, "Session not found or does not belong to you", 404);
-  }
-  return null;
-}
 
 // ─── Pagination Helper ───────────────────────────────────────────
 
@@ -82,8 +54,12 @@ reviewRoutes.get(`${PREFIX}/reviews`, async (c: Context) => {
     return err(c, "session_id must be a valid UUID", 400);
   }
 
-  const ownershipErr = await verifySessionOwnership(c, db, sessionId, user.id);
-  if (ownershipErr) return ownershipErr;
+  const ownership = await verifySessionOwnership(db, sessionId, user.id);
+  if (!ownership.ok) {
+    return ownership.reason === "not_found"
+      ? err(c, ownership.message, 404)
+      : safeErr(c, "Session lookup", { message: ownership.message });
+  }
 
   // U-3 FIX: Added pagination
   const { limit, offset } = parsePagination(c);
@@ -116,10 +92,12 @@ reviewRoutes.post(`${PREFIX}/reviews`, async (c: Context) => {
   if (!inRange(body.grade, 0, 5))
     return err(c, "grade must be a number in [0, 5]", 400);
 
-  const ownershipErr = await verifySessionOwnership(
-    c, db, body.session_id as string, user.id,
-  );
-  if (ownershipErr) return ownershipErr;
+  const ownership = await verifySessionOwnership(db, body.session_id as string, user.id);
+  if (!ownership.ok) {
+    return ownership.reason === "not_found"
+      ? err(c, ownership.message, 404)
+      : safeErr(c, "Session lookup", { message: ownership.message });
+  }
 
   // Build insert row with required fields
   const row: Record<string, unknown> = {

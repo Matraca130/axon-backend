@@ -72,8 +72,8 @@ import {
   ALL_ROLES,
 } from "../../auth-helpers.ts";
 import { generateText, generateTextStream, GENERATE_MODEL } from "../../claude-ai.ts";
-import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { xpHookForRagQuestion } from "../../xp-hooks.ts";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 // Fase 6: Import strategy functions + shared MatchedChunk type
 import {
@@ -85,237 +85,44 @@ import {
   type RetrievalStrategy,
 } from "../../retrieval-strategies.ts";
 
+// Split refactor (refactor/chat-split-modules): pull chunk retrieval,
+// fallback cascade, query augmentation, context assembly and fallback
+// trace helpers from dedicated modules. chat.ts is now a thin route
+// handler that orchestrates them.
+import {
+  fetchAdjacentChunks,
+  fetchSummaryFallbackChunks,
+  fetchTopicFallbackChunks,
+  normalizeCoarseToFineResults,
+} from "./chat/retrieval.ts";
+import {
+  buildAugmentedQuery,
+  assembleContext,
+} from "./chat/context-assembly.ts";
+import {
+  newFallbackTrace,
+  type CoarseToFineRow,
+} from "./chat/types.ts";
+import {
+  SHORT_QUERY_CHAR_THRESHOLD,
+  SHORT_QUERY_SIMILARITY_THRESHOLD,
+  NORMAL_QUERY_SIMILARITY_THRESHOLD,
+  RERANK_HIGH_CONFIDENCE_THRESHOLD,
+  RERANK_MIN_RESULTS,
+  MAX_SEARCH_RESULTS,
+  COARSE_TO_FINE_TOP_SUMMARIES,
+  RERANK_TOP_K,
+  CONTEXT_PRIMARY_MATCHES,
+  MAX_MESSAGE_LENGTH,
+  MAX_HISTORY_CONTEXT_CHARS,
+  MAX_RAG_CONTEXT_CHARS,
+  MAX_HISTORY_TURNS,
+  MAX_HISTORY_TURN_CHARS,
+  CHAT_TEMPERATURE,
+  CHAT_MAX_TOKENS,
+} from "./chat/constants.ts";
+
 export const aiChatRoutes = new Hono();
-
-// --- Phase 5: History-augmented search query builder ----------------
-const MAX_HISTORY_CHARS_FOR_SEARCH = 200;
-
-function buildAugmentedQuery(
-  message: string,
-  history: Array<{ role: string; content: string }>,
-): { query: string; wasAugmented: boolean } {
-  const recentUserMessages = history
-    .filter((h) => h.role === "user")
-    .slice(-2)
-    .map((h) => h.content.slice(0, MAX_HISTORY_CHARS_FOR_SEARCH).trim())
-    .filter((s) => s.length > 0);
-
-  if (recentUserMessages.length === 0) {
-    return { query: message, wasAugmented: false };
-  }
-
-  const augmented = [...recentUserMessages, message].join(" ");
-  return { query: augmented, wasAugmented: true };
-}
-
-// --- Phase 5: Adjacent chunk expansion ----------------------------
-
-interface ContextChunk {
-  id: string;
-  summary_id: string;
-  content: string;
-  order_index: number;
-  is_primary: boolean;
-}
-
-async function fetchAdjacentChunks(
-  db: SupabaseClient,
-  matches: MatchedChunk[],
-): Promise<ContextChunk[]> {
-  if (!matches || matches.length === 0) return [];
-
-  try {
-    const matchedIds = matches.map((m) => m.chunk_id);
-    const { data: matchedWithOrder, error: orderErr } = await db
-      .from("chunks")
-      .select("id, summary_id, content, order_index")
-      .in("id", matchedIds)
-      .is("deleted_at", null);
-
-    if (orderErr || !matchedWithOrder) return [];
-
-    const adjacentPairs = new Set<string>();
-    const matchedSet = new Set(matchedIds);
-
-    for (const chunk of matchedWithOrder) {
-      if (chunk.order_index !== null && chunk.order_index !== undefined) {
-        if (chunk.order_index > 0) {
-          adjacentPairs.add(`${chunk.summary_id}:${chunk.order_index - 1}`);
-        }
-        adjacentPairs.add(`${chunk.summary_id}:${chunk.order_index + 1}`);
-      }
-    }
-
-    if (adjacentPairs.size === 0) return [];
-
-    const summaryGroups = new Map<string, number[]>();
-    for (const pair of adjacentPairs) {
-      const [sumId, orderStr] = pair.split(":");
-      const orderIdx = parseInt(orderStr, 10);
-      if (!summaryGroups.has(sumId)) summaryGroups.set(sumId, []);
-      summaryGroups.get(sumId)!.push(orderIdx);
-    }
-
-    const allContextChunks: ContextChunk[] = [];
-
-    for (const chunk of matchedWithOrder) {
-      allContextChunks.push({
-        id: chunk.id,
-        summary_id: chunk.summary_id,
-        content: chunk.content,
-        order_index: chunk.order_index ?? 0,
-        is_primary: true,
-      });
-    }
-
-    // Consolidated single query: fetch all adjacent chunks at once
-    // instead of N queries per summary group (fixes N+1 loop).
-    const summaryEntries = Array.from(summaryGroups.entries()).slice(0, 3);
-    const allSummaryIds = summaryEntries.map(([sumId]) => sumId);
-    const allOrderIndexes = new Set<number>();
-    for (const [, orderIndexes] of summaryEntries) {
-      for (const idx of orderIndexes) allOrderIndexes.add(idx);
-    }
-
-    if (allSummaryIds.length > 0 && allOrderIndexes.size > 0) {
-      const { data: adjacentBatch } = await db
-        .from("chunks")
-        .select("id, summary_id, content, order_index")
-        .in("summary_id", allSummaryIds)
-        .in("order_index", Array.from(allOrderIndexes))
-        .is("deleted_at", null);
-
-      if (adjacentBatch) {
-        // Build a lookup set for valid (summary_id, order_index) pairs
-        const validPairs = new Set(
-          summaryEntries.flatMap(([sumId, indexes]) =>
-            indexes.map((idx) => `${sumId}:${idx}`)
-          ),
-        );
-
-        for (const adj of adjacentBatch) {
-          const pairKey = `${adj.summary_id}:${adj.order_index}`;
-          if (!matchedSet.has(adj.id) && validPairs.has(pairKey)) {
-            allContextChunks.push({
-              id: adj.id,
-              summary_id: adj.summary_id,
-              content: adj.content,
-              order_index: adj.order_index ?? 0,
-              is_primary: false,
-            });
-          }
-        }
-      }
-    }
-
-    allContextChunks.sort((a, b) => {
-      if (a.summary_id !== b.summary_id) return a.summary_id.localeCompare(b.summary_id);
-      return a.order_index - b.order_index;
-    });
-
-    return allContextChunks;
-  } catch (e) {
-    console.warn("[RAG Chat] Adjacent chunk expansion failed, using primary only:", e);
-    return [];
-  }
-}
-
-// --- Phase 5: Smart context assembly ------------------------------
-
-const MAX_CONTEXT_CHARS = 8000;
-
-function assembleContext(
-  matches: MatchedChunk[],
-  contextChunks: ContextChunk[],
-): { ragContext: string; sourcesUsed: Array<{ chunk_id: string; summary_title: string; similarity: number }>; contextChunksCount: number } {
-  const sourcesUsed = matches.map((m) => ({
-    chunk_id: m.chunk_id,
-    summary_title: m.summary_title,
-    similarity: Math.round(m.similarity * 100) / 100,
-  }));
-
-  if (contextChunks.length === 0 && matches.length === 0) {
-    return { ragContext: "", sourcesUsed, contextChunksCount: 0 };
-  }
-
-  if (contextChunks.length > 0) {
-    const titleMap = new Map<string, string>();
-    for (const m of matches) {
-      titleMap.set(m.summary_id, m.summary_title);
-    }
-
-    let context = "";
-    let currentSummary = "";
-    let charCount = 0;
-    let chunksIncluded = 0;
-
-    for (const chunk of contextChunks) {
-      if (chunk.summary_id !== currentSummary) {
-        const title = titleMap.get(chunk.summary_id) || "Material";
-        const header = `\n[De "${title}"]:\n`;
-        if (charCount + header.length > MAX_CONTEXT_CHARS) break;
-        context += header;
-        charCount += header.length;
-        currentSummary = chunk.summary_id;
-      }
-
-      const separator = chunk.is_primary ? "" : "";
-      const text = `${separator}${chunk.content}\n`;
-      if (charCount + text.length > MAX_CONTEXT_CHARS) {
-        const remaining = MAX_CONTEXT_CHARS - charCount;
-        if (remaining > 100) {
-          context += text.slice(0, remaining) + "...\n";
-          chunksIncluded++;
-        }
-        break;
-      }
-      context += text;
-      charCount += text.length;
-      chunksIncluded++;
-    }
-
-    return {
-      ragContext: context.trim()
-        ? `\n\nContexto relevante del material de estudio:\n${context.trim()}`
-        : "",
-      sourcesUsed,
-      contextChunksCount: chunksIncluded,
-    };
-  }
-
-  const ragContext = "\n\nContexto relevante del material de estudio:\n" +
-    matches
-      .map((m, i) => `[${i + 1}] (de "${m.summary_title}"): ${m.content}`)
-      .join("\n\n");
-
-  return { ragContext, sourcesUsed, contextChunksCount: matches.length };
-}
-
-// --- Fase 3: Coarse-to-Fine result normalizer ---------------------
-
-interface CoarseToFineRow {
-  chunk_id: string;
-  summary_id: string;
-  summary_title: string;
-  content: string;
-  summary_similarity: number;
-  chunk_similarity: number;
-  combined_score: number;
-}
-
-function normalizeCoarseToFineResults(
-  rows: CoarseToFineRow[],
-): MatchedChunk[] {
-  return rows.map((r) => ({
-    chunk_id: r.chunk_id,
-    summary_id: r.summary_id,
-    summary_title: r.summary_title,
-    content: r.content,
-    similarity: r.chunk_similarity,
-    text_rank: 0,
-    combined_score: r.combined_score,
-  }));
-}
 
 // --- Fase 6: Valid strategy values for client override ------------
 
@@ -335,15 +142,26 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   const message = (body.message as string).trim();
   if (message.length === 0)
     return err(c, "message cannot be empty", 400);
-  if (message.length > 2000)
-    return err(c, "message too long (max 2000 characters)", 400);
+  if (message.length > MAX_MESSAGE_LENGTH)
+    return err(c, `message too long (max ${MAX_MESSAGE_LENGTH} characters)`, 400);
 
   const summaryId = isUuid(body.summary_id) ? (body.summary_id as string) : null;
+  const topicId = isUuid(body.topic_id) ? (body.topic_id as string) : null;
+
+  // DEBUG (RL-DEBUG-2): re-introduce body shape capture into the
+  // model_used column so we can read it via SQL. Augmented in this
+  // round with the topic_fallback step counts so we can see whether
+  // the cascade ran and what each step returned. Remove once the
+  // root cause is verified.
+  const debugBodyKeys = JSON.stringify(Object.keys(body || {}));
+  const debugRawSid = body?.summary_id ?? "null";
+  const debugRawTid = body?.topic_id ?? "null";
+  let debugTopicFallbackCount = "skipped";
 
   const history = Array.isArray(body.history)
-    ? body.history.slice(-6).map((h: Record<string, string>) => ({
+    ? body.history.slice(-MAX_HISTORY_TURNS).map((h: Record<string, string>) => ({
         role: h.role,
-        content: typeof h.content === "string" ? h.content.slice(0, 500) : "",
+        content: typeof h.content === "string" ? h.content.slice(0, MAX_HISTORY_TURN_CHARS) : "",
       }))
     : [];
 
@@ -354,11 +172,10 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
 
   let institutionId: string | null = null;
   if (summaryId) {
-    const { data: instId } = await db.rpc("resolve_parent_institution", {
-      p_table: "summaries",
-      p_id: summaryId,
-    });
-    institutionId = instId as string;
+    institutionId = await resolveInstitutionViaRpc(db, "summaries", summaryId);
+  }
+  if (!institutionId && topicId) {
+    institutionId = await resolveInstitutionViaRpc(db, "topics", topicId);
   }
   if (!institutionId) {
     const { data: membership } = await db
@@ -396,6 +213,14 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   let rerankApplied = false;
   let strategyMeta: Record<string, unknown> = {};
 
+  // Short queries (acronyms like "EIC", "HTA", "ECG") produce weak
+  // dense-vector similarity scores. Relax the threshold so the hybrid
+  // search's lexical component can still surface relevant chunks.
+  const isShortQuery = message.trim().length < SHORT_QUERY_CHAR_THRESHOLD;
+  const similarityThreshold = isShortQuery
+    ? SHORT_QUERY_SIMILARITY_THRESHOLD
+    : NORMAL_QUERY_SIMILARITY_THRESHOLD;
+
   try {
     const embeddingOutput = await executeRetrievalEmbedding(
       strategy, searchQuery,
@@ -412,8 +237,8 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
           p_query_text: message,
           p_institution_id: institutionId,
           p_summary_id: summaryId,
-          p_match_count: 8,
-          p_similarity_threshold: 0.3,
+          p_match_count: MAX_SEARCH_RESULTS,
+          p_similarity_threshold: similarityThreshold,
         });
         searchType = "hybrid";
         return (data || []) as MatchedChunk[];
@@ -424,9 +249,9 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
         {
           p_query_embedding: queryEmbeddingJson,
           p_institution_id: institutionId,
-          p_top_summaries: 3,
-          p_top_chunks: 8,
-          p_similarity_threshold: 0.3,
+          p_top_summaries: COARSE_TO_FINE_TOP_SUMMARIES,
+          p_top_chunks: MAX_SEARCH_RESULTS,
+          p_similarity_threshold: similarityThreshold,
           p_query_text: message,
         },
       );
@@ -448,8 +273,8 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
         p_query_text: message,
         p_institution_id: institutionId,
         p_summary_id: null,
-        p_match_count: 8,
-        p_similarity_threshold: 0.3,
+        p_match_count: MAX_SEARCH_RESULTS,
+        p_similarity_threshold: similarityThreshold,
       });
       searchType = "hybrid_fallback";
       return (hybridData || []) as MatchedChunk[];
@@ -462,11 +287,12 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     // Task 4.5: Conditional re-ranking — skip for high-confidence single results
     const topSimilarity = mergedMatches.length > 0 ? mergedMatches[0].similarity : 0;
     const shouldRerank = mergedMatches.length > 1 &&
-      (topSimilarity < 0.7 || mergedMatches.length > 3);
+      (topSimilarity < RERANK_HIGH_CONFIDENCE_THRESHOLD ||
+        mergedMatches.length > RERANK_MIN_RESULTS);
 
     if (shouldRerank) {
       try {
-        mergedMatches = await rerankWithClaude(message, mergedMatches, 5);
+        mergedMatches = await rerankWithClaude(message, mergedMatches, RERANK_TOP_K);
         rerankApplied = true;
       } catch (e) {
         console.warn("[RAG Chat] Re-ranking failed, using original order:", (e as Error).message);
@@ -474,7 +300,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     }
 
     if (mergedMatches.length > 0) {
-      const topMatches = mergedMatches.slice(0, 5);
+      const topMatches = mergedMatches.slice(0, CONTEXT_PRIMARY_MATCHES);
       const contextChunks = await fetchAdjacentChunks(db, topMatches);
 
       const assembled = assembleContext(topMatches, contextChunks);
@@ -485,6 +311,68 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   } catch (e) {
     console.warn("[RAG Chat] Search failed, continuing without context:", e);
   }
+
+  // Fallback: user is viewing a specific topic but retrieval found
+  // nothing. Load the topic's chunks directly so the LLM answers
+  // from the actual study material instead of hallucinating.
+  if (!ragContext && summaryId) {
+    const fallbackMatches = await fetchSummaryFallbackChunks(adminDb, summaryId);
+    if (fallbackMatches.length > 0) {
+      const contextChunks = await fetchAdjacentChunks(db, fallbackMatches);
+      const assembled = assembleContext(fallbackMatches, contextChunks);
+      ragContext = assembled.ragContext;
+      sourcesUsed = assembled.sourcesUsed;
+      contextChunksCount = assembled.contextChunksCount;
+      searchType = "summary_fallback";
+    }
+  }
+
+  // Fallback: no summary selected but the navigation context points
+  // to a topic (e.g. frontend sends topic_id from currentTopic). Load
+  // content from all summaries under that topic.
+  const fallbackTrace = newFallbackTrace();
+  if (!ragContext && topicId) {
+    const fallbackMatches = await fetchTopicFallbackChunks(adminDb, topicId, fallbackTrace);
+    debugTopicFallbackCount = String(fallbackMatches.length);
+    if (fallbackMatches.length > 0) {
+      const assembled = assembleContext(fallbackMatches, []);
+      ragContext = assembled.ragContext;
+      sourcesUsed = assembled.sourcesUsed;
+      contextChunksCount = assembled.contextChunksCount;
+      searchType = "topic_fallback";
+    }
+  } else if (!ragContext) {
+    debugTopicFallbackCount = topicId
+      ? "ragContextAlreadySet"
+      : "noTopicId";
+  }
+
+  // DEBUG (RL-DEBUG-3): serialize fallback trace into a compact string.
+  const traceStr = (() => {
+    const parts: string[] = [];
+    parts.push(`tsr=${fallbackTrace.topicSummariesCount}`);
+    if (fallbackTrace.topicSummariesError) {
+      parts.push(`tsErr=${fallbackTrace.topicSummariesError}`);
+    }
+    for (const e of fallbackTrace.perSummary) {
+      const segs = [
+        `sid=${e.sid}`,
+        `row=${e.rowFound ? "Y" : "N"}`,
+        `c=${e.chunkRows}`,
+        `b=${e.blockRows}`,
+        `md=${e.mdLen}`,
+        `m=${e.matchesReturned}`,
+      ];
+      if (e.summaryError) segs.push(`sErr=${e.summaryError}`);
+      if (e.chunkError) segs.push(`cErr=${e.chunkError}`);
+      if (e.blockError) segs.push(`bErr=${e.blockError}`);
+      parts.push(`[${segs.join(",")}]`);
+    }
+    return parts.join(" ");
+  })();
+
+  // DEBUG (RL-DEBUG-2): assemble debug suffix for model_used.
+  const debugModelSuffix = `|DEBUG keys=${debugBodyKeys} rsid=${debugRawSid} rtid=${debugRawTid} sid=${summaryId ?? "null"} tid=${topicId ?? "null"} tfb=${debugTopicFallbackCount} ${traceStr}`;
 
   let profileContext = "";
   try {
@@ -512,10 +400,12 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
     .join("\n");
 
   const sanitizedHistory = conversationHistory
-    ? wrapXml("conversation_history", sanitizeForPrompt(conversationHistory, 3000))
+    ? wrapXml("conversation_history", sanitizeForPrompt(conversationHistory, MAX_HISTORY_CONTEXT_CHARS))
     : "";
-  const sanitizedMessage = wrapXml("user_message", sanitizeForPrompt(message, 2000));
-  const sanitizedContext = ragContext ? wrapXml("course_content", sanitizeForPrompt(ragContext, 6000)) : "";
+  const sanitizedMessage = wrapXml("user_message", sanitizeForPrompt(message, MAX_MESSAGE_LENGTH));
+  const sanitizedContext = ragContext
+    ? wrapXml("course_content", sanitizeForPrompt(ragContext, MAX_RAG_CONTEXT_CHARS))
+    : "";
   const userPrompt = `${sanitizedHistory}\n${sanitizedMessage}\n${sanitizedContext}`;
 
   // --- Streaming path: ?stream=1 OR body.stream === true ---------
@@ -527,8 +417,8 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
       const anthropicStream = await generateTextStream({
         prompt: userPrompt,
         systemPrompt,
-        temperature: 0.5,
-        maxTokens: 2500,
+        temperature: CHAT_TEMPERATURE,
+        maxTokens: CHAT_MAX_TOKENS,
       });
 
       const logId = crypto.randomUUID();
@@ -621,7 +511,7 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
                 : null,
               latency_ms: latencyMs,
               search_type: logSearchType,
-              model_used: GENERATE_MODEL,
+              model_used: `${GENERATE_MODEL}${debugModelSuffix}`,
               retrieval_strategy: strategy,
               rerank_applied: rerankApplied,
             })
@@ -657,8 +547,8 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
     const result = await generateText({
       prompt: userPrompt,
       systemPrompt,
-      temperature: 0.5,
-      maxTokens: 2500,
+      temperature: CHAT_TEMPERATURE,
+      maxTokens: CHAT_MAX_TOKENS,
     });
 
     const latencyMs = Date.now() - t0;
@@ -683,7 +573,7 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
           : null,
         latency_ms: latencyMs,
         search_type: logSearchType,
-        model_used: GENERATE_MODEL,
+        model_used: `${GENERATE_MODEL}${debugModelSuffix}`,
         retrieval_strategy: strategy,
         rerank_applied: rerankApplied,
       })

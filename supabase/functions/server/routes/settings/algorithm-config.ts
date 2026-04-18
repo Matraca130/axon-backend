@@ -12,6 +12,7 @@ import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
+import { requireInstitutionRole, isDenied, ALL_ROLES } from "../../auth-helpers.ts";
 
 export const algorithmConfigRoutes = new Hono();
 
@@ -22,12 +23,23 @@ algorithmConfigRoutes.get(
   async (c: Context) => {
     const auth = await authenticate(c);
     if (auth instanceof Response) return auth;
-    const { db } = auth;
+    const { user, db } = auth;
 
     const institutionId = c.req.query("institution_id") ?? null;
 
     if (institutionId && !isUuid(institutionId)) {
       return err(c, "institution_id must be a valid UUID", 400);
+    }
+
+    // SEC-PHASE-2.4 (audit 2026-04-17 iter 19 #1): require membership.
+    // Without this check, the GET trusted RLS alone; if RLS ever flexed,
+    // any authenticated user could read any institution's BKT priors and
+    // NeedScore weights by passing a UUID.
+    if (institutionId) {
+      const check = await requireInstitutionRole(
+        db, user.id, institutionId, ALL_ROLES,
+      );
+      if (isDenied(check)) return err(c, check.message, check.status);
     }
 
     try {

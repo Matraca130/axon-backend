@@ -12,6 +12,7 @@ import type { AfterWriteParams } from "./crud-factory.ts";
 import { getAdminClient } from "./db.ts";
 import { awardXP } from "./xp-engine.ts";
 import { isInFinalsPeriod } from "./lib/finals-detector.ts";
+import { resolveInstitutionFromCourse } from "./lib/institution-resolver.ts";
 
 /**
  * Award a badge by slug. Checks if already earned, inserts, awards XP.
@@ -68,20 +69,6 @@ async function awardBadgeBySlug(
   return true;
 }
 
-/**
- * Resolve institution_id from a study plan's course_id.
- */
-async function resolveInstitutionFromPlan(
-  db: ReturnType<typeof getAdminClient>,
-  courseId: string,
-): Promise<string | null> {
-  const { data } = await db
-    .from("courses")
-    .select("institution_id")
-    .eq("id", courseId)
-    .single();
-  return data?.institution_id ?? null;
-}
 
 /**
  * afterWrite hook for study_plans.
@@ -104,7 +91,7 @@ export function xpHookForFinalsBadges(params: AfterWriteParams): void {
 
       // Resolve institution
       if (!courseId) return;
-      const institutionId = await resolveInstitutionFromPlan(db, courseId);
+      const institutionId = await resolveInstitutionFromCourse(db, courseId);
       if (!institutionId) return;
 
       // --- Sobreviviente de Finales: 3+ finals plans ---
