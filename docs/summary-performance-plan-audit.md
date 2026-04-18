@@ -5,6 +5,23 @@ Fecha: 2026-04-18
 
 Este documento audita el plan de implementación y define los requisitos pre-flight para ejecutarlo con máxima eficiencia. No es el plan mismo (ver resumen en la conversación); es el control de calidad.
 
+## Tabla de contenidos
+
+1. [Verificación factual de supuestos del plan](#1-verificación-factual-de-supuestos-del-plan)
+2. [Calificación del plan](#2-calificación-del-plan)
+3. [Requisitos para máxima eficiencia de implementación](#3-requisitos-para-máxima-eficiencia-de-implementación)
+   - 3.1 Pre-flight (antes del primer commit)
+   - 3.2 Durante implementación (entre commits)
+   - 3.3 Mid-plan checkpoint — Verificación de paridad de embeddings
+   - 3.4 Pre-Commit 3 — Medición empírica de memoria (NUEVO, ex-A4)
+   - 3.5 Post-Commit 3 (validación final)
+   - 3.6 Herramientas / ejecución paralela
+4. [Cambios sugeridos al plan original](#4-cambios-sugeridos-al-plan-original)
+5. [Criterios de éxito del PR](#5-criterios-de-éxito-del-pr)
+6. [Resumen ejecutivo](#6-resumen-ejecutivo) — incluye **bloqueante**: confirmar problema de negocio (latencia vs. costo)
+7. [Auditoría arquitectónica final](#7-auditoría-arquitectónica-final-lente-de-senior-engineer)
+8. [Follow-up tickets](#8-follow-up-tickets-a-abrir-antes-de-mergear)
+
 ---
 
 ## 1. Verificación factual de supuestos del plan
@@ -13,12 +30,12 @@ Antes de implementar, se validaron los supuestos críticos contra el código y l
 
 | Supuesto del plan | Estado | Evidencia |
 |---|---|---|
-| `chunks.embedding` es nullable | ✅ Confirmado | `20260305000003_pgvector_chunks.sql:25` declara `vector(768)` sin NOT NULL; todas las RPC filtran `WHERE ch.embedding IS NOT NULL`. Fallback del Paso 5 es seguro. |
-| Dimensión actual = 1536 | ✅ Confirmado | Migración `20260311000001_embedding_migration_1536.sql` + `EMBEDDING_DIMENSIONS = 1536` en `openai-embeddings.ts:21`. |
-| Los 5 callers de `autoChunkAndEmbed` listados son los únicos | ✅ Confirmado | Grep: `summary-hook.ts:91`, `block-hook.ts:116`, `publish-summary.ts:112`, `ingest-pdf.ts:210`, `re-chunk.ts:150`. |
-| `generateEmbeddings` batchea a 100 internamente | ✅ Confirmado | `openai-embeddings.ts:153-160`. |
-| `generateEmbeddings` preserva orden | ✅ Confirmado | Ordena por `index` server-side (`openai-embeddings.ts:206-208`). |
-| Embedding-cache existe (reduce trabajo real) | ✅ Confirmado | `lib/embedding-cache.ts`, integrado en `generateEmbedding`. |
+| `chunks.embedding` es nullable | ✅ Confirmado | Migración `20260305000003_pgvector_chunks.sql` (DDL inicial) declara `vector` sin NOT NULL; todas las RPC filtran `WHERE ch.embedding IS NOT NULL`. Fallback del Paso 5 es seguro. |
+| Dimensión actual = 1536 | ✅ Confirmado | Migración `20260311000001_embedding_migration_1536.sql` + constante `EMBEDDING_DIMENSIONS` en `openai-embeddings.ts`. |
+| Los 5 callers de `autoChunkAndEmbed` listados son los únicos | ✅ Confirmado | Grep `autoChunkAndEmbed\(`: `summary-hook.ts` (`onSummaryWrite`), `block-hook.ts` (`onBlockWrite`), `publish-summary.ts` (handler `POST /summaries/:id/publish`), `ingest-pdf.ts` (handler `POST /ai/ingest-pdf`), `re-chunk.ts` (handler `POST /ai/re-chunk`). |
+| `generateEmbeddings` batchea a 100 internamente | ✅ Confirmado | Función `generateEmbeddings` en `openai-embeddings.ts`, constante `BATCH_SIZE = 100`. |
+| `generateEmbeddings` preserva orden | ✅ Confirmado | `generateEmbeddingBatch` ordena por `index` server-side antes de devolver. |
+| Embedding-cache existe (reduce trabajo real) | ✅ Confirmado | `lib/embedding-cache.ts` (`getCachedEmbedding`/`setCachedEmbedding`), integrado en `generateEmbedding` (cache check al inicio). |
 
 **Conclusión**: ningún supuesto del plan se contradice con el código. Se puede proceder.
 
@@ -46,7 +63,7 @@ Antes de implementar, se validaron los supuestos críticos contra el código y l
 | H4 | **Rate-limit de OpenAI con paralelización**. Paso 4 corre ingest + block-embed en paralelo → duplica TPM contra OpenAI para un mismo summary. | Media | Verificar headers `x-ratelimit-remaining-tokens` en logs de staging. Si hay headroom, ok. Si no, serializar los pasos 2+4 pero mantener las optimizaciones 1+3+5+6. |
 | H5 | **Concurrencia de publish**. El advisory lock cubre el ingest pero NO el batch de block-embeddings. Dos publish concurrentes harían doble upsert a `summary_block_embeddings`. | Baja | `onConflict: "block_id"` hace el upsert idempotente → no corrompe datos, solo duplica trabajo. Aceptable. Documentar. |
 | H6 | **Sin test dedicado para `publish-summary.ts`**. El plan lo menciona como "opcional". | Media | Añadir `tests/publish_summary_test.ts` en Commit 2 con un mock mínimo de `generateEmbeddings` que verifique: (a) 1 sola llamada, (b) 1 sola upsert cuando bloques ≤ 50. Es la única defensa automatizada contra regresiones en este archivo. |
-| H7 | **Sin feature flag / kill-switch**. Si el Commit 3 introduce un bug en prod, el rollback es un revert manual. | Baja | No crítico si la cobertura de tests es buena. Alternativa: variable de entorno `DISABLE_BATCH_INSERT_EMBEDDINGS=1` que fuerce la vieja ruta UPDATE-por-chunk. Solo si el equipo lo considera necesario. |
+| H7 | **Sin feature flag / kill-switch**. Si el Commit 3 introduce un bug en prod, el rollback es un revert manual + redeploy (5-15min de exposición). | Media | **Bloqueante** (revisado tras review arquitectónica): añadir env var `AUTO_INGEST_BULK_INSERT_ENABLED` (default `false` en prod, `true` en staging) que conmuta entre ruta nueva (bulk insert con embeddings) y vieja (UPDATE por chunk). Costo: 1 if-statement, 1 línea de config. Permite rollout gradual sin redeploy. |
 | H8 | **Observabilidad no aumentada**. Los logs actuales no distinguen "batch path" de "fallback secuencial". | Baja | Añadir al log final `path=batch|sequential_fallback` y `db_roundtrips=N` para que ops pueda medir adopción real del fast-path. |
 | H9 | **`defaultToNull: false` en `.insert()`** mencionado sin verificar que `supabase-js` lo soporte en esta versión. | Baja | `defaultToNull` existe en supabase-js v2.39+. Verificar `deno.json` o el import map. Si no está, usar `.insert()` default — funciona igual para el caso sin columnas faltantes. |
 | H10 | **Sin criterio de "done"** explícito para el PR. | Baja | Añadir al PR description: "p50 publish con 50 bloques baja de X a Y ms; todos los tests del server pasan; manual smoke: publicar un summary y verificar que `chunks.embedding IS NOT NULL` para todas las filas." |
@@ -116,7 +133,36 @@ Para 5 summaries reales con bloques (mezcla de tipos: `prose`, `key_point`, `com
 
 **Si todos los chequeos pasan**: continuar con Commits 2-3 con confianza — solo cambian el *cómo* (batch + bulk insert), no el *qué* (mismo modelo, mismo flatten → mismos embeddings).
 
-### 3.4 Post-Commit 3 (validación final)
+### 3.4 Pre-Commit 3 — Medición empírica de memoria (ex-A4)
+
+Bloqueante. Antes de commitear el bulk insert con embeddings inline, medir el límite real de memoria de Deno Edge Functions. La constante `MAX_BATCH_INSERT_CHUNKS` no debe ser un número redondo elegido por intuición; debe ser empírica.
+
+**Procedimiento**:
+
+1. Crear summary de prueba en staging con 1000 chunks sintéticos (texto largo generado).
+2. Instrumentar antes y después del bulk insert:
+   ```ts
+   const memBefore = Deno.memoryUsage();
+   // ... bulk insert ...
+   const memAfter = Deno.memoryUsage();
+   console.log(JSON.stringify({
+     event: "memory_probe",
+     chunks: chunks.length,
+     heapUsed_delta_mb: (memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024,
+     rss_delta_mb: (memAfter.rss - memBefore.rss) / 1024 / 1024,
+   }));
+   ```
+3. Ejecutar con tamaños: 100, 250, 500, 1000, 2000 chunks. Anotar:
+   - Pico de heap.
+   - Si la función crashea (ENOMEM, killed by runtime).
+   - Latencia del bulk insert (PostgREST puede degradar antes que el runtime).
+4. **Definir `MAX_BATCH_INSERT_CHUNKS`** = 50% del tamaño máximo donde la función completó sin warnings, redondeado hacia abajo a múltiplo de 50.
+
+**Salida**: tabla en el PR description con los 5 puntos medidos. Si el límite empírico < 500, ajustar el guardrail H3 de la sección 2.
+
+**Si no es posible medir en staging** (no hay deployment, no hay acceso): documentar explícitamente y elegir 200 (no 500) como valor conservador. Marcar el ticket de seguimiento como prioridad alta.
+
+### 3.5 Post-Commit 3 (validación final)
 
 - [ ] **Re-medir** el escenario baseline (mismo summary, mismo hardware). Calcular speedup p50 y p95.
 - [ ] **Query de sanidad**:
@@ -130,7 +176,7 @@ Para 5 summaries reales con bloques (mezcla de tipos: `prose`, `key_point`, `com
 - [ ] Verificar `summary_block_embeddings` no tiene duplicados por `block_id`.
 - [ ] Push + PR draft con comparativa baseline/post en la descripción.
 
-### 3.5 Herramientas / ejecución paralela
+### 3.6 Herramientas / ejecución paralela
 
 Para minimizar wall-clock del desarrollo:
 
@@ -155,20 +201,34 @@ Mínimos, no alteran la arquitectura:
 
 El PR se considera listo para merge cuando:
 
-- [x] Los 3 commits pushados en orden.
-- [ ] CI verde en las 3 jobs (unit, server tests, migration safety).
+- [ ] Los 3 commits de implementación (`perf(auto-ingest): preloaded blocks`, `perf(publish): batch + parallel`, `perf(auto-ingest): bulk insert + fused UPDATE`) pushados en orden.
+- [ ] CI verde en las 4 jobs (unit, server tests, scanner, integration).
 - [ ] Baseline vs post-change documentado en PR description con speedup numérico.
 - [ ] `chunks.embedding IS NULL` = 0 en summary de prueba post-publish.
 - [ ] Logs conservan compatibilidad con ops alerting (cadenas `[Auto-Ingest] Done`, `Batch embedding failed, falling back to sequential`).
+- [ ] Feature flag `AUTO_INGEST_BULK_INSERT_ENABLED` operativo y default a OFF en prod (ver H7 actualizado).
+- [ ] 3 follow-up tickets abiertos y enlazados (ver sección 8).
 - [ ] Review aprobado (al menos 1 humano revisa Commit 3 — es el más arriesgado).
 
 ---
 
 ## 6. Resumen ejecutivo
 
-El plan es implementable tal como está. Los huecos H1, H3, H6 son los únicos que recomiendo cerrar **antes** de empezar (agregar baseline, guardrail, test). Los demás son aceptables como follow-ups o comentarios en código.
+### ⚠️ Pre-condición bloqueante: confirmar el problema de negocio
 
-Tiempo estimado: Commit 1 ≈ 30min, Commit 2 ≈ 1h (incluye test), Commit 3 ≈ 1.5h (incluye fallback cuidadoso). Total ≈ 3h de implementación + medición.
+Este PR reduce **wall time** (latencia percibida del publish: típicamente 30s → 6-12s para summaries grandes). **NO reduce el costo de OpenAI**: el conteo de tokens enviados es idéntico. Antes de implementar, confirmar con producto/finanzas que el problema a resolver es:
+
+- ✅ **Latencia** → este PR es la solución correcta.
+- ❌ **Costo de OpenAI** → este PR no ayuda; necesitas chunking incremental (ver A6) o un modelo más barato.
+- ❌ **Throughput agregado del sistema** → este PR ayuda parcialmente (libera el Edge Function antes), pero la limitante real es probablemente la cuota de OpenAI.
+
+Sin esta confirmación, hay riesgo de optimizar lo equivocado.
+
+### Estado del plan
+
+El plan es implementable tal como está. Los huecos **H1, H3, H6, H7** son los únicos que recomiendo cerrar **antes** de empezar (baseline, guardrail empírico de memoria, test dedicado, feature flag). Los demás son aceptables como follow-ups o comentarios en código.
+
+Tiempo estimado: Commit 1 ≈ 30min, Commit 2 ≈ 1h (incluye test), Commit 3 ≈ 1.5h (incluye fallback + feature flag). Total ≈ 3h de implementación + 1h de medición empírica de memoria + 30min de checkpoint de paridad. **≈ 4.5h end-to-end.**
 
 ---
 
@@ -219,7 +279,7 @@ El PR reduce **wall time** (latencia percibida por el usuario que publica) pero 
 
 #### A6 — Re-embed full en cada cambio
 
-El hash check en `auto-ingest.ts:281-296` evita re-trabajo cuando el contenido es idéntico, pero **cualquier edit en cualquier bloque invalida todo el hash y re-genera todos los chunks**. Para un summary con 100 bloques donde el profesor edita 1, se re-embedean los 100. Eso es desperdicio puro.
+El hash check (`computeContentHash` + comparación con `existingChunk.content_hash` dentro de `_autoChunkAndEmbedCore`) evita re-trabajo cuando el contenido es idéntico, pero **cualquier edit en cualquier bloque invalida todo el hash y re-genera todos los chunks**. Para un summary con 100 bloques donde el profesor edita 1, se re-embedean los 100. Eso es desperdicio puro.
 
 **Solución correcta**: hash por bloque + chunking incremental. Es un rediseño profundo del pipeline, claramente fuera de scope, pero **es la mejora 10x** real. El PR actual es 2-5x. Nombrar la diferencia en el PR description gestiona expectativas.
 
@@ -242,7 +302,7 @@ Añadir un parámetro opcional para evitar un SELECT duplicado es pragmático pe
 
 Si yo revisara este PR como staff engineer:
 
-1. **No bloquearía el merge** si los chequeos H1/H3/H6 + paridad (3.3) pasan. La direccion es correcta y el cambio es bisectable.
+1. **No bloquearía el merge** si los chequeos H1/H3/H6/H7 + paridad (3.3) + medición de memoria (3.4) pasan. La dirección es correcta y el cambio es bisectable.
 2. **Pediría 3 follow-up tickets explícitos en el PR description**:
    - Ticket A1: convertir DELETE+INSERT a RPC transaccional.
    - Ticket A6: chunking incremental por bloque (la mejora 10x).
@@ -256,3 +316,33 @@ Si yo revisara este PR como staff engineer:
 **Aprobar con cambios menores.** Es un PR de performance honesto: ataca el cuello de botella correcto con el método correcto y preserva la red de seguridad. La deuda arquitectónica que deja visible (A1-A7) ya existía antes del PR; el PR no la empeora, solo la hace más evidente — lo cual es **bueno**, no malo. Los tickets de seguimiento son la salida correcta.
 
 Lo que **no** se debe hacer: usar este PR como excusa para meter A1-A7. Eso convierte un cambio de 3h en un proyecto de 2 semanas y pierde el momentum del win táctico. Mantener el scope estrecho.
+
+---
+
+## 8. Follow-up tickets (a abrir antes de mergear)
+
+Estos tickets deben crearse **antes del merge** y enlazarse en la PR description. Son la salida formal de A1, A6 y la deuda de observabilidad. Si no se abren, la deuda arquitectónica se pierde y el PR se vuelve un atajo sin compensación futura.
+
+| ID | Título sugerido | Origen | Prioridad | Esfuerzo estimado |
+|---|---|---|---|---|
+| FT-1 | `auto-ingest`: convertir DELETE+INSERT a RPC SQL transaccional | A1 | Alta | 1-2 días (migración + tests) |
+| FT-2 | `auto-ingest`: chunking incremental por bloque (hash por bloque) | A6 | Media | 1-2 semanas (rediseño del pipeline) |
+| FT-3 | observabilidad: reemplazar log scraping por eventos estructurados | A3 | Media | 3-5 días (definir schema + adoptar en alerting) |
+| FT-4 | `auto-ingest`: medir y documentar límite de memoria de Edge Function | A4 | Baja | 1 día (instrumentación + experimento) |
+| FT-5 | refactor `publish-summary.ts` a `PublishSummaryPipeline` | A2 | Baja | 2-3 días (extracción + tests) |
+| FT-6 | `autoChunkAndEmbed`: invertir dependencia a `BlocksSource` (eliminar `preloadedBlocks`) | A7 | Baja | 1 día (cuando aparezca tercer caller) |
+
+**Plantilla de ticket** (para copiar al issue tracker):
+
+```markdown
+**Origen**: PR #298 — audit `docs/summary-performance-plan-audit.md` sección 7.2 / Aₓ.
+
+**Contexto**: [pegar la sección Aₓ correspondiente del audit]
+
+**Definition of Done**:
+- [definir criterios concretos según la solución propuesta en Aₓ]
+
+**Bloquea / desbloquea**: [enlazar a otros FT-* relacionados]
+```
+
+**Política**: si tras 90 días post-merge no se ha avanzado en FT-1 (atomicidad) o FT-2 (incremental), se considera deuda crítica y debe escalarse al tech lead. Los demás pueden vivir como backlog.
