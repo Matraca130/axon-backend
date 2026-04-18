@@ -21,6 +21,21 @@ import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import { timingSafeEqual } from "../../timing-safe.ts";
 
+// Minimal shape we rely on; downstream handlers still validate metadata fields.
+// deno-lint-ignore no-explicit-any
+type StripeEventPayload = { id?: string; type: string; data: { object: any } };
+
+function isStripeEventPayload(x: unknown): x is StripeEventPayload {
+  if (!x || typeof x !== "object") return false;
+  const o = x as Record<string, unknown>;
+  if (typeof o.type !== "string") return false;
+  if (!o.data || typeof o.data !== "object") return false;
+  const data = o.data as Record<string, unknown>;
+  if (data.object === undefined || data.object === null) return false;
+  if (o.id !== undefined && typeof o.id !== "string") return false;
+  return true;
+}
+
 export const webhookRoutes = new Hono();
 
 // ─── POST /webhooks/stripe ───────────────────────────────────────
@@ -37,7 +52,22 @@ webhookRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
   const verified = await verifyStripeSignature(rawBody, signature, webhookSecret);
   if (!verified) return err(c, "Invalid webhook signature", 400);
 
-  const event = JSON.parse(rawBody);
+  let event: StripeEventPayload;
+  try {
+    const parsed = JSON.parse(rawBody);
+    if (!isStripeEventPayload(parsed)) {
+      console.error(
+        `[Stripe Webhook] Payload missing required shape (id/type/data.object) — body length ${rawBody.length}`,
+      );
+      return err(c, "Invalid webhook payload shape", 400);
+    }
+    event = parsed;
+  } catch (e) {
+    console.error(
+      `[Stripe Webhook] Invalid JSON payload (body length ${rawBody.length}): ${(e as Error).message}`,
+    );
+    return err(c, "Invalid JSON payload", 400);
+  }
   const admin = getAdminClient();
 
   // O-7 FIX: Idempotency check

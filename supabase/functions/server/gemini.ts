@@ -1,22 +1,18 @@
 /**
  * gemini.ts — Gemini API helpers for Axon v4.4
  *
- * ⚠️  MULTIMODAL / IMAGE ONLY — Text generation has moved to claude-ai.ts.
+ * ⚠️  MULTIMODAL / IMAGE ONLY — Text generation lives in claude-ai.ts.
  *
  * Active functions:
  *   extractTextFromPdf()  — Gemini 2.5 Flash multimodal PDF text extraction (Fase 7)
  *   fetchWithRetry()      — Shared fetch helper (also used by handler.ts)
- *
- * Legacy (still exported for backward compat):
- *   generateText()        — Gemini text generation (DEPRECATED — use claude-ai.ts)
- *   parseGeminiJson()     — JSON parser (DEPRECATED — use parseClaudeJson from claude-ai.ts)
  *
  * REMOVED function:
  *   generateEmbedding()   — HARD ERROR: Use openai-embeddings.ts instead (D57)
  *
  * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
  *
- * LA-02 FIX: Added AbortController timeout (15s generate, 10s embed)
+ * LA-02 FIX: Added AbortController timeout (30s for PDF extraction)
  * LA-06 FIX: Added retry with exponential backoff for 429/503
  * N3 FIX: Export fetchWithRetry so handler.ts can use it for callGemini
  */
@@ -78,73 +74,6 @@ export async function fetchWithRetry(
     }
   }
   throw new Error("Gemini: max retries exceeded");
-}
-
-// ─── Text Generation ────────────────────────────────────────────
-
-interface GeminiGenerateOpts {
-  prompt: string;
-  systemPrompt?: string;
-  jsonMode?: boolean;
-  temperature?: number;
-  maxTokens?: number;
-}
-
-interface GeminiGenerateResult {
-  text: string;
-  tokensUsed: { input: number; output: number };
-}
-
-export async function generateText(
-  opts: GeminiGenerateOpts,
-): Promise<GeminiGenerateResult> {
-  const key = getApiKey();
-  const model = GENERATE_MODEL;
-  const url = `${GEMINI_BASE}/${model}:generateContent?key=${key}`;
-
-  const body: Record<string, unknown> = {
-    contents: [{ parts: [{ text: opts.prompt }] }],
-    generationConfig: {
-      temperature: opts.temperature ?? 0.7,
-      maxOutputTokens: opts.maxTokens ?? 2048,
-      ...(opts.jsonMode && { responseMimeType: "application/json" }),
-    },
-  };
-
-  if (opts.systemPrompt) {
-    body.systemInstruction = {
-      parts: [{ text: opts.systemPrompt }],
-    };
-  }
-
-  const res = await fetchWithRetry(
-    url,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-    15_000,
-  );
-
-  if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`Gemini API error ${res.status}: ${errBody}`);
-  }
-
-  const data = await res.json();
-  const candidate = data.candidates?.[0];
-  if (!candidate?.content?.parts?.[0]?.text) {
-    throw new Error("Gemini returned no content");
-  }
-
-  return {
-    text: candidate.content.parts[0].text,
-    tokensUsed: {
-      input: data.usageMetadata?.promptTokenCount ?? 0,
-      output: data.usageMetadata?.candidatesTokenCount ?? 0,
-    },
-  };
 }
 
 // ─── Embeddings (REMOVED — W7-RAG01) ────────────────────────────
@@ -266,17 +195,3 @@ export async function extractTextFromPdf(
   };
 }
 
-// ─── Parse JSON safely from Gemini output ───────────────────────
-
-export function parseGeminiJson<T = unknown>(text: string): T {
-  let cleaned = text.trim();
-  if (cleaned.startsWith("```json")) {
-    cleaned = cleaned.slice(7);
-  } else if (cleaned.startsWith("```")) {
-    cleaned = cleaned.slice(3);
-  }
-  if (cleaned.endsWith("```")) {
-    cleaned = cleaned.slice(0, -3);
-  }
-  return JSON.parse(cleaned.trim()) as T;
-}

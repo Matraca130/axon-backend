@@ -55,37 +55,40 @@ function buildFakeJwt(
 // C-1 FIX: extractKey() tests
 // ═════════════════════════════════════════════════════════════════
 
-Deno.test("extractKey: valid JWT with sub → uid:<uuid>", () => {
+Deno.test("extractKey: valid JWT → sig: prefix (SEC: no JWT decode)", () => {
   const token = buildFakeJwt({ sub: "550e8400-e29b-41d4-a716-446655440000" });
   const key = extractKey(token);
-  assertEquals(key, "uid:550e8400-e29b-41d4-a716-446655440000");
+  assertEquals(key.startsWith("sig:"), true, "Should use signature-based key");
 });
 
-Deno.test("extractKey: same user, different signatures → same key", () => {
+Deno.test("extractKey: same user, different signatures → different keys", () => {
   const userId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
   const token1 = buildFakeJwt({ sub: userId }, "signature_v1");
   const token2 = buildFakeJwt({ sub: userId }, "signature_v2");
-  assertEquals(extractKey(token1), extractKey(token2));
-  assertEquals(extractKey(token1), `uid:${userId}`);
+  const key1 = extractKey(token1);
+  const key2 = extractKey(token2);
+  assertEquals(key1.startsWith("sig:"), true);
+  assertEquals(key2.startsWith("sig:"), true);
+  assertEquals(key1 !== key2, true, "Different signatures produce different keys");
 });
 
-Deno.test("extractKey: different users → different keys", () => {
+Deno.test("extractKey: different users with same sig → different keys via payload", () => {
   const token1 = buildFakeJwt({ sub: "user-aaa" }, "same-sig");
   const token2 = buildFakeJwt({ sub: "user-bbb" }, "same-sig");
   const key1 = extractKey(token1);
   const key2 = extractKey(token2);
-  assertEquals(key1.startsWith("uid:"), true);
-  assertEquals(key2.startsWith("uid:"), true);
-  assertEquals(key1 !== key2, true);
+  assertEquals(key1.startsWith("sig:"), true);
+  assertEquals(key2.startsWith("sig:"), true);
+  assertEquals(key1, key2, "Same signature suffix produces same key (sig-based)");
 });
 
-Deno.test("extractKey: JWT without sub → fallback to sig:", () => {
+Deno.test("extractKey: JWT without sub → sig:", () => {
   const token = buildFakeJwt({ email: "no-sub@test.com" });
   const key = extractKey(token);
   assertEquals(key.startsWith("sig:"), true);
 });
 
-Deno.test("extractKey: JWT with empty sub → fallback to sig:", () => {
+Deno.test("extractKey: JWT with empty sub → sig:", () => {
   const token = buildFakeJwt({ sub: "" });
   const key = extractKey(token);
   assertEquals(key.startsWith("sig:"), true);
@@ -106,21 +109,15 @@ Deno.test("extractKey: empty token → raw:", () => {
   assertEquals(key.startsWith("raw:"), true);
 });
 
-Deno.test("extractKey: two tokens with same HS256 header get DIFFERENT keys", () => {
-  // This is the actual bug scenario: both tokens share the same header
-  // but have different subs → should produce different keys
-  const token1 = buildFakeJwt({ sub: "user-111" });
-  const token2 = buildFakeJwt({ sub: "user-222" });
+Deno.test("extractKey: two tokens with different payloads but same sig get SAME key", () => {
+  const token1 = buildFakeJwt({ sub: "user-111" }, "shared-sig");
+  const token2 = buildFakeJwt({ sub: "user-222" }, "shared-sig");
 
-  // Verify both tokens DO share the same first 32 chars (proving the old bug)
-  assertEquals(token1.substring(0, 32), token2.substring(0, 32));
-
-  // But extractKey produces DIFFERENT keys (the fix)
   const key1 = extractKey(token1);
   const key2 = extractKey(token2);
-  assertEquals(key1 !== key2, true);
-  assertEquals(key1, "uid:user-111");
-  assertEquals(key2, "uid:user-222");
+  assertEquals(key1.startsWith("sig:"), true);
+  assertEquals(key2.startsWith("sig:"), true);
+  assertEquals(key1, key2, "Same signature → same key (payload no longer decoded)");
 });
 
 // ═════════════════════════════════════════════════════════════════

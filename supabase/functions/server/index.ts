@@ -68,15 +68,16 @@ function getAllowedOrigin(origin: string): string {
 // Explicit preflight handler — Supabase gateway may not forward OPTIONS to Hono middleware
 app.options("*", (c) => {
   const origin = getAllowedOrigin(c.req.raw.headers.get("Origin") ?? "");
-  return new Response(null, {
-    status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": origin,
-      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Access-Token",
-      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-      "Access-Control-Max-Age": "86400",
-    },
-  });
+  const headers: Record<string, string> = {
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Access-Token",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Max-Age": "86400",
+  };
+  if (origin) {
+    headers["Access-Control-Allow-Origin"] = origin;
+    headers["Access-Control-Allow-Credentials"] = "true";
+  }
+  return new Response(null, { status: 204, headers });
 });
 
 app.use("*", logger(console.warn));
