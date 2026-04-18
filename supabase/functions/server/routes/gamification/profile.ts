@@ -12,6 +12,7 @@ import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
+import { requireInstitutionRole, isDenied, ALL_ROLES } from "../../auth-helpers.ts";
 
 export const profileRoutes = new Hono();
 
@@ -117,6 +118,14 @@ profileRoutes.get(`${PREFIX}/gamification/leaderboard`, async (c: Context) => {
   if (!institutionId || !isUuid(institutionId)) {
     return err(c, "institution_id must be a valid UUID", 400);
   }
+
+  // SEC-PHASE-2.4 (audit 2026-04-17 iter 19 #2): require membership before
+  // returning leaderboard roster. Without this, any authenticated user
+  // could enumerate student_id + XP + level of any institution UUID.
+  const roleCheck = await requireInstitutionRole(
+    db, user.id, institutionId, ALL_ROLES,
+  );
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   const period = c.req.query("period") ?? "weekly";
   let limit = parseInt(c.req.query("limit") ?? "20", 10);

@@ -175,15 +175,25 @@ import { studyQueueRoutes }  from "./routes-study-queue.tsx";
 | `ALL_ROLES` | All roles: owner, admin, professor, student |
 | `CONTENT_WRITE_ROLES` | Roles that can write content: owner, admin, professor |
 
-### `gemini.ts` — Gemini API Helpers
+### `gemini.ts` — Gemini API Helpers (embedding + PDF only)
 
 | Export | Description |
 |---|---|
-| `GENERATE_MODEL` | Current generation model name (`"gemini-2.5-flash"`). Single source of truth |
-| `generateText(opts)` | Call Gemini for text/JSON generation. Includes timeout + retry |
+| `GENERATE_MODEL` | Legacy generation model name (`"gemini-2.5-flash"`). Text generation now lives in `claude-ai.ts`; this constant is retained for embedding telemetry tags |
 | `generateEmbedding(text, taskType)` | Generate 768-dim embedding vector. Includes timeout + retry |
-| `parseGeminiJson(text)` | Safely parse JSON from Gemini output (strips markdown fences) |
+| `extractTextFromPdf(buffer)` | Extract plain text + page metadata from a PDF via Gemini |
 | `getApiKey()` | Get GEMINI_API_KEY from Deno.env (throws if missing) |
+| `fetchWithRetry(url, opts)` | Generic fetch with retry on transient errors |
+
+### `claude-ai.ts` — Claude API Helpers
+
+| Export | Description |
+|---|---|
+| `generateText(opts)` | Call Claude for text/JSON generation. Includes timeout + retry |
+| `parseClaudeJson<T>(text)` | Safely parse JSON from Claude output (strips markdown fences) |
+| `chat(messages, opts)` | Multi-turn chat call (system + user/assistant turns) |
+| `getModelId(model)` | Resolve `"opus" \| "sonnet" \| "haiku"` to the active model id |
+| `getClaudeApiKey()` | Get CLAUDE_API_KEY from Deno.env (throws if missing) |
 
 ### `retrieval-strategies.ts` — Fase 6: Advanced Retrieval Strategies
 

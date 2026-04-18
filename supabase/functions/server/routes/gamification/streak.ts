@@ -202,6 +202,19 @@ streakRoutes.post(`${PREFIX}/gamification/streak-freeze/buy`, async (c: Context)
       );
     }
 
+    // RPC-ONLY RULE NOTE:
+    //   The primary path for this endpoint is the atomic `buy_streak_freeze`
+    //   RPC (see above, which handles UPDATE student_xp + INSERT
+    //   xp_transactions in a single transaction). This fallback only runs
+    //   when the RPC is not deployed / errors out.
+    //
+    //   awardXP() / award_xp RPC reject xpBase <= 0, so they cannot be used
+    //   for deductions. There is no dedicated `deduct_xp` RPC yet.
+    //
+    //   TODO: Create a `deduct_xp` RPC (mirror of award_xp) and replace this
+    //   manual UPDATE + xp_transactions INSERT. Until then, we defer the
+    //   streak_freezes INSERT until after the XP deduction succeeds and
+    //   roll back on failure to preserve transactional safety.
     const { error: deductErr } = await adminDb
       .from("student_xp")
       .update({
@@ -328,6 +341,18 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
       );
     }
 
+    // RPC-ONLY RULE NOTE:
+    //   awardXP() / award_xp RPC reject xpBase <= 0, so they cannot be used
+    //   for deductions. There is no dedicated `deduct_xp` RPC nor a
+    //   `repair_streak` RPC analogous to `buy_streak_freeze`.
+    //
+    //   TODO: Create either a `deduct_xp` RPC or an atomic
+    //   `repair_streak` RPC (modelled on `buy_streak_freeze`) that wraps
+    //   the XP deduction + xp_transactions INSERT + student_stats UPDATE
+    //   in a single transaction. Until then, we sequence the side-effects
+    //   (streak restore, repair record, tx log) AFTER the XP mutation and
+    //   roll back the deduction on streak-restore failure to keep this
+    //   transactionally safe within JS.
     const { error: deductErr } = await adminDb
       .from("student_xp")
       .update({

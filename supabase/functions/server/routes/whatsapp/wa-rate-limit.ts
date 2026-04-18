@@ -1,6 +1,8 @@
 /**
  * routes/whatsapp/wa-rate-limit.ts — WhatsApp-specific rate limiting (S12)
  *
+ * Thin wrapper over routes/_messaging/rate-limit-base.ts.
+ *
  * Separate from rate-limit.ts (Hono middleware, JWT-based) because:
  *   - Webhook requests have NO JWT (authenticated via HMAC)
  *   - We rate-limit by phone hash, not by user ID
@@ -16,29 +18,19 @@
  */
 
 import { sendText } from "./wa-client.ts";
+import {
+  createRateLimiter,
+  type RateLimitResult,
+} from "../_messaging/rate-limit-base.ts";
 
-// ─── Configuration ───────────────────────────────────────
+export type { RateLimitResult };
 
-const WINDOW_MS = 60_000; // 1 minute
-const LINKED_LIMIT = 30;
-const UNLINKED_LIMIT = 10;
-const CLEANUP_INTERVAL_MS = 5 * 60_000;
-
-// ─── Types ──────────────────────────────────────────────
-
-export type RateLimitResult = "allowed" | "first_block" | "silent_block";
-
-interface RateLimitEntry {
-  count: number;
-  resetAt: number;
-}
-
-// ─── State ──────────────────────────────────────────────
-
-const phoneLimitMap = new Map<string, RateLimitEntry>();
-let lastCleanup = Date.now();
-
-// ─── Core ───────────────────────────────────────────────
+const limiter = createRateLimiter({
+  logLabel: "WA-RateLimit",
+  sendNotification: async (target, message) => {
+    await sendText(String(target), message);
+  },
+});
 
 /**
  * Check if a phone number has exceeded its rate limit.
@@ -55,34 +47,7 @@ export function checkWhatsAppRateLimit(
   phoneKey: string,
   isLinked: boolean,
 ): RateLimitResult {
-  const now = Date.now();
-  const limit = isLinked ? LINKED_LIMIT : UNLINKED_LIMIT;
-
-  // Periodic cleanup
-  if (now - lastCleanup > CLEANUP_INTERVAL_MS) {
-    cleanupExpired(now);
-  }
-
-  const entry = phoneLimitMap.get(phoneKey);
-
-  if (!entry || now > entry.resetAt) {
-    phoneLimitMap.set(phoneKey, { count: 1, resetAt: now + WINDOW_MS });
-    return "allowed";
-  }
-
-  entry.count++;
-
-  if (entry.count === limit + 1) {
-    // C4 FIX: First time exceeding limit — send notification
-    return "first_block";
-  }
-
-  if (entry.count > limit + 1) {
-    // C4 FIX: Already notified — silently drop to avoid spam
-    return "silent_block";
-  }
-
-  return "allowed";
+  return limiter.check(phoneKey, isLinked);
 }
 
 /**
@@ -90,33 +55,10 @@ export function checkWhatsAppRateLimit(
  * Fire-and-forget; errors are logged but don't propagate.
  */
 export async function sendRateLimitMessage(phone: string): Promise<void> {
-  try {
-    await sendText(
-      phone,
-      "\u23f3 Demasiados mensajes. Esperá un minuto antes de enviar otro. \ud83d\ude4f",
-    );
-  } catch {
-    // Best-effort
-  }
-}
-
-// ─── Cleanup ────────────────────────────────────────────
-
-function cleanupExpired(now: number): void {
-  let cleaned = 0;
-  for (const [key, entry] of phoneLimitMap) {
-    if (now > entry.resetAt) {
-      phoneLimitMap.delete(key);
-      cleaned++;
-    }
-  }
-  lastCleanup = now;
-  if (cleaned > 0) {
-    console.warn(`[WA-RateLimit] Cleaned ${cleaned} expired entries`);
-  }
+  await limiter.sendRateLimitMessage(phone);
 }
 
 /** Returns the current map size (for health checks/diagnostics). */
 export function getRateLimitMapSize(): number {
-  return phoneLimitMap.size;
+  return limiter.getMapSize();
 }

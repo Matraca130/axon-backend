@@ -60,7 +60,7 @@ muxApiRoutes.post(`${PREFIX}/mux/create-upload`, async (c: Context) => {
   const muxRes = await muxFetch("/video/v1/uploads", {
     method: "POST",
     body: JSON.stringify({
-      cors_origin: "*",
+      cors_origin: Deno.env.get("FRONTEND_ORIGIN") ?? "*",
       new_asset_settings: { playback_policy: ["signed"], mp4_support: 'capped-1080p' },
     }),
   });

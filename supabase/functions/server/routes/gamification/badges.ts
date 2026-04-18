@@ -35,10 +35,17 @@ import { tryAwardBadge } from "../../lib/badge-award.ts";
 export const badgeRoutes = new Hono();
 
 // --- GET /gamification/badges ---
+// CROSS-TENANT FIX: require institution_id and filter student_badges by it
+// to prevent leaking earned badges across institutions.
 badgeRoutes.get(`${PREFIX}/gamification/badges`, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
   const { user, db } = auth;
+
+  const institutionId = c.req.query("institution_id");
+  if (!institutionId || !isUuid(institutionId)) {
+    return err(c, "institution_id must be a valid UUID", 400);
+  }
 
   const category = c.req.query("category");
 
@@ -58,7 +65,8 @@ badgeRoutes.get(`${PREFIX}/gamification/badges`, async (c: Context) => {
     db
       .from("student_badges")
       .select("badge_id, created_at")
-      .eq("student_id", user.id),
+      .eq("student_id", user.id)
+      .eq("institution_id", institutionId),
   ]);
 
   if (defsResult.error) {

@@ -1,7 +1,7 @@
 /**
  * gemini.ts — Gemini API helpers for Axon v4.4
  *
- * ⚠️  MULTIMODAL / IMAGE ONLY — Text generation has moved to claude-ai.ts.
+ * ⚠️  MULTIMODAL / IMAGE ONLY — Text generation lives in claude-ai.ts.
  *
  * Active functions:
  *   extractTextFromPdf()  — Gemini 2.5 Flash multimodal PDF text extraction (Fase 7)
@@ -13,7 +13,7 @@
  *
  * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
  *
- * LA-02 FIX: Added AbortController timeout (15s generate, 10s embed)
+ * LA-02 FIX: Added AbortController timeout (30s for PDF extraction)
  * LA-06 FIX: Added retry with exponential backoff for 429/503
  * N3 FIX: Export fetchWithRetry so handler.ts can use it for callGemini
  */
@@ -54,11 +54,6 @@ interface GeminiGenerateOpts {
   maxTokens?: number;
 }
 
-interface GeminiGenerateResult {
-  text: string;
-  tokensUsed: { input: number; output: number };
-}
-
 // deno-lint-ignore no-unused-vars
 export function generateText(_opts: GeminiGenerateOpts): never {
   throw new Error(
@@ -68,6 +63,7 @@ export function generateText(_opts: GeminiGenerateOpts): never {
     "Gemini is used ONLY for multimodal/PDF extraction (extractTextFromPdf).",
   );
 }
+
 
 // ─── Embeddings (REMOVED — W7-RAG01) ────────────────────────────
 //

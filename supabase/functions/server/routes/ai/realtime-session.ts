@@ -232,7 +232,9 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
   const adminDb = getAdminClient();
 
   // 2b. Voice-call rate limit (own bucket, 10 calls/hour)
-  // SEC-NOTE: We fail-open on RPC errors to avoid blocking all voice calls if the RPC is missing. The RPC should be deployed before this code.
+  // SEC: fail-closed. An attacker can force rlError by revoking privileges on
+  // check_rate_limit or by targeted DB disruption; failing open let them mint
+  // unlimited OpenAI Realtime ephemeral tokens (direct wallet drain).
   const VOICE_RATE_LIMIT = 10;
   const VOICE_RATE_WINDOW_MS = 3600000;
   try {
@@ -243,10 +245,10 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
     });
 
     if (rlError) {
-      // RPC call itself failed (e.g. RPC missing, DB down) — fail-open to avoid blocking all voice calls
-      console.error("[Realtime] Rate limit RPC error (fail-open, allowing request):", rlError.message);
-    } else if (rlData && !rlData.allowed) {
-      // Actual rate limit exceeded — fail-closed
+      console.error("[Realtime] Rate limit RPC error (fail-closed):", rlError.message);
+      return err(c, "Rate limit check unavailable", 503);
+    }
+    if (rlData && !rlData.allowed) {
       return err(
         c,
         `Voice call rate limit exceeded: max ${VOICE_RATE_LIMIT} calls per hour. ` +
@@ -255,8 +257,8 @@ aiRealtimeRoutes.post(`${PREFIX}/ai/realtime-session`, async (c: Context) => {
       );
     }
   } catch (rlException) {
-    // Unexpected exception (network error, etc.) — fail-open
-    console.error("[Realtime] Rate limit check exception (fail-open, allowing request):", (rlException as Error).message);
+    console.error("[Realtime] Rate limit check exception (fail-closed):", (rlException as Error).message);
+    return err(c, "Rate limit check unavailable", 503);
   }
 
   // 3. Gather student context (parallel queries)

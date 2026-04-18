@@ -1,8 +1,8 @@
 # AI Pipeline Reference -- Axon v4.5
 
 > **For agents:** This document explains the complete AI/RAG system.
-> Read this BEFORE touching any file in `routes/ai/` or `gemini.ts`.
-> **Updated:** 2026-03-14 (audit pass 6 — embedding migration reflected)
+> Read this BEFORE touching any file in `routes/ai/`, `claude-ai.ts`, or `gemini.ts`.
+> **Updated:** 2026-04-16 (text generation migrated from `gemini.ts` to `claude-ai.ts`; `generateText()` and `parseClaudeJson()` are the canonical helpers. `gemini.ts` retains embeddings + PDF extraction only.)
 
 ---
 
@@ -10,22 +10,27 @@
 
 ```
 +----------------------------------+     +------------------------------+
-|         gemini.ts                |     |   openai-embeddings.ts       |
+|         claude-ai.ts             |     |   openai-embeddings.ts       |
 |  (Text generation ONLY)          |     |   (Embeddings ONLY)          |
 |                                  |     |                              |
-|  GENERATE_MODEL = gemini-2.5-flash|     |  EMBEDDING_MODEL =           |
-|  generateText()     -> Gemini API |     |    text-embedding-3-large    |
-|  extractTextFromPdf()-> Gemini    |     |  EMBEDDING_DIMENSIONS = 1536 |
-|  parseGeminiJson()  -> JSON parse |     |  generateEmbedding() -> OpenAI|
-|  fetchWithRetry()   -> retry      |     +------------------------------+
-|                                  |               | imported by
-|  generateEmbedding() = HARD ERROR|     +---------+---------+
-|  (throws immediately, W7-RAG01)  |     | ingest.ts         |
-+----------+-----------------------+     | chat.ts           |
-           | imported by                  | auto-ingest.ts    |
-    +------+------+------+               | ingest-pdf.ts     |
-    |      |      |      |               +-------------------+
- generate chat  report pre-gen
+|  generateText()     -> Claude API |     |  EMBEDDING_MODEL =           |
+|  parseClaudeJson()  -> JSON parse |     |    text-embedding-3-large    |
+|  chat()             -> multi-turn |     |  EMBEDDING_DIMENSIONS = 1536 |
+|  fetchWithRetry()   -> retry      |     |  generateEmbedding() -> OpenAI|
+|                                  |     +------------------------------+
++----------+-----------------------+               | imported by
+           | imported by                  +---------+---------+
+    +------+------+------+               | ingest.ts         |
+    |      |      |      |               | chat.ts           |
+ generate chat  report pre-gen           | auto-ingest.ts    |
+                                          | ingest-pdf.ts     |
++----------------------------------+     +-------------------+
+|         gemini.ts                |
+|  (Embeddings + PDF only)         |
+|  GENERATE_MODEL = gemini-2.5-flash (legacy tag)
+|  generateEmbedding()            |
+|  extractTextFromPdf()           |
++----------------------------------+
 ```
 
 ## Model Configuration
