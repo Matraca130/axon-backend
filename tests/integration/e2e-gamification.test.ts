@@ -1,11 +1,11 @@
 /**
- * tests/unit/e2e-gamification.test.ts — 22 tests for gamification subsystem
+ * tests/integration/e2e-gamification.test.ts — 22 tests for gamification subsystem
  *
  * Tests cover: XP engine, badge evaluation, streak logic, advisory locks,
  * level calculation, and the gamification dispatcher's lock key derivation.
  *
  * ZERO dependency on db.ts — runs without env vars.
- * Run: deno test tests/unit/e2e-gamification.test.ts --no-check
+ * Run: deno test tests/integration/e2e-gamification.test.ts --no-check
  */
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/assert_equals.ts";
 import { assert } from "https://deno.land/std@0.224.0/assert/assert.ts";

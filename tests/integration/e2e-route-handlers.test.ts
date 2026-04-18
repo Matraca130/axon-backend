@@ -1,12 +1,12 @@
 /**
- * tests/unit/e2e-route-handlers.test.ts — 20 tests for route handler logic
+ * tests/integration/e2e-route-handlers.test.ts — 20 tests for route handler logic
  *
  * Tests cover: response format consistency, error code mapping, CORS
  * origin validation, rate limiting logic, pagination, and safe error
  * sanitization. All tested via pure functions without network/env deps.
  *
  * ZERO dependency on db.ts — runs without env vars.
- * Run: deno test tests/unit/e2e-route-handlers.test.ts --no-check
+ * Run: deno test tests/integration/e2e-route-handlers.test.ts --no-check
  */
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/assert_equals.ts";
 import { assert } from "https://deno.land/std@0.224.0/assert/assert.ts";
