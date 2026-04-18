@@ -45,6 +45,7 @@ import {
   ALL_ROLES,
   CONTENT_WRITE_ROLES,
 } from "./auth-helpers.ts";
+import { resolveInstitutionViaRpc } from "./lib/institution-resolver.ts";
 import type { Context } from "npm:hono";
 
 // ─── Constants ────────────────────────────────────────────────────
@@ -168,16 +169,7 @@ async function resolveInstitutionFromParent(
   const parentTable = PARENT_KEY_TO_TABLE[parentKey];
   if (!parentTable) return null; // Unknown parent key → fail-closed
 
-  try {
-    const { data, error } = await db.rpc("resolve_parent_institution", {
-      p_table: parentTable,
-      p_id: parentValue,
-    });
-    if (error || !data) return null;
-    return data as string;
-  } catch {
-    return null;
-  }
+  return resolveInstitutionViaRpc(db, parentTable, parentValue);
 }
 
 /**
@@ -189,16 +181,7 @@ async function resolveInstitutionFromRow(
   table: string,
   rowId: string,
 ): Promise<string | null> {
-  try {
-    const { data, error } = await db.rpc("resolve_parent_institution", {
-      p_table: table,
-      p_id: rowId,
-    });
-    if (error || !data) return null;
-    return data as string;
-  } catch {
-    return null;
-  }
+  return resolveInstitutionViaRpc(db, table, rowId);
 }
 
 /**

@@ -25,6 +25,7 @@ import {
 } from "../../auth-helpers.ts";
 import { fireFirstCompletionSignal } from "./helpers.ts";
 import { xpHookForVideoComplete } from "../../xp-hooks.ts";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 export const muxTrackingRoutes = new Hono();
 
@@ -54,13 +55,8 @@ muxTrackingRoutes.post(`${PREFIX}/mux/track-view`, async (c: Context) => {
   if (videoErr || !videoRow)
     return err(c, "Video not found", 404);
 
-  const { data: instId } = await db.rpc("resolve_parent_institution", {
-    p_table: "summaries",
-    p_id: videoRow.summary_id,
-  });
-  if (!instId) return err(c, "Cannot resolve video institution", 404);
-
-  const institution_id = instId as string;
+  const institution_id = await resolveInstitutionViaRpc(db, "summaries", videoRow.summary_id);
+  if (!institution_id) return err(c, "Cannot resolve video institution", 404);
 
   // Verify user has membership in this institution
   const roleCheck = await requireInstitutionRole(

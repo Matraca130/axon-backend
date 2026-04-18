@@ -16,6 +16,7 @@ import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
 import { isUuid } from "../../validate.ts";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -54,11 +55,8 @@ aiWeakPointsRoutes.get(
       return err(c, "topic_id query param is required (valid UUID)", 400);
 
     // ── Resolve institution from topic ──────────────────────────
-    const { data: institutionId, error: resolveErr } = await db.rpc(
-      "resolve_parent_institution",
-      { p_table: "topics", p_id: topicId },
-    );
-    if (resolveErr || !institutionId)
+    const institutionId = await resolveInstitutionViaRpc(db, "topics", topicId);
+    if (!institutionId)
       return err(c, "Could not resolve institution for this topic", 404);
 
     // ── Verify role (any role is allowed) ───────────────────────

@@ -25,9 +25,8 @@ import {
 } from "../../supabase/functions/server/routes/gamification/helpers.ts";
 
 import {
-  fnv1a32,
-  postEvalLockKey,
-} from "../../supabase/functions/server/gamification-dispatcher.ts";
+  advisoryLockKey,
+} from "../../supabase/functions/server/lib/advisory-lock.ts";
 
 // ═══ XP TABLE — Action XP Values ═══
 
@@ -150,31 +149,50 @@ Deno.test("GOAL_BONUS_XP has positive values for all goal types", () => {
 
 // ═══ ADVISORY LOCK KEY DERIVATION (Race Condition Handling) ═══
 
-Deno.test("fnv1a32: deterministic hash (same input = same output)", () => {
-  const hash1 = fnv1a32("student-123:post_eval");
-  const hash2 = fnv1a32("student-123:post_eval");
+Deno.test("advisoryLockKey: deterministic hash (same input = same output)", () => {
+  const hash1 = advisoryLockKey("student-123:post_eval");
+  const hash2 = advisoryLockKey("student-123:post_eval");
   assertEquals(hash1, hash2);
 });
 
-Deno.test("fnv1a32: different inputs produce different hashes", () => {
-  const hash1 = fnv1a32("student-123:post_eval");
-  const hash2 = fnv1a32("student-456:post_eval");
+Deno.test("advisoryLockKey: different inputs produce different hashes", () => {
+  const hash1 = advisoryLockKey("student-123:post_eval");
+  const hash2 = advisoryLockKey("student-456:post_eval");
   assert(hash1 !== hash2, "Different students should get different lock keys");
 });
 
-Deno.test("fnv1a32: returns positive 32-bit integer (safe for pg advisory lock)", () => {
+Deno.test("advisoryLockKey: returns positive 32-bit integer (safe for pg advisory lock)", () => {
   const inputs = ["test", "", "a".repeat(1000), "student-uuid-here:post_eval"];
   for (const input of inputs) {
-    const hash = fnv1a32(input);
+    const hash = advisoryLockKey(input);
     assert(hash >= 0, `Hash for "${input.slice(0, 20)}..." must be >= 0`);
     assert(hash <= 0xFFFFFFFF, `Hash for "${input.slice(0, 20)}..." must be <= 2^32-1`);
     assert(Number.isInteger(hash), `Hash must be an integer`);
   }
 });
 
-Deno.test("postEvalLockKey: appends :post_eval suffix before hashing", () => {
+Deno.test("advisoryLockKey: post_eval suffix produces consistent key", () => {
   const studentId = "550e8400-e29b-41d4-a716-446655440000";
-  const key = postEvalLockKey(studentId);
-  const manual = fnv1a32(`${studentId}:post_eval`);
+  const key = advisoryLockKey(`${studentId}:post_eval`);
+  const manual = advisoryLockKey(`${studentId}:post_eval`);
   assertEquals(key, manual);
+});
+
+// ═══ ADVISORY LOCK — Pinning Tests (FNV-1a 32-bit unsigned) ═══
+// Pin exact hash values so any accidental algorithm change (e.g. switching
+// back to djb2 or changing encoding) fails the suite. Regenerate via:
+//   deno eval 'import {advisoryLockKey} from "./.../advisory-lock.ts"; console.log(advisoryLockKey("..."))'
+Deno.test("advisoryLockKey: pinned value — empty string (FNV offset basis)", () => {
+  assertEquals(advisoryLockKey(""), 2166136261); // 0x811c9dc5
+});
+
+Deno.test("advisoryLockKey: pinned value — 'test'", () => {
+  assertEquals(advisoryLockKey("test"), 2949673445);
+});
+
+Deno.test("advisoryLockKey: pinned values — gamification lock key suffixes", () => {
+  const studentId = "550e8400-e29b-41d4-a716-446655440000";
+  assertEquals(advisoryLockKey(`${studentId}:post_eval`), 991361007);
+  assertEquals(advisoryLockKey(`${studentId}:streak_freeze`), 3093196886);
+  assertEquals(advisoryLockKey(`${studentId}:streak_repair`), 440929696);
 });

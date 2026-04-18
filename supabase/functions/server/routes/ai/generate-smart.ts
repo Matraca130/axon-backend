@@ -67,6 +67,7 @@ import type { SmartTarget, BulkGeneratedItem, BulkErrorItem } from "./generate-s
 import { ACTIONS, MAX_BULK_COUNT, truncateForPrompt, adaptiveTemperature } from "./generate-smart-helpers.ts";
 import type { PromptContext } from "./generate-smart-prompts.ts";
 import { SYSTEM_PROMPT, buildQuizPrompt, buildFlashcardPrompt } from "./generate-smart-prompts.ts";
+import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 export const aiGenerateSmartRoutes = new Hono();
 
@@ -356,21 +357,18 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
       (targets[0] as SmartTarget);
 
     // Institution scoping (PF-05, BUG-3)
-    const { data: resolvedInstId } = await db.rpc(
-      "resolve_parent_institution",
-      { p_table: "summaries", p_id: chosen.summary_id },
-    );
+    const resolvedInstId = await resolveInstitutionViaRpc(db, "summaries", chosen.summary_id);
     if (!resolvedInstId)
       return err(c, "Summary not found or inaccessible", 404);
 
     const roleCheck = await requireInstitutionRole(
-      db, user.id, resolvedInstId as string, ALL_ROLES,
+      db, user.id, resolvedInstId, ALL_ROLES,
     );
     if (isDenied(roleCheck))
       return err(c, roleCheck.message, roleCheck.status);
 
     // ── Plan limit enforcement ──────────────────────────────
-    const planCheck = await checkPlanLimit(db, user.id, resolvedInstId as string);
+    const planCheck = await checkPlanLimit(db, user.id, resolvedInstId);
     if (!planCheck.allowed) {
       return err(c, `Daily AI generation limit reached (${planCheck.limit}). Upgrade your plan.`, 429);
     }
@@ -460,17 +458,15 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
 
   for (const sid of uniqueSummaryIds) {
     // PF-05: Institution check BEFORE any Claude call
-    const { data: instId } = await db.rpc("resolve_parent_institution", {
-      p_table: "summaries", p_id: sid,
-    });
+    const instId = await resolveInstitutionViaRpc(db, "summaries", sid);
     if (!instId) return err(c, `Summary ${sid} not found or inaccessible`, 404);
 
     const roleCheck = await requireInstitutionRole(
-      db, user.id, instId as string, ALL_ROLES,
+      db, user.id, instId, ALL_ROLES,
     );
     if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
-    institutionIdCache.set(sid, instId as string);
+    institutionIdCache.set(sid, instId);
 
     const { data: summaryData } = await db
       .from("summaries")
