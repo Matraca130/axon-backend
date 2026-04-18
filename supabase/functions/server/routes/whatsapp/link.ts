@@ -1,27 +1,24 @@
 /**
  * routes/whatsapp/link.ts — Phone linking flow
  *
- * N4 FIX: Linking code masked in logs (****XX instead of full 6 digits).
- * N7 FIX: Removed unused CODE_LENGTH constant.
+ * N4 FIX: Linking code masked in logs (****XX instead of full code).
+ * SEC-AUDIT FIX: CODE_LENGTH reintroduced — bumped from 6 to 10 digits
+ *   and shared failure-tracker added for defense-in-depth.
  */
 
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, getAdminClient } from "../../db.ts";
 import { hashPhone, generateSalt, sendText } from "./wa-client.ts";
 import { computeLookupHash } from "./webhook.ts";
+import { createLinkingAttemptsTracker } from "../_messaging/linking-attempts.ts";
+import { generateLinkingCode, isLinkingCode as sharedIsLinkingCode } from "../_messaging/linking-code.ts";
 
 // ─── Constants ───────────────────────────────────────────
 
 const CODE_EXPIRY_SECONDS = 300; // 5 minutes
 
-// ─── Code Generation ─────────────────────────────────────
-
-function generateCode(): string {
-  const array = new Uint32Array(1);
-  crypto.getRandomValues(array);
-  const code = 100_000 + (array[0] % 900_000);
-  return code.toString();
-}
+// SEC-AUDIT FIX: per-phone lockout after 5 failed linking attempts per hour.
+const attempts = createLinkingAttemptsTracker("WA-Link");
 
 // ─── Web Endpoint: Generate Link Code ─────────────────────
 
@@ -42,7 +39,7 @@ export async function generateLinkCode(c: Context): Promise<Response> {
     return err(c, "Ya ten\u00e9s un tel\u00e9fono vinculado. Desvincul\u00e1 primero para vincular otro.", 409);
   }
 
-  const code = generateCode();
+  const code = generateLinkingCode();
   const expiresAt = new Date(Date.now() + CODE_EXPIRY_SECONDS * 1000).toISOString();
 
   const linkingPhoneHash = `linking:${user.id}`;
@@ -86,7 +83,15 @@ export async function generateLinkCode(c: Context): Promise<Response> {
 export async function verifyLinkCode(
   phoneNumber: string,
   code: string,
-): Promise<{ success: boolean; userId?: string; phoneHash?: string }> {
+): Promise<{ success: boolean; userId?: string; phoneHash?: string; lockedOut?: boolean }> {
+  const attemptKey = `wa:${phoneNumber}`;
+
+  // SEC-AUDIT FIX: lock out phone after 5 failed attempts per hour.
+  if (!attempts.allow(attemptKey)) {
+    console.warn(`[WA-Link] Phone ${phoneNumber.slice(0, 4)}**** locked out (too many failed attempts)`);
+    return { success: false, lockedOut: true };
+  }
+
   const db = getAdminClient();
 
   const { data: sessions, error: searchError } = await db
@@ -110,6 +115,7 @@ export async function verifyLinkCode(
   });
 
   if (!matchingSession) {
+    attempts.recordFailure(attemptKey);
     return { success: false };
   }
 
@@ -154,14 +160,13 @@ export async function verifyLinkCode(
     .delete()
     .eq("phone_hash", matchingSession.phone_hash);
 
+  attempts.reset(attemptKey);
   console.warn(`[WA-Link] Phone linked for user ${userId}. Hash: ${phoneHash.slice(0, 8)}...`);
 
   return { success: true, userId, phoneHash };
 }
 
-export function isLinkingCode(text: string): boolean {
-  return /^\d{6}$/.test(text.trim());
-}
+export const isLinkingCode = sharedIsLinkingCode;
 
 // ─── Unlink Phone ───────────────────────────────────────
 

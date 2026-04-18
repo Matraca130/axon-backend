@@ -28,6 +28,31 @@ const SIGNED_URL_EXPIRY = 3600;
 const VALID_FOLDERS = ["flashcards", "summaries", "general"];
 const MAX_BATCH_PATHS = 100;
 
+/**
+ * SEC-AUDIT FIX: strict ownership check for storage paths.
+ * Must start with "<validFolder>/<user.id>/" and must not contain traversal,
+ * empty segments, backslashes, null bytes, or other control characters.
+ * The previous `p.includes(`/${user.id}/`)` accepted the user UUID anywhere
+ * in the path, permitting crafted paths like `x/<attacker>/../<victim>/file`
+ * to bypass the check.
+ *
+ * Upload paths are generated server-side as `${folder}/${user.id}/...`, so
+ * legitimate objects always satisfy this prefix. Anything else is refused.
+ */
+// deno-lint-ignore no-control-regex
+const CONTROL_CHARS_RE = /[\x00-\x1f\x7f]/;
+
+export function isOwnedStoragePath(path: string, userId: string): boolean {
+  if (typeof path !== "string" || path.length === 0) return false;
+  if (path.length > 1024) return false; // Supabase storage key size guard
+  if (CONTROL_CHARS_RE.test(path)) return false;
+  if (path.includes("..")) return false;
+  if (path.includes("//")) return false;
+  if (path.includes("\\")) return false;
+  if (path.startsWith("/")) return false;
+  return VALID_FOLDERS.some((folder) => path.startsWith(`${folder}/${userId}/`));
+}
+
 // ─── Bucket Init ───────────────────────────────────────────────────
 
 let bucketReady = false;
@@ -210,9 +235,10 @@ storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
       return err(c, `Maximum ${MAX_BATCH_PATHS} paths per batch request`, 400);
     }
 
-    // Ownership check: every path must belong to the requesting user
+    // SEC-AUDIT FIX: strict ownership check — must start with "<folder>/<user.id>/"
+    // and reject path traversal. Previous substring check allowed crafted paths.
     const unauthorized = (body.paths as string[]).filter(
-      (p: string) => !p.includes(`/${user.id}/`),
+      (p: string) => !isOwnedStoragePath(p, user.id),
     );
     if (unauthorized.length > 0) {
       return err(
@@ -237,8 +263,8 @@ storageRoutes.post(`${PREFIX}/storage/signed-url`, async (c: Context) => {
     return err(c, "Missing 'path' or 'paths' in request body", 400);
   }
 
-  // Ownership check: path must belong to the requesting user
-  if (!(body.path as string).includes(`/${user.id}/`)) {
+  // SEC-AUDIT FIX: strict ownership check (see isOwnedStoragePath).
+  if (!isOwnedStoragePath(body.path as string, user.id)) {
     return err(
       c,
       "Cannot generate signed URL for a file owned by another user",
@@ -278,8 +304,9 @@ storageRoutes.delete(`${PREFIX}/storage/delete`, async (c: Context) => {
     return err(c, "Missing 'path' or 'paths' in request body", 400);
   }
 
+  // SEC-AUDIT FIX: strict ownership check (see isOwnedStoragePath).
   const unauthorized = paths.filter(
-    (p: string) => !p.includes(`/${user.id}/`),
+    (p: string) => !isOwnedStoragePath(p, user.id),
   );
   if (unauthorized.length > 0) {
     return err(

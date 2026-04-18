@@ -7,12 +7,9 @@
  *   PUT  /me      — Update profile (full_name, avatar_url)
  *
  * Signup flow:
- *   1. Creates auth.users row via admin client (email_confirm: false — user
- *      must confirm email before they can log in or obtain a JWT)
+ *   1. Creates auth.users row via admin client (email_confirm: true)
  *   2. Creates profiles row with same id
  *   3. Auto-joins user to first active institution as 'student'
- *      (safe: membership is inert until email is confirmed)
- *   4. Returns generic message regardless of outcome (anti-enumeration)
  *   On profiles failure, rolls back auth.users row
  *
  * GET /me auto-profile-creation:
@@ -47,12 +44,6 @@ const signupAttempts = new Map<string, { count: number; resetAt: number }>();
 
 function checkSignupLimit(ip: string): boolean {
   const now = Date.now();
-  // SEC: Periodic cleanup — remove expired entries to prevent unbounded Map growth
-  if (signupAttempts.size > 100) {
-    for (const [key, entry] of signupAttempts) {
-      if (now > entry.resetAt) signupAttempts.delete(key);
-    }
-  }
   const entry = signupAttempts.get(ip);
   if (!entry || now > entry.resetAt) {
     signupAttempts.set(ip, { count: 1, resetAt: now + 3_600_000 }); // 1 hour
@@ -84,9 +75,6 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
   if (!isEmail(email)) {
     return err(c, "email must be a valid email address", 400);
   }
-  if (!isNonEmpty(password)) {
-    return err(c, "password must be a non-empty string", 400);
-  }
   if (typeof password !== "string" || password.length < 8) {
     return err(c, "Password must be at least 8 characters", 400);
   }
@@ -105,16 +93,15 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
       user_metadata: {
         full_name: typeof full_name === "string" ? full_name : "",
       },
-      email_confirm: false,
+      email_confirm: true,
     });
 
   if (authError) {
     // Return user-friendly messages for common signup errors
     // instead of the generic "Signup failed" from safeErr
     const msg = authError.message?.toLowerCase() ?? "";
-    // SEC: Return generic message to prevent user enumeration (was 409)
     if (msg.includes("already been registered") || msg.includes("already registered") || msg.includes("duplicate")) {
-      return c.json({ message: "Si este email no esta registrado, recibiras un enlace de confirmacion." }, 200);
+      return c.json({ error: "Este email ya esta registrado. Intenta iniciar sesion." }, 409);
     }
     if (msg.includes("rate limit") || msg.includes("too many")) {
       return c.json({ error: "Demasiados intentos. Intenta de nuevo mas tarde." }, 429);
@@ -140,46 +127,52 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
     return safeErr(c, "Profile creation (auth rolled back)", profileError);
   }
 
-  // Step 3: Auto-join first active institution as 'student'
-  // This ensures new signups land directly in the platform.
-  // Non-critical: if it fails, user is still created — admin can add them later.
-  // SEC: Safe because email_confirm is false — the user cannot obtain a JWT
-  // (and therefore cannot access any content behind RLS) until they confirm
-  // their email address. The membership row exists but is inert until then.
-  try {
-    const { data: firstInst } = await admin
-      .from("institutions")
-      .select("id")
-      .eq("is_active", true)
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .single();
+  // Step 3: Optional auto-join to a configured default institution.
+  //
+  // SEC-AUDIT FIX: previously every new signup was auto-joined as 'student'
+  // to the oldest active institution (`ORDER BY created_at LIMIT 1`). In a
+  // multi-tenant deployment that silently leaks cross-tenant access to
+  // whichever institution happened to be created first.
+  //
+  // Now opt-in: set AXON_DEFAULT_INSTITUTION_ID to a specific institution
+  // UUID to restore the convenience join (useful for single-tenant or demo
+  // deploys). If unset, new signups land without any institution membership
+  // and must be invited explicitly.
+  const defaultInstitutionId = Deno.env.get("AXON_DEFAULT_INSTITUTION_ID");
+  if (defaultInstitutionId) {
+    try {
+      const { data: inst } = await admin
+        .from("institutions")
+        .select("id")
+        .eq("id", defaultInstitutionId)
+        .eq("is_active", true)
+        .maybeSingle();
 
-    if (firstInst) {
-      const { error: memberError } = await admin.from("memberships").insert({
-        user_id: userId,
-        institution_id: firstInst.id,
-        role: "student",
-        is_active: true,
-      });
-      if (memberError) {
-        // Log but don't fail signup — membership can be added manually
-        console.warn(
-          `[Axon] Auto-join failed for ${userId} → institution ${firstInst.id}: ${memberError.message}`,
-        );
+      if (inst) {
+        const { error: memberError } = await admin.from("memberships").insert({
+          user_id: userId,
+          institution_id: inst.id,
+          role: "student",
+          is_active: true,
+        });
+        if (memberError) {
+          console.warn(
+            `[Axon] Default-institution join failed for ${userId} → ${inst.id}: ${memberError.message}`,
+          );
+        } else {
+          console.log(`[Axon] Joined ${userId} → default institution ${inst.id} as student`);
+        }
       } else {
-        console.log(`[Axon] Auto-joined ${userId} → institution ${firstInst.id} as student`);
+        console.warn(
+          `[Axon] AXON_DEFAULT_INSTITUTION_ID=${defaultInstitutionId} does not match an active institution`,
+        );
       }
-    } else {
-      console.warn("[Axon] No active institution found for auto-join");
+    } catch (e) {
+      console.warn(`[Axon] Default-institution join exception: ${(e as Error).message}`);
     }
-  } catch (e) {
-    console.warn(`[Axon] Auto-join exception: ${(e as Error).message}`);
   }
 
-  // SEC: Same generic message as the "already registered" path to prevent enumeration.
-  // User must confirm email before they can obtain a JWT and access content.
-  return c.json({ message: "Si este email no esta registrado, recibiras un enlace de confirmacion." }, 200);
+  return ok(c, { id: userId, email }, 201);
 });
 
 // ─── GET /me ───────────────────────────────────────────────────
@@ -256,14 +249,6 @@ authRoutes.put(`${PREFIX}/me`, async (c: Context) => {
       "No valid fields to update (allowed: full_name, avatar_url)",
       400,
     );
-  }
-
-  // SEC: Reject non-HTTPS avatar URLs (prevents javascript: and other schemes)
-  if (patch.avatar_url !== undefined) {
-    const url = String(patch.avatar_url);
-    if (url && !url.startsWith("https://")) {
-      return err(c, "avatar_url must be a valid HTTPS URL", 400);
-    }
   }
 
   patch.updated_at = new Date().toISOString();

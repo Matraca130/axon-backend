@@ -354,6 +354,12 @@ export async function handleIncomingUpdate(c: Context): Promise<Response> {
             "\u2022 \"Palabras clave de [curso]\"\n" +
             "\u2022 O cualquier pregunta académica",
           );
+        } else if (result.lockedOut) {
+          await sendTextPlain(
+            chatId,
+            "Demasiados intentos fallidos. \u274c\n\n" +
+            "Esperá una hora antes de volver a intentar vincular.",
+          );
         } else {
           await sendTextPlain(
             chatId,

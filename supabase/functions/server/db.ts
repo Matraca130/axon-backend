@@ -105,7 +105,7 @@ function authErr(c: Context, code: string, message: string, status: 401 | 403 | 
 }
 
 /** Verified JWT payload */
-interface VerifiedPayload {
+export interface VerifiedPayload {
   sub: string;
   email?: string;
   exp?: number;
@@ -117,8 +117,11 @@ interface VerifiedPayload {
  * Checks: ES256 signature via JWKS, expiration, audience = "authenticated".
  * JWKS keys are cached in-memory by jose (~0.3ms after first fetch).
  * Returns verified payload or structured error.
+ *
+ * Exported for reuse by the rate limiter so rate-limit keys are bound to a
+ * cryptographically verified `sub` (prevents forged-JWT bucket evasion).
  */
-async function verifyJwt(token: string): Promise<VerifiedPayload | { error: string; status: 401 | 503 }> {
+export async function verifyJwt(token: string): Promise<VerifiedPayload | { error: string; status: 401 | 503 }> {
   try {
     const { payload } = await jwtVerify(token, JWKS, {
       audience: "authenticated",

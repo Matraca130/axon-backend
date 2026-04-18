@@ -5,7 +5,7 @@
  * and username. No phone hashing needed.
  *
  * Flow:
- *   1. Web UI: POST /telegram/link-code → generates 6-digit code
+ *   1. Web UI: POST /telegram/link-code → generates 10-digit code
  *   2. Telegram: User sends code to bot
  *   3. Bot: verifyLinkCode() → creates telegram_links row
  */
@@ -13,19 +13,16 @@
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, getAdminClient } from "../../db.ts";
 import { sendTextPlain } from "./tg-client.ts";
+import { createLinkingAttemptsTracker } from "../_messaging/linking-attempts.ts";
+import { generateLinkingCode, isLinkingCode as sharedIsLinkingCode } from "../_messaging/linking-code.ts";
 
 // ─── Constants ───────────────────────────────────────────
 
 const CODE_EXPIRY_SECONDS = 300; // 5 minutes
 
-// ─── Code Generation ─────────────────────────────────────
-
-function generateCode(): string {
-  const array = new Uint32Array(1);
-  crypto.getRandomValues(array);
-  const code = 100_000 + (array[0] % 900_000);
-  return code.toString();
-}
+// SEC-AUDIT FIX: lock a chat out after 5 failed linking attempts per hour
+// as defense-in-depth on top of the entropy bump.
+const attempts = createLinkingAttemptsTracker("TG-Link");
 
 // ─── Web Endpoint: Generate Link Code ────────────────────
 
@@ -46,7 +43,7 @@ export async function generateLinkCode(c: Context): Promise<Response> {
     return err(c, "Ya tienes Telegram vinculado. Desvincula primero para vincular otro.", 409);
   }
 
-  const code = generateCode();
+  const code = generateLinkingCode();
   const expiresAt = new Date(Date.now() + CODE_EXPIRY_SECONDS * 1000).toISOString();
 
   // Store the linking code in a temporary telegram_session
@@ -92,7 +89,15 @@ export async function verifyLinkCode(
   chatId: number,
   username: string | undefined,
   code: string,
-): Promise<{ success: boolean; userId?: string }> {
+): Promise<{ success: boolean; userId?: string; lockedOut?: boolean }> {
+  const attemptKey = `tg:${chatId}`;
+
+  // SEC-AUDIT FIX: lock out chat after 5 failed attempts per hour.
+  if (!attempts.allow(attemptKey)) {
+    console.warn(`[TG-Link] Chat ${chatId} locked out (too many failed attempts)`);
+    return { success: false, lockedOut: true };
+  }
+
   const db = getAdminClient();
 
   const { data: sessions, error: searchError } = await db
@@ -116,6 +121,7 @@ export async function verifyLinkCode(
   });
 
   if (!matchingSession) {
+    attempts.recordFailure(attemptKey);
     return { success: false };
   }
 
@@ -158,14 +164,13 @@ export async function verifyLinkCode(
     .delete()
     .eq("chat_id", matchingSession.chat_id);
 
+  attempts.reset(attemptKey);
   console.warn(`[TG-Link] Telegram linked for user ${userId}. Chat: ${chatId}`);
 
   return { success: true, userId };
 }
 
-export function isLinkingCode(text: string): boolean {
-  return /^\d{6}$/.test(text.trim());
-}
+export const isLinkingCode = sharedIsLinkingCode;
 
 // ─── Link Status ────────────────────────────────────────
 
