@@ -169,3 +169,90 @@ El PR se considera listo para merge cuando:
 El plan es implementable tal como está. Los huecos H1, H3, H6 son los únicos que recomiendo cerrar **antes** de empezar (agregar baseline, guardrail, test). Los demás son aceptables como follow-ups o comentarios en código.
 
 Tiempo estimado: Commit 1 ≈ 30min, Commit 2 ≈ 1h (incluye test), Commit 3 ≈ 1.5h (incluye fallback cuidadoso). Total ≈ 3h de implementación + medición.
+
+---
+
+## 7. Auditoría arquitectónica final (lente de senior engineer)
+
+Esta sección es opinión técnica, no un bloqueo. El plan es **localmente correcto**: aplica buenas prácticas de batching, reduce round-trips y preserva semántica de fallo. Pero como cualquier optimización táctica, deja al descubierto problemas estructurales que conviene nombrar para que no se olviden.
+
+### 7.1 Lo que el plan hace bien
+
+- **Cambios mínimamente invasivos**: parámetro trailing opcional, sin refactors gratuitos. Apropiado para un PR de performance.
+- **Preserva la red de seguridad existente**: el fallback secuencial sobrevive — clave en sistemas con dependencia externa flaky (OpenAI).
+- **Bisectable**: 3 commits con responsabilidad única. Si Commit 3 rompe prod, `git revert` es preciso.
+- **Ataca el cuello de botella correcto**: O(N) round-trips → O(1-2). Es el orden de magnitud que hace falta, no micro-optimizaciones.
+
+### 7.2 Lo que el plan NO resuelve (deuda arquitectónica visible)
+
+Estos son problemas reales que el plan deliberadamente no toca. Algunos son out-of-scope correctos; otros son atajos que generan deuda.
+
+#### A1 — Atomicidad del pipeline (deuda real)
+
+DELETE chunks → INSERT chunks → UPDATE summary es una secuencia no-transaccional ejecutada desde el cliente. Si el Edge Function muere entre DELETE e INSERT, el summary queda sin chunks indefinidamente, sin alerta. La advisory lock previene races concurrentes pero no sobrevive a crashes.
+
+**Solución correcta**: una RPC SQL `auto_ingest_summary(summary_id, chunks_with_embeddings, summary_embedding)` que haga DELETE+INSERT+UPDATE en una transacción. El plan defiere esto explícitamente — coincido con la decisión, pero debe convertirse en un ticket inmediato post-merge, no un "lo vemos algún día".
+
+#### A2 — Coupling y SRP en `publish-summary.ts`
+
+Una sola función de 182 líneas maneja: auth, role check, status validation, fetch, flatten, update, ingest orchestration, embedding batching, error aggregation. Es un God Function. El plan no lo agrava (no añade responsabilidades), pero tampoco lo mejora.
+
+**Solución correcta**: extraer `PublishSummaryPipeline` con métodos `validate()`, `flatten()`, `persist()`, `embed()`. Los tests serían triviales. Out-of-scope para este PR; ticket de seguimiento recomendado.
+
+#### A3 — Logs como contrato de ops alerting
+
+El plan exige preservar las cadenas literales `[Auto-Ingest] Done`, `Batch embedding failed, falling back to sequential` porque hay alerting acoplado a ellas. Esto es **frágil por diseño**: cualquier refactor futuro (incluyendo i18n de logs, structured logging) rompe ops sin aviso de tipos.
+
+**Solución correcta**: emitir eventos estructurados (`{ event: "auto_ingest_done", summary_id, chunks_count, ms }`) y que el alerting consuma el campo `event`, no el mensaje. Out-of-scope; ticket recomendado en el equipo de observabilidad.
+
+#### A4 — Memoria sin presión observada
+
+H3 propone un guardrail de 500 chunks pero el número es arbitrario. No sabemos el límite real de Deno Edge Functions porque nunca se midió. Estamos optimizando un sistema cuyas restricciones operativas son opacas.
+
+**Solución correcta**: instrumentar `Deno.memoryUsage()` antes y después del bulk insert en staging con summaries grandes (1000+ chunks). El número 500 debe ser empírico, no un número redondo.
+
+#### A5 — Costo de OpenAI no se reduce
+
+El PR reduce **wall time** (latencia percibida por el usuario que publica) pero el conteo de tokens enviados a OpenAI es idéntico. Si el problema de negocio es el bill de OpenAI, este PR no ayuda. Si el problema es que los profesores ven un spinner de 30s al publicar, este PR resuelve directamente.
+
+**Asegurarse de que el problema correcto se está atacando.** Vale la pena confirmar con producto/finanzas antes de mergear.
+
+#### A6 — Re-embed full en cada cambio
+
+El hash check en `auto-ingest.ts:281-296` evita re-trabajo cuando el contenido es idéntico, pero **cualquier edit en cualquier bloque invalida todo el hash y re-genera todos los chunks**. Para un summary con 100 bloques donde el profesor edita 1, se re-embedean los 100. Eso es desperdicio puro.
+
+**Solución correcta**: hash por bloque + chunking incremental. Es un rediseño profundo del pipeline, claramente fuera de scope, pero **es la mejora 10x** real. El PR actual es 2-5x. Nombrar la diferencia en el PR description gestiona expectativas.
+
+#### A7 — La firma `preloadedBlocks` filtra detalle de implementación
+
+Añadir un parámetro opcional para evitar un SELECT duplicado es pragmático pero feo: la API de `autoChunkAndEmbed` ahora expone que internamente hace un fetch de blocks. Un consumidor honesto no debería necesitar saberlo.
+
+**Solución correcta a futuro**: invertir la dependencia. `autoChunkAndEmbed` recibe un `BlocksSource` (function `() => Promise<Block[]>`) que el caller compone como quiere. El caller con blocks ya cargados pasa `() => Promise.resolve(blocks)`; los demás pasan la versión que va a la DB. Out-of-scope para este PR (over-engineering ahora), pero **no convertir `preloadedBlocks` en un patrón** — si aparece un tercer caller que también quiere precarga, refactorizar.
+
+### 7.3 Riesgos operativos no mitigados
+
+| Riesgo | Probabilidad | Impacto | Mitigación que el plan no incluye |
+|---|---|---|---|
+| Commit 3 introduce silent data loss en producción | Baja | Alto | Feature flag `AUTO_INGEST_BULK_INSERT_ENABLED` con default `false` en prod la primera semana. |
+| Test gate de CI no detecta regresión real (cobertura insuficiente sobre `publish-summary.ts`) | Media | Alto | Smoke test E2E contra deployment de staging post-deploy, no solo unit tests. |
+| OpenAI cambia formato de respuesta y el batch falla silenciosamente | Baja | Medio | Contract test contra API de OpenAI en CI (semanal, no por PR). |
+| Métricas de latencia no se capturan post-deploy → no se valida la mejora | Alta | Bajo | Datadog/Sentry span en `[Auto-Ingest] Done`. Ya falta hoy, no es regresión, pero el PR es buen momento para añadirla. |
+
+### 7.4 Lo que un staff/principal pediría antes de aprobar
+
+Si yo revisara este PR como staff engineer:
+
+1. **No bloquearía el merge** si los chequeos H1/H3/H6 + paridad (3.3) pasan. La direccion es correcta y el cambio es bisectable.
+2. **Pediría 3 follow-up tickets explícitos en el PR description**:
+   - Ticket A1: convertir DELETE+INSERT a RPC transaccional.
+   - Ticket A6: chunking incremental por bloque (la mejora 10x).
+   - Ticket de observabilidad: span estructurado en lugar de log scraping.
+3. **Pediría confirmación del problema de negocio**: ¿reducción de latencia o de costo? Si es costo, este PR no es la solución.
+4. **Pediría el feature flag de Commit 3** (1 línea, retorno enorme en seguridad de rollout).
+5. **Aprobaría con "ship it, but please file the follow-ups before merging"**.
+
+### 7.5 Veredicto
+
+**Aprobar con cambios menores.** Es un PR de performance honesto: ataca el cuello de botella correcto con el método correcto y preserva la red de seguridad. La deuda arquitectónica que deja visible (A1-A7) ya existía antes del PR; el PR no la empeora, solo la hace más evidente — lo cual es **bueno**, no malo. Los tickets de seguimiento son la salida correcta.
+
+Lo que **no** se debe hacer: usar este PR como excusa para meter A1-A7. Eso convierte un cambio de 3h en un proyecto de 2 semanas y pierde el momentum del win táctico. Mantener el scope estrecho.
