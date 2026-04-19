@@ -29,16 +29,70 @@ Deno.test("health returns status ok version 4.5", async () => {
 
 // ═══ LIST OPERATIONS ═══
 
+// Contract: every crud-factory LIST endpoint returns { items, total, limit, offset }
+// wrapped in the { data: ... } envelope. See README.md § Response Patterns and
+// crud-factory.ts:301. Freezing this shape here catches any regression that would
+// silently break typed frontend clients (BH-ERR-017 / 018 / 020).
+function assertPaginatedShape(d: unknown): asserts d is { items: unknown[]; total: number; limit: number; offset: number } {
+  const v = d as { items?: unknown; total?: unknown; limit?: unknown; offset?: unknown };
+  assert(Array.isArray(v.items), "items must be an array");
+  assert(typeof v.total === "number", "total must be a number");
+  assert(typeof v.limit === "number", "limit must be a number");
+  assert(typeof v.offset === "number", "offset must be a number");
+}
+
+// Resolve a full content chain (course → semester → section → topic → summary)
+// from the test institution. Memoised so shape tests don't re-fetch.
+let resolvedChain: { courseId?: string; semesterId?: string; sectionId?: string; topicId?: string; summaryId?: string } | null = null;
+async function resolveChain() {
+  if (resolvedChain) return resolvedChain;
+  resolvedChain = {};
+  const cr = await api.get<{items:Array<{id:string}>}>(`/courses?institution_id=${ENV.INSTITUTION_ID}`, adminToken);
+  if (!cr.ok || !assertOk(cr).items.length) return resolvedChain;
+  resolvedChain.courseId = assertOk(cr).items[0].id;
+
+  const sr = await api.get<{items:Array<{id:string}>}>(`/semesters?course_id=${resolvedChain.courseId}`, adminToken);
+  if (!sr.ok || !assertOk(sr).items.length) return resolvedChain;
+  resolvedChain.semesterId = assertOk(sr).items[0].id;
+
+  const secr = await api.get<{items:Array<{id:string}>}>(`/sections?semester_id=${resolvedChain.semesterId}`, adminToken);
+  if (!secr.ok || !assertOk(secr).items.length) return resolvedChain;
+  resolvedChain.sectionId = assertOk(secr).items[0].id;
+
+  const tr = await api.get<{items:Array<{id:string}>}>(`/topics?section_id=${resolvedChain.sectionId}`, adminToken);
+  if (!tr.ok || !assertOk(tr).items.length) return resolvedChain;
+  resolvedChain.topicId = assertOk(tr).items[0].id;
+
+  const smr = await api.get<{items:Array<{id:string}>}>(`/summaries?topic_id=${resolvedChain.topicId}`, adminToken);
+  if (!smr.ok || !assertOk(smr).items.length) return resolvedChain;
+  resolvedChain.summaryId = assertOk(smr).items[0].id;
+
+  return resolvedChain;
+}
+
 Deno.test("LIST courses returns paginated {items, total, limit, offset}", async () => {
   await setup();
-  const r = await api.get<{items:unknown[];total:number;limit:number;offset:number}>(
-    `/courses?institution_id=${ENV.INSTITUTION_ID}`, adminToken);
+  const r = await api.get(`/courses?institution_id=${ENV.INSTITUTION_ID}`, adminToken);
   assertStatus(r, 200);
-  const d = assertOk(r);
-  assert(Array.isArray(d.items), "items must be an array");
-  assert(typeof d.total === "number", "total must be a number");
-  assert(typeof d.limit === "number", "limit must be a number");
-  assert(typeof d.offset === "number", "offset must be a number");
+  assertPaginatedShape(assertOk(r));
+});
+
+Deno.test("LIST summaries returns paginated {items, total, limit, offset}", async () => {
+  await setup();
+  const chain = await resolveChain();
+  if (!chain.topicId) { console.warn("[SKIP] No topic in test institution"); return; }
+  const r = await api.get(`/summaries?topic_id=${chain.topicId}`, adminToken);
+  assertStatus(r, 200);
+  assertPaginatedShape(assertOk(r));
+});
+
+Deno.test("LIST keywords returns paginated {items, total, limit, offset}", async () => {
+  await setup();
+  const chain = await resolveChain();
+  if (!chain.summaryId) { console.warn("[SKIP] No summary in test institution"); return; }
+  const r = await api.get(`/keywords?summary_id=${chain.summaryId}`, adminToken);
+  assertStatus(r, 200);
+  assertPaginatedShape(assertOk(r));
 });
 
 Deno.test("content-tree returns nested array with course structure", async () => {
