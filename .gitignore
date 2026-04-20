@@ -1,1 +1,12 @@
 supabase/.temp/
+
+# Diagnostics outputs (PR #298 staging measurements)
+scripts/diagnostics/pr298/.env.staging
+scripts/diagnostics/pr298/out/
+
+# Generic patterns
+.env.local
+.env.staging
+.env.*.local
+*.token
+*.secret
