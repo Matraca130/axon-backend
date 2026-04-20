@@ -23,8 +23,8 @@ import {
   CONTENT_WRITE_ROLES,
 } from "../../auth-helpers.ts";
 import { flattenBlocksToMarkdown } from "../../block-flatten.ts";
-import { autoChunkAndEmbed } from "../../auto-ingest.ts";
-import { generateEmbedding } from "../../openai-embeddings.ts";
+import { autoChunkAndEmbed, type PreloadedBlock } from "../../auto-ingest.ts";
+import { generateEmbedding, generateEmbeddings } from "../../openai-embeddings.ts";
 import type { Context } from "npm:hono";
 
 export const publishSummaryRoutes = new Hono();
@@ -106,69 +106,118 @@ publishSummaryRoutes.post(
 
     if (updateErr) return safeErr(c, "Update summary", updateErr);
 
-    // ── 7. Auto-chunk + embed full markdown (fire-and-forget-ish) ───
-    let chunksCount = 0;
-    try {
-      const ingestResult = await autoChunkAndEmbed(
-        summaryId,
-        summary.institution_id,
-      );
-      chunksCount = ingestResult.chunks_created;
-    } catch (e) {
+    // ── 7. Run auto-ingest + per-block embeddings IN PARALLEL ──
+    //
+    // Both paths share the same blocks already in memory. Auto-ingest
+    // gets them via `preloadedBlocks` (skips its own SELECT). Per-block
+    // embeddings batch all texts in a single OpenAI call (vs the prior
+    // 5-at-a-time loop with per-block HTTP round-trips).
+    //
+    // Concurrency note (audit H4): both paths call OpenAI within the
+    // same publish window. `generateEmbeddings` already throttles
+    // internally (BATCH_SIZE=100 + 3-retry backoff in openai-embeddings.ts),
+    // so doubling the concurrency here is safe in practice. If TPM
+    // pressure is observed in logs (rate-limit headers), serialize by
+    // awaiting ingestPromise before blockEmbedPromise.
+    const blockTexts = blocks.map((b) => {
+      const t = flattenBlocksToMarkdown([b]);
+      return (t && t.trim().length > 0) ? t : null;
+    });
+
+    const ingestPromise = autoChunkAndEmbed(
+      summaryId,
+      summary.institution_id,
+      undefined, // options
+      undefined, // strategy
+      blocks as PreloadedBlock[],
+    ).catch((e: unknown) => {
       console.error(
         `[Publish] Auto-ingest failed for summary ${summaryId}:`,
         (e as Error).message,
       );
-    }
+      return null;
+    });
 
-    // ── 8. Per-block embeddings in batches of 5 ─────────────
-    let blocksEmbedded = 0;
-    let blocksFailed = 0;
-    const BATCH_SIZE = 5;
-
-    for (let i = 0; i < blocks.length; i += BATCH_SIZE) {
-      const batch = blocks.slice(i, i + BATCH_SIZE);
-
-      const results = await Promise.allSettled(
-        batch.map(async (block) => {
-          const text = flattenBlocksToMarkdown([block]);
-          if (!text || text.trim().length === 0) return null;
-
-          const embedding = await generateEmbedding(text);
-
-          const { error: embedErr } = await admin
-            .from("summary_block_embeddings")
-            .upsert(
-              {
-                block_id: block.id,
-                summary_id: summaryId,
-                embedding,
-                content_text: text.slice(0, 2000), // Truncate for storage
-                updated_at: new Date().toISOString(),
-              },
-              { onConflict: "block_id" },
-            );
-
-          if (embedErr) {
-            console.warn(
-              `[Publish] Block embedding failed for ${block.id}:`,
-              embedErr.message,
-            );
-            return null;
-          }
-
-          return block.id;
-        }),
-      );
-
-      for (const r of results) {
-        if (r.status === "fulfilled" && r.value !== null) {
-          blocksEmbedded++;
-        } else if (r.status === "rejected") {
-          blocksFailed++;
+    const blockEmbedPromise = (async () => {
+      const validIndices: number[] = [];
+      const validTexts: string[] = [];
+      for (let i = 0; i < blockTexts.length; i++) {
+        const t = blockTexts[i];
+        if (t !== null) {
+          validIndices.push(i);
+          validTexts.push(t);
         }
       }
-    }
+      if (validTexts.length === 0) {
+        return { embedded: 0, failed: 0 };
+      }
+
+      let embeddings: number[][] = [];
+      try {
+        embeddings = await generateEmbeddings(validTexts);
+      } catch (e) {
+        // Fallback to per-block sequential (preserves prior behavior on
+        // batch failure — important for partial OpenAI outages).
+        console.warn(
+          `[Publish] Batch block embedding failed, falling back to sequential: ${(e as Error).message}`,
+        );
+        embeddings = [];
+        for (const text of validTexts) {
+          try {
+            embeddings.push(await generateEmbedding(text));
+          } catch (innerErr) {
+            console.warn(
+              `[Publish] Sequential embedding failed: ${(innerErr as Error).message}`,
+            );
+            embeddings.push([]); // sentinel — will be filtered
+          }
+        }
+      }
+
+      // Bulk upsert all valid embeddings in a single round-trip.
+      const upsertRows = validIndices
+        .map((blockIdx, embIdx) => {
+          const emb = embeddings[embIdx];
+          if (!emb || emb.length === 0) return null;
+          return {
+            block_id: blocks[blockIdx].id,
+            summary_id: summaryId,
+            embedding: emb,
+            content_text: validTexts[embIdx].slice(0, 2000),
+            updated_at: new Date().toISOString(),
+          };
+        })
+        .filter((r): r is NonNullable<typeof r> => r !== null);
+
+      if (upsertRows.length === 0) {
+        return { embedded: 0, failed: validTexts.length };
+      }
+
+      const { error: upsertErr } = await admin
+        .from("summary_block_embeddings")
+        .upsert(upsertRows, { onConflict: "block_id" });
+
+      if (upsertErr) {
+        console.warn(
+          `[Publish] Bulk block-embeddings upsert failed: ${upsertErr.message}`,
+        );
+        return { embedded: 0, failed: validTexts.length };
+      }
+
+      return {
+        embedded: upsertRows.length,
+        failed: validTexts.length - upsertRows.length,
+      };
+    })();
+
+    const [ingestResult, blockEmbedResult] = await Promise.all([
+      ingestPromise,
+      blockEmbedPromise,
+    ]);
+
+    const chunksCount = ingestResult?.chunks_created ?? 0;
+    const blocksEmbedded = blockEmbedResult.embedded;
+    const blocksFailed = blockEmbedResult.failed;
 
     // ── 9. Return result ────────────────────────────────────
     return ok(c, {
