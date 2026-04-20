@@ -21,7 +21,7 @@ Deno.test("accepts valid UUID v4 '550e8400-e29b-41d4-a716-446655440000'", () => 
 
 Deno.test("accepts realistic email 'maria.garcia@universidad.mx'", () => {
   assert(isEmail("maria.garcia@universidad.mx"));
-  assert(isEmail("jose.lopez@empresa.com.br"));
+  assert(isEmail("josé.lópez@empresa.com.br"));
   assert(isEmail("student+tag@uni.edu"));
 });
 
@@ -86,7 +86,7 @@ Deno.test("rejects FSRS difficulty outside 0-10", () => {
 
 Deno.test("handles Unicode keyword names", () => {
   assert(isNonEmpty("細胞膜のリン脂質二重層"));
-  assert(isNonEmpty("Celula eucariota"));
+  assert(isNonEmpty("Célula eucariota"));
 });
 
 Deno.test("isNonNegInt boundary values", () => {
