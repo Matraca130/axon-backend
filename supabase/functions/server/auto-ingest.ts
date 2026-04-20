@@ -55,6 +55,46 @@ export interface AutoIngestResult {
   elapsed_ms: number;
 }
 
+// ─── Performance: Bulk Insert Configuration ─────────────────────────
+
+/**
+ * Conservative empirical default per audit section 3.4 ("if can't measure
+ * staging memory, choose 200 not 500").
+ *
+ * Above this chunk count, the bulk-insert-with-embeddings path falls back
+ * to the legacy per-chunk UPDATE path to avoid Edge Function memory pressure.
+ *
+ * 1500 chunks × 1536 floats × 8 bytes ≈ 18MB just for embeddings.
+ * Conservative 200 leaves margin for chunker output, JSON serialization,
+ * and PostgREST request body (~1MB hard limit).
+ *
+ * TODO(petrick): Refine empirically via scripts/diagnostics/pr298/03-probe-memory-bulk-insert.ts
+ * in staging. Adjust to 50% of largest size that succeeds without warnings,
+ * rounded down to multiple of 50.
+ */
+export const MAX_BATCH_INSERT_CHUNKS = 200;
+
+/**
+ * Feature flag for the bulk-insert-with-embeddings path (Commit 3 of PR #298).
+ *
+ * - false (default in prod): legacy path — INSERT empty chunks, then UPDATE
+ *   each one with its embedding. N+1 round-trips. Stable, well-tested.
+ * - true: bulk path — generateEmbeddings up-front, then 1 INSERT with the
+ *   `embedding` column populated inline. O(1) DB round-trips for chunks.
+ *
+ * Recommended rollout:
+ *   1. Merge with default false. No behavior change in prod.
+ *   2. In staging: set AUTO_INGEST_BULK_INSERT_ENABLED=true, run
+ *      scripts/diagnostics/pr298/04-post-change-validation.ts. Confirm
+ *      speedup ≥ 2.5x and chunks.embedding NULL count = 0.
+ *   3. Promote to prod after observing one week of staging stability.
+ *
+ * Audit reference: H7 (BLOQUEANTE per architectural review).
+ */
+function isBulkInsertEnabled(): boolean {
+  return Deno.env.get("AUTO_INGEST_BULK_INSERT_ENABLED") === "true";
+}
+
 // ─── Text Utilities ─────────────────────────────────────────────────
 
 export function truncateAtWord(text: string, maxChars: number): string {
@@ -357,11 +397,30 @@ async function _autoChunkAndEmbedCore(
     };
   }
 
+  // ── Strategy selection: bulk-insert vs legacy ──
+  //
+  // The bulk-insert path generates all embeddings up-front and inserts
+  // chunks with embeddings inline (1 round-trip for INSERT). Falls back
+  // to the legacy per-chunk UPDATE path when:
+  //   - Feature flag is OFF (default in prod, audit H7).
+  //   - chunks.length > MAX_BATCH_INSERT_CHUNKS (memory guardrail).
+  //
+  // NON-ATOMIC NOTE (audit H2): both paths perform DELETE → INSERT in
+  // separate statements. If the function dies between DELETE and INSERT,
+  // the summary is left with no chunks until the next ingest. Mitigation
+  // exists in advisory lock (prevents concurrent races) but not crash
+  // recovery. Follow-up FT-1 in PR description tracks the SQL RPC fix.
+  const shouldUseBulkPath = isBulkInsertEnabled() &&
+    chunks.length <= MAX_BATCH_INSERT_CHUNKS;
+  let path: "batch" | "sequential_fallback" = "sequential_fallback";
+  let dbRoundtrips = 0;
+
   // Step 4: Delete existing chunks
   const { error: deleteErr } = await adminDb
     .from("chunks")
     .delete()
     .eq("summary_id", summaryId);
+  dbRoundtrips++;
 
   if (deleteErr) {
     throw new Error(
@@ -369,25 +428,117 @@ async function _autoChunkAndEmbedCore(
     );
   }
 
-  // Step 5: Insert new chunks (with content_hash for change detection)
-  const insertData = chunks.map((chunk) => ({
-    summary_id: summaryId,
-    content: chunk.content,
-    order_index: chunk.order_index,
-    chunk_strategy: chunk.strategy,
-    content_hash: newContentHash,
-  }));
+  // Pre-compute reused embeddings (semantic chunker may have produced some
+  // already — these never need re-generation regardless of path).
+  const reusedEmbeddings: (number[] | null)[] = chunks.map((chunk) => {
+    if (paragraphEmbeddings.size > 0) {
+      const cached = paragraphEmbeddings.get(chunk.content);
+      if (cached) return cached;
+    }
+    return null;
+  });
 
-  const { data: inserted, error: insertErr } = await adminDb
-    .from("chunks")
-    .insert(insertData)
-    .select("id");
+  let generated = 0;
+  let failed = 0;
+  let inserted: { id: string }[] = [];
 
-  if (insertErr || !inserted) {
-    throw new Error(
-      `[Auto-Ingest] Failed to insert chunks for ${summaryId}: ` +
-        (insertErr?.message ?? "no data returned"),
-    );
+  if (shouldUseBulkPath) {
+    // ── BULK PATH: generate embeddings → INSERT with embedding inline ──
+    path = "batch";
+
+    try {
+      const textsToEmbed: string[] = [];
+      const embedIndices: number[] = [];
+      for (let i = 0; i < chunks.length; i++) {
+        if (!reusedEmbeddings[i]) {
+          textsToEmbed.push(chunks[i].content);
+          embedIndices.push(i);
+        }
+      }
+
+      let newEmbeddings: number[][] = [];
+      if (textsToEmbed.length > 0) {
+        newEmbeddings = await generateEmbeddings(textsToEmbed);
+      }
+
+      // Merge reused + new
+      const allEmbeddings: number[][] = new Array(chunks.length);
+      let newIdx = 0;
+      for (let i = 0; i < chunks.length; i++) {
+        if (reusedEmbeddings[i]) {
+          allEmbeddings[i] = reusedEmbeddings[i]!;
+        } else {
+          allEmbeddings[i] = newEmbeddings[newIdx++];
+        }
+      }
+
+      const reusedCount = chunks.length - textsToEmbed.length;
+      if (reusedCount > 0) {
+        console.info(
+          `[Auto-Ingest] Reused ${reusedCount}/${chunks.length} embeddings from semantic chunker`,
+        );
+      }
+
+      // Single INSERT with embeddings inline.
+      const insertDataWithEmbed = chunks.map((chunk, i) => ({
+        summary_id: summaryId,
+        content: chunk.content,
+        order_index: chunk.order_index,
+        chunk_strategy: chunk.strategy,
+        content_hash: newContentHash,
+        embedding: JSON.stringify(allEmbeddings[i]),
+      }));
+
+      const { data: insertedRows, error: insertErr } = await adminDb
+        .from("chunks")
+        .insert(insertDataWithEmbed)
+        .select("id");
+      dbRoundtrips++;
+
+      if (insertErr || !insertedRows) {
+        throw new Error(
+          `[Auto-Ingest] Bulk INSERT with embeddings failed: ${insertErr?.message ?? "no rows"}`,
+        );
+      }
+      inserted = insertedRows;
+      generated = chunks.length;
+    } catch (bulkErr) {
+      // Bulk path failed mid-flight (most likely: OpenAI batch error or
+      // PostgREST body too large). Fall through to sequential path.
+      console.warn(
+        `[Auto-Ingest] Bulk path failed, falling back to sequential: ${(bulkErr as Error).message}`,
+      );
+      path = "sequential_fallback";
+      // Reset state — sequential will re-do INSERT + UPDATE flow
+      inserted = [];
+      generated = 0;
+    }
+  }
+
+  // ── SEQUENTIAL PATH (legacy): INSERT empty + per-chunk UPDATE ──
+  // Runs when: feature flag is OFF, chunks > MAX_BATCH, OR bulk failed.
+  if (path === "sequential_fallback") {
+    const insertData = chunks.map((chunk) => ({
+      summary_id: summaryId,
+      content: chunk.content,
+      order_index: chunk.order_index,
+      chunk_strategy: chunk.strategy,
+      content_hash: newContentHash,
+    }));
+
+    const { data: insertedRows, error: insertErr } = await adminDb
+      .from("chunks")
+      .insert(insertData)
+      .select("id");
+    dbRoundtrips++;
+
+    if (insertErr || !insertedRows) {
+      throw new Error(
+        `[Auto-Ingest] Failed to insert chunks for ${summaryId}: ` +
+          (insertErr?.message ?? "no data returned"),
+      );
+    }
+    inserted = insertedRows;
   }
 
   // Step 6: Mark summary as chunked
@@ -395,6 +546,7 @@ async function _autoChunkAndEmbedCore(
     .from("summaries")
     .update({ last_chunked_at: new Date().toISOString() })
     .eq("id", summaryId);
+  dbRoundtrips++;
 
   if (updateTsErr) {
     console.warn(
@@ -403,20 +555,10 @@ async function _autoChunkAndEmbedCore(
     );
   }
 
-  // Step 7: Generate chunk embeddings (batch, with sequential fallback)
-  let generated = 0;
-  let failed = 0;
+  // Step 7: Per-chunk embedding UPDATE (only if not done in bulk path)
+  if (path === "sequential_fallback") {
 
   try {
-    // Task 4.8: Reuse semantic chunker embeddings where chunk matches a paragraph
-    const reusedEmbeddings: (number[] | null)[] = chunks.map((chunk) => {
-      if (paragraphEmbeddings.size > 0) {
-        const cached = paragraphEmbeddings.get(chunk.content);
-        if (cached) return cached;
-      }
-      return null;
-    });
-
     // Only call OpenAI for chunks that don't have a reusable embedding
     const textsToEmbed: string[] = [];
     const embedIndices: number[] = [];
@@ -458,6 +600,7 @@ async function _autoChunkAndEmbedCore(
         .from("chunks")
         .update({ embedding: JSON.stringify(allEmbeddings[i]) })
         .eq("id", inserted[i].id);
+      dbRoundtrips++;
 
       if (embedErr) {
         failed++;
@@ -509,6 +652,8 @@ async function _autoChunkAndEmbedCore(
     }
   }
 
+  } // end if (path === "sequential_fallback") for Step 7
+
   // Step 8: Generate summary-level embedding
   //
   // Use the resolved source text (blocks-flattened or content_markdown)
@@ -531,7 +676,7 @@ async function _autoChunkAndEmbedCore(
   console.info(
     `[Auto-Ingest] Done: ${summaryId} — ${chunks.length} chunks (${selectedStrategy}, source=${sourceKind}), ` +
       `${generated} embedded, ${failed} failed, ` +
-      `summary_embed=${summaryEmbedded}, ${elapsed}ms`,
+      `summary_embed=${summaryEmbedded}, path=${path}, db_roundtrips=${dbRoundtrips}, ${elapsed}ms`,
   );
 
   return {
