@@ -148,11 +148,26 @@ async function withBackoff<T>(
 
 // ─── Entry Point ────────────────────────────────────────────────────
 
+/**
+ * Optional pre-loaded block payload.
+ *
+ * If the caller already has the active blocks loaded (e.g. publish-summary.ts
+ * fetches them at L77-L82), passing them here skips the duplicate SELECT in
+ * Step 2. The shape MUST match what summary_blocks SELECT returns:
+ *   id, type, content (jsonb), order_index
+ *
+ * If omitted, the core fetches blocks itself (legacy behavior, all 5 callers
+ * remain backwards-compatible).
+ */
+// deno-lint-ignore no-explicit-any
+export type PreloadedBlock = { id: string; type: string; content: any; order_index: number };
+
 export async function autoChunkAndEmbed(
   summaryId: string,
   institutionId: string,
   options?: ChunkOptions,
   strategy?: "recursive" | "semantic" | "auto",
+  preloadedBlocks?: PreloadedBlock[],
 ): Promise<AutoIngestResult> {
   const t0 = Date.now();
   const adminDb = getAdminClient();
@@ -162,7 +177,7 @@ export async function autoChunkAndEmbed(
     adminDb,
     lockKey,
     `auto-ingest:${summaryId}`,
-    () => _autoChunkAndEmbedCore(adminDb, summaryId, institutionId, t0, options, strategy),
+    () => _autoChunkAndEmbedCore(adminDb, summaryId, institutionId, t0, options, strategy, preloadedBlocks),
     () => console.info(`[Auto-Ingest] Skipping summary ${summaryId} — advisory lock not acquired`),
   );
 
@@ -190,6 +205,7 @@ async function _autoChunkAndEmbedCore(
   t0: number,
   options?: ChunkOptions,
   strategy?: "recursive" | "semantic" | "auto",
+  preloadedBlocks?: PreloadedBlock[],
 ): Promise<AutoIngestResult> {
   console.info(
     `[Auto-Ingest] Processing summary ${summaryId} (institution: ${institutionId})`,
@@ -222,12 +238,23 @@ async function _autoChunkAndEmbedCore(
   let sourceText = "";
   let sourceKind: "blocks" | "content_markdown" | "none" = "none";
 
-  const { data: blockRows, error: blocksErr } = await adminDb
-    .from("summary_blocks")
-    .select("id, type, content, order_index")
-    .eq("summary_id", summaryId)
-    .eq("is_active", true)
-    .order("order_index", { ascending: true });
+  // Use caller-provided blocks when available (avoids the duplicate SELECT
+  // when publish-summary.ts already fetched them). Otherwise fall back to
+  // querying summary_blocks directly.
+  let blockRows: PreloadedBlock[] | null;
+  let blocksErr: { message: string } | null = null;
+  if (preloadedBlocks !== undefined) {
+    blockRows = preloadedBlocks;
+  } else {
+    const { data, error } = await adminDb
+      .from("summary_blocks")
+      .select("id, type, content, order_index")
+      .eq("summary_id", summaryId)
+      .eq("is_active", true)
+      .order("order_index", { ascending: true });
+    blockRows = (data as PreloadedBlock[] | null);
+    blocksErr = error;
+  }
 
   if (blocksErr) {
     console.warn(
