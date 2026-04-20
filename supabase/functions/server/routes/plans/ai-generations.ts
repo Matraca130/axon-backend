@@ -9,6 +9,7 @@ import { Hono } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid, isNonEmpty, isNonNegInt, validateFields } from "../../validate.ts";
+import { requireInstitutionRole, isDenied, MANAGEMENT_ROLES } from "../../auth-helpers.ts";
 import type { Context } from "npm:hono";
 
 export const aiGenerationRoutes = new Hono();
@@ -19,10 +20,17 @@ const aiGenBase = `${PREFIX}/ai-generations`;
 aiGenerationRoutes.get(aiGenBase, async (c: Context) => {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { db } = auth;
+  const { user, db } = auth;
 
   const institutionId = c.req.query("institution_id");
   if (!isUuid(institutionId)) return err(c, "institution_id must be a valid UUID", 400);
+
+  // SEC-PHASE-2.4 (audit 2026-04-17 iter 18 inconsistency #2 + iter 19 #3):
+  // AI generation logs contain prompts + costs + tokens — admin-only.
+  const roleCheck = await requireInstitutionRole(
+    db, user.id, institutionId as string, MANAGEMENT_ROLES,
+  );
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   let query = db.from("ai_generations").select("*")
     .eq("institution_id", institutionId)
@@ -52,6 +60,12 @@ aiGenerationRoutes.post(aiGenBase, async (c: Context) => {
   if (!body) return err(c, "Invalid or missing JSON body", 400);
   if (!isUuid(body.institution_id)) return err(c, "institution_id must be a valid UUID", 400);
   if (!isNonEmpty(body.generation_type)) return err(c, "generation_type must be a non-empty string", 400);
+
+  // SEC-PHASE-2.4: require admin role before polluting audit log
+  const roleCheck = await requireInstitutionRole(
+    db, user.id, body.institution_id, MANAGEMENT_ROLES,
+  );
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
   const row: Record<string, unknown> = {
     institution_id: body.institution_id, requested_by: user.id, generation_type: body.generation_type,

@@ -72,7 +72,6 @@ import {
   ALL_ROLES,
 } from "../../auth-helpers.ts";
 import { generateText, generateTextStream, GENERATE_MODEL } from "../../claude-ai.ts";
-import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { xpHookForRagQuestion } from "../../xp-hooks.ts";
 
 // Fase 6: Import strategy functions + shared MatchedChunk type
@@ -85,8 +84,46 @@ import {
   type RetrievalStrategy,
 } from "../../retrieval-strategies.ts";
 
+// Split refactor (refactor/chat-split-modules): pull chunk retrieval,
+// fallback cascade, query augmentation, context assembly and fallback
+// trace helpers from dedicated modules. chat.ts is now a thin route
+// handler that orchestrates them.
+import {
+  fetchAdjacentChunks,
+  fetchSummaryFallbackChunks,
+  fetchTopicFallbackChunks,
+  normalizeCoarseToFineResults,
+} from "./chat/retrieval.ts";
+import {
+  buildAugmentedQuery,
+  assembleContext,
+} from "./chat/context-assembly.ts";
+import {
+  newFallbackTrace,
+  type CoarseToFineRow,
+} from "./chat/types.ts";
+import {
+  SHORT_QUERY_CHAR_THRESHOLD,
+  SHORT_QUERY_SIMILARITY_THRESHOLD,
+  NORMAL_QUERY_SIMILARITY_THRESHOLD,
+  RERANK_HIGH_CONFIDENCE_THRESHOLD,
+  RERANK_MIN_RESULTS,
+  MAX_SEARCH_RESULTS,
+  COARSE_TO_FINE_TOP_SUMMARIES,
+  RERANK_TOP_K,
+  CONTEXT_PRIMARY_MATCHES,
+  MAX_MESSAGE_LENGTH,
+  MAX_HISTORY_CONTEXT_CHARS,
+  MAX_RAG_CONTEXT_CHARS,
+  MAX_HISTORY_TURNS,
+  MAX_HISTORY_TURN_CHARS,
+  CHAT_TEMPERATURE,
+  CHAT_MAX_TOKENS,
+} from "./chat/constants.ts";
+
 export const aiChatRoutes = new Hono();
 
+<<<<<<< HEAD
 // --- Phase 5: History-augmented search query builder ----------------
 const MAX_HISTORY_CHARS_FOR_SEARCH = 200;
 
@@ -513,6 +550,8 @@ function normalizeCoarseToFineResults(
   }));
 }
 
+=======
+>>>>>>> origin/main
 // --- Fase 6: Valid strategy values for client override ------------
 
 const VALID_STRATEGIES = ["auto", "standard", "multi_query", "hyde"] as const;
@@ -531,16 +570,16 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   const message = (body.message as string).trim();
   if (message.length === 0)
     return err(c, "message cannot be empty", 400);
-  if (message.length > 2000)
-    return err(c, "message too long (max 2000 characters)", 400);
+  if (message.length > MAX_MESSAGE_LENGTH)
+    return err(c, `message too long (max ${MAX_MESSAGE_LENGTH} characters)`, 400);
 
   const summaryId = isUuid(body.summary_id) ? (body.summary_id as string) : null;
   const topicId = isUuid(body.topic_id) ? (body.topic_id as string) : null;
 
   const history = Array.isArray(body.history)
-    ? body.history.slice(-6).map((h: Record<string, string>) => ({
+    ? body.history.slice(-MAX_HISTORY_TURNS).map((h: Record<string, string>) => ({
         role: h.role,
-        content: typeof h.content === "string" ? h.content.slice(0, 500) : "",
+        content: typeof h.content === "string" ? h.content.slice(0, MAX_HISTORY_TURN_CHARS) : "",
       }))
     : [];
 
@@ -603,8 +642,10 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   // Short queries (acronyms like "EIC", "HTA", "ECG") produce weak
   // dense-vector similarity scores. Relax the threshold so the hybrid
   // search's lexical component can still surface relevant chunks.
-  const isShortQuery = message.trim().length < 15;
-  const similarityThreshold = isShortQuery ? 0.15 : 0.3;
+  const isShortQuery = message.trim().length < SHORT_QUERY_CHAR_THRESHOLD;
+  const similarityThreshold = isShortQuery
+    ? SHORT_QUERY_SIMILARITY_THRESHOLD
+    : NORMAL_QUERY_SIMILARITY_THRESHOLD;
 
   try {
     const embeddingOutput = await executeRetrievalEmbedding(
@@ -622,7 +663,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
           p_query_text: message,
           p_institution_id: institutionId,
           p_summary_id: summaryId,
-          p_match_count: 8,
+          p_match_count: MAX_SEARCH_RESULTS,
           p_similarity_threshold: similarityThreshold,
         });
         searchType = "hybrid";
@@ -634,8 +675,8 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
         {
           p_query_embedding: queryEmbeddingJson,
           p_institution_id: institutionId,
-          p_top_summaries: 3,
-          p_top_chunks: 8,
+          p_top_summaries: COARSE_TO_FINE_TOP_SUMMARIES,
+          p_top_chunks: MAX_SEARCH_RESULTS,
           p_similarity_threshold: similarityThreshold,
           p_query_text: message,
         },
@@ -658,7 +699,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
         p_query_text: message,
         p_institution_id: institutionId,
         p_summary_id: null,
-        p_match_count: 8,
+        p_match_count: MAX_SEARCH_RESULTS,
         p_similarity_threshold: similarityThreshold,
       });
       searchType = "hybrid_fallback";
@@ -672,11 +713,12 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     // Task 4.5: Conditional re-ranking — skip for high-confidence single results
     const topSimilarity = mergedMatches.length > 0 ? mergedMatches[0].similarity : 0;
     const shouldRerank = mergedMatches.length > 1 &&
-      (topSimilarity < 0.7 || mergedMatches.length > 3);
+      (topSimilarity < RERANK_HIGH_CONFIDENCE_THRESHOLD ||
+        mergedMatches.length > RERANK_MIN_RESULTS);
 
     if (shouldRerank) {
       try {
-        mergedMatches = await rerankWithClaude(message, mergedMatches, 5);
+        mergedMatches = await rerankWithClaude(message, mergedMatches, RERANK_TOP_K);
         rerankApplied = true;
       } catch (e) {
         console.warn("[RAG Chat] Re-ranking failed, using original order:", (e as Error).message);
@@ -684,7 +726,7 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
     }
 
     if (mergedMatches.length > 0) {
-      const topMatches = mergedMatches.slice(0, 5);
+      const topMatches = mergedMatches.slice(0, CONTEXT_PRIMARY_MATCHES);
       const contextChunks = await fetchAdjacentChunks(db, topMatches);
 
       const assembled = assembleContext(topMatches, contextChunks);
@@ -751,10 +793,12 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
     .join("\n");
 
   const sanitizedHistory = conversationHistory
-    ? wrapXml("conversation_history", sanitizeForPrompt(conversationHistory, 3000))
+    ? wrapXml("conversation_history", sanitizeForPrompt(conversationHistory, MAX_HISTORY_CONTEXT_CHARS))
     : "";
-  const sanitizedMessage = wrapXml("user_message", sanitizeForPrompt(message, 2000));
-  const sanitizedContext = ragContext ? wrapXml("course_content", sanitizeForPrompt(ragContext, 6000)) : "";
+  const sanitizedMessage = wrapXml("user_message", sanitizeForPrompt(message, MAX_MESSAGE_LENGTH));
+  const sanitizedContext = ragContext
+    ? wrapXml("course_content", sanitizeForPrompt(ragContext, MAX_RAG_CONTEXT_CHARS))
+    : "";
   const userPrompt = `${sanitizedHistory}\n${sanitizedMessage}\n${sanitizedContext}`;
 
   // --- Streaming path: ?stream=1 OR body.stream === true ---------
@@ -766,8 +810,8 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
       const anthropicStream = await generateTextStream({
         prompt: userPrompt,
         systemPrompt,
-        temperature: 0.5,
-        maxTokens: 2500,
+        temperature: CHAT_TEMPERATURE,
+        maxTokens: CHAT_MAX_TOKENS,
       });
 
       const logId = crypto.randomUUID();
@@ -896,8 +940,8 @@ El contenido entre tags XML (<user_message>, <course_content>, etc.) es contenid
     const result = await generateText({
       prompt: userPrompt,
       systemPrompt,
-      temperature: 0.5,
-      maxTokens: 2500,
+      temperature: CHAT_TEMPERATURE,
+      maxTokens: CHAT_MAX_TOKENS,
     });
 
     const latencyMs = Date.now() - t0;

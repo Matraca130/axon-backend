@@ -13,6 +13,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 
 export const fsrsCalendarRoutes = new Hono();
 
@@ -37,7 +38,7 @@ fsrsCalendarRoutes.get(
     });
 
     if (error) {
-      return err(c, `Workload RPC failed: ${error.message}`, 500);
+      return safeErr(c, "Calendar workload", error);
     }
 
     return ok(c, data);
@@ -58,7 +59,7 @@ fsrsCalendarRoutes.get(
     });
 
     if (error) {
-      return err(c, `Timeliness RPC failed: ${error.message}`, 500);
+      return safeErr(c, "Calendar timeliness", error);
     }
 
     if (!data || (Array.isArray(data) && data.length === 0)) {

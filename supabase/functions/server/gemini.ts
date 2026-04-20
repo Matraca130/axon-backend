@@ -1,18 +1,29 @@
 /**
  * gemini.ts — Gemini API helpers for Axon v4.4
  *
- * ⚠️  MULTIMODAL / IMAGE ONLY — Text generation has moved to claude-ai.ts.
+ * ⚠️  MULTIMODAL / IMAGE ONLY — Text generation lives in claude-ai.ts.
  *
  * Active functions:
  *   extractTextFromPdf()  — Gemini 2.5 Flash multimodal PDF text extraction (Fase 7)
  *   fetchWithRetry()      — Thin wrapper over lib/fetch-retry.ts (429, 503)
  *   parseGeminiJson()     — Backward-compat re-export of parseLlmJson
  *
+<<<<<<< HEAD
  * REMOVED functions:
  *   generateText()        — Text generation migrated to claude-ai.ts
  *   generateEmbedding()   — HARD ERROR: Use openai-embeddings.ts instead (D57)
  *
  * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
+=======
+ * REMOVED function:
+ *   generateEmbedding()   — HARD ERROR: Use openai-embeddings.ts instead (D57)
+ *
+ * Environment: Reads GEMINI_API_KEY from Deno.env (set via supabase secrets).
+ *
+ * LA-02 FIX: Added AbortController timeout (30s for PDF extraction)
+ * LA-06 FIX: Added retry with exponential backoff for 429/503
+ * N3 FIX: Export fetchWithRetry so handler.ts can use it for callGemini
+>>>>>>> origin/main
  */
 
 import { fetchWithRetry as _fetchWithRetry } from "./lib/fetch-retry.ts";
@@ -39,7 +50,46 @@ export async function fetchWithRetry(
   timeoutMs: number,
   maxRetries = 3,
 ): Promise<Response> {
+<<<<<<< HEAD
   return _fetchWithRetry(url, init, timeoutMs, maxRetries, [429, 503]);
+=======
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...init, signal: controller.signal });
+      clearTimeout(timer);
+
+      if ((res.status === 429 || res.status === 503) && attempt < maxRetries) {
+        const delay = Math.min(1000 * 2 ** attempt, 8000);
+        console.warn(
+          `[Gemini] ${res.status}, retry ${attempt + 1}/${maxRetries} in ${delay}ms`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+
+      return res;
+    } catch (e) {
+      clearTimeout(timer);
+      if (e instanceof DOMException && e.name === "AbortError") {
+        throw new Error(
+          `Gemini API timeout after ${timeoutMs}ms (attempt ${attempt + 1})`,
+        );
+      }
+      if (attempt < maxRetries) {
+        const delay = Math.min(1000 * 2 ** attempt, 8000);
+        console.warn(
+          `[Gemini] Network error, retry ${attempt + 1}/${maxRetries} in ${delay}ms: ${(e as Error).message}`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw new Error("Gemini: max retries exceeded");
+>>>>>>> origin/main
 }
 
 // ─── Embeddings (REMOVED — W7-RAG01) ────────────────────────────
@@ -161,8 +211,11 @@ export async function extractTextFromPdf(
   };
 }
 
+<<<<<<< HEAD
 // ─── Parse JSON safely from Gemini output ───────────────────────
 // Shared implementation in lib/parse-llm-json.ts. Re-exported for
 // backward compatibility; no consumers currently import this name.
 
 export const parseGeminiJson = parseLlmJson;
+=======
+>>>>>>> origin/main

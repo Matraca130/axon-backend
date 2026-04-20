@@ -231,7 +231,7 @@ async function generateEmbeddingBatch(texts: string[]): Promise<number[][]> {
         lastError = e instanceof Error ? e : new Error(String(e));
       }
 
-      if (attempt < MAX_ATTEMPTS - 1) {
+      if (attempt < MAX_ATTEMPTS) {
         const delay = BASE_DELAY_MS * Math.pow(2, attempt);
         console.warn(
           `[OpenAI Batch Embed] Error, retry ${attempt + 1}/${MAX_ATTEMPTS} in ${delay}ms: ${lastError.message}`,
