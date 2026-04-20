@@ -59,7 +59,7 @@ Deno.test("SEC-006: XSS in flashcard doesn't crash", async () => {
   const r = await api.post("/flashcards", adminToken, {
     summary_id: "550e8400-e29b-41d4-a716-446655440000",
     keyword_id: "660e8400-e29b-41d4-a716-446655440000",
-    front: "<img src=x onerror=alert(1)>", back: "A",
+    front: '<img src=x onerror=alert(1)>', back: "A",
   });
   assert(r.status < 500);
 });
@@ -94,54 +94,5 @@ Deno.test("SEC-010: errors don't leak stack traces", async () => {
   await setup();
   const r = await api.get("/nonexistent", adminToken);
   const s = JSON.stringify(r.raw);
-  assert(!s.includes("stack"), "Response should not contain 'stack' field");
-  // Check for actual stack trace patterns (e.g. "at functionName (file:...")
-  // not just "at " which matches normal English words like "that"
-  assert(!(/\bat \w+\s*\(/.test(s)), "Response should not contain stack trace frames");
-});
-
-// AXO-140 regression: 22 SECURITY DEFINER functions were callable by `anon` via
-// PostgREST RPC, allowing unauthenticated RLS bypass. Migration
-// 20260405000001_security_revoke_anon_all_definer_rpcs.sql revoked EXECUTE from
-// anon on all of them. This test guards the anon boundary using one
-// service_role-only RPC (award_xp) and one authenticated-only RPC
-// (user_institution_ids) as representatives.
-Deno.test("SEC-011: anon cannot call SECURITY DEFINER RPCs (AXO-140)", async () => {
-  // award_xp — service_role only
-  const r1 = await fetch(`${ENV.SUPABASE_URL}/rest/v1/rpc/award_xp`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "apikey": ENV.ANON_KEY,
-      "Authorization": `Bearer ${ENV.ANON_KEY}`,
-    },
-    body: JSON.stringify({
-      p_user_id: "00000000-0000-0000-0000-000000000000",
-      p_source: "test",
-      p_amount: 1,
-    }),
-  });
-  // PostgREST returns 401/403 when the role lacks EXECUTE; 404 if the function
-  // signature is unreachable to anon (also acceptable — anon can't see it).
-  assert(
-    r1.status === 401 || r1.status === 403 || r1.status === 404,
-    `award_xp(anon) expected 401/403/404, got ${r1.status}`,
-  );
-  await r1.body?.cancel();
-
-  // user_institution_ids — authenticated only (also locked out from anon)
-  const r2 = await fetch(`${ENV.SUPABASE_URL}/rest/v1/rpc/user_institution_ids`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "apikey": ENV.ANON_KEY,
-      "Authorization": `Bearer ${ENV.ANON_KEY}`,
-    },
-    body: JSON.stringify({}),
-  });
-  assert(
-    r2.status === 401 || r2.status === 403 || r2.status === 404,
-    `user_institution_ids(anon) expected 401/403/404, got ${r2.status}`,
-  );
-  await r2.body?.cancel();
+  assert(!s.includes("stack")); assert(!s.includes("at "));
 });

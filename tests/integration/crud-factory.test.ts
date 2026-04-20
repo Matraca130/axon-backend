@@ -1,6 +1,7 @@
 /**
  * tests/integration/crud-factory.test.ts — CRUD integration tests
- * Verified against REAL crud-factory.ts, index.ts, content-tree.ts, routes/content/crud.ts.
+ * Verified against REAL crud-factory.ts (SHA 19515e9b), index.ts (SHA ed999253),
+ * content-tree.ts (SHA 4be8808e), routes/content/crud.ts (SHA 224ab23d).
  *
  * Run: deno test tests/integration/crud-factory.test.ts --allow-net --allow-env --no-check
  */
@@ -16,13 +17,13 @@ async function setup() {
 
 // ═══ HEALTH CHECK (uses c.json() directly, NOT ok() wrapper) ═══
 
-Deno.test("health returns status ok version 4.5", async () => {
+Deno.test("health returns status ok version 4.4", async () => {
   await setup();
   const r = await api.get("/health", adminToken);
   assertStatus(r, 200);
   // NOTE: /health uses c.json() directly, NOT ok(). So r.raw has NO { data: ... } wrapper.
   assertEquals((r.raw as any).status, "ok");
-  assertEquals((r.raw as any).version, "4.5");
+  assertEquals((r.raw as any).version, "4.4");
   // Verify services field exists (D57: reports gemini + openai status)
   assert(typeof (r.raw as any).services === "object");
 });
@@ -84,7 +85,7 @@ Deno.test("GET invalid UUID returns 404 or 400", async () => {
   assert(r.status === 404 || r.status === 400, `Expected 404 or 400, got ${r.status}`);
 });
 
-// ═══ PAGINATION (verified: DEFAULT=100, MAX=500, negative offset -> 0) ═══
+// ═══ PAGINATION (verified: DEFAULT=100, MAX=500, negative offset → 0) ═══
 
 Deno.test("pagination limit capped at 500 (N-9 FIX)", async () => {
   await setup();
@@ -126,7 +127,7 @@ Deno.test("no auth token returns 401", async () => {
   assert(r.status === 401 || r.status === 403, `Expected 401/403, got ${r.status}`);
 });
 
-// ═══ CRUD LIFECYCLE: POST -> PUT -> DELETE -> RESTORE ═══
+// ═══ CRUD LIFECYCLE: POST → PUT → DELETE → RESTORE ═══
 // Tests the full crud-factory lifecycle for a soft-delete table.
 // Requires admin with CONTENT_WRITE_ROLES in TEST_INSTITUTION_ID.
 
@@ -135,7 +136,7 @@ let testSectionId: string | null = null;
 
 Deno.test("LIFECYCLE: find a section_id for topic creation", async () => {
   await setup();
-  // Get courses -> first course -> first semester -> first section
+  // Get courses → first course → first semester → first section
   const cr = await api.get<{items:any[]}>(`/courses?institution_id=${ENV.INSTITUTION_ID}`, adminToken);
   if (!cr.ok) { console.warn("[SKIP] No courses found"); return; }
   const courses = assertOk(cr).items;
