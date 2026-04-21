@@ -90,7 +90,12 @@ profNotesRoutes.post(profNotesBase, async (c: Context) => {
   const keyword_id = body.keyword_id;
   const note = body.note;
 
-  if (typeof keyword_id !== "string" || typeof note !== "string") {
+  if (
+    typeof keyword_id !== "string" ||
+    keyword_id.trim().length === 0 ||
+    typeof note !== "string" ||
+    note.trim().length === 0
+  ) {
     return err(c, "keyword_id and note must be non-empty strings", 400);
   }
 
