@@ -48,6 +48,7 @@ export function onSummaryWrite({
   action,
   row,
   updatedFields,
+  waitUntil,
 }: AfterWriteParams): void {
   // ── Gate 1: On update, only trigger if a chunk-relevant field changed.
   //
@@ -88,10 +89,16 @@ export function onSummaryWrite({
   // It also holds an advisory lock per summary, so concurrent
   // block edits collapsing into multiple hook fires won't
   // race with each other.
-  autoChunkAndEmbed(summaryId, institutionId).catch((e) => {
+  //
+  // Must be registered with waitUntil (when available) or the runtime
+  // cancels the promise as soon as the CRUD handler returns — every
+  // organically-created summary in prod had last_chunked_at = NULL
+  // because of this bug before the waitUntil param landed in crud-factory.
+  const ingestPromise = autoChunkAndEmbed(summaryId, institutionId).catch((e) => {
     console.error(
       `[Summary Hook] Auto-ingest failed for summary ${summaryId}:`,
       (e as Error).message,
     );
   });
+  waitUntil?.(ingestPromise);
 }
