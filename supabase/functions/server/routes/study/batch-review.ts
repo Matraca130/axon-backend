@@ -66,25 +66,35 @@ export const batchReviewRoutes = new Hono();
 /**
  * Loads the global leech threshold from algorithm_config.
  *
- * TODO(arch): the try/catch and implicit destructure swallow DB errors —
- * any transient failure silently degrades to DEFAULT_LEECH_THRESHOLD with
- * no warning in the response. Preserved here for zero-behavior-change;
- * a follow-up PR should surface the fallback via a warning and
- * log-and-rethrow on unexpected exceptions.
+ * DB errors still fall back to DEFAULT_LEECH_THRESHOLD (batch review
+ * should not fail because the tuning table is unreachable), but now
+ * the fallback is logged so operators can see when the threshold has
+ * drifted from configuration.
  */
 async function loadLeechThreshold(db: SupabaseClient): Promise<number> {
   try {
-    const { data } = await db
+    const { data, error } = await db
       .from("algorithm_config")
       .select("leech_threshold")
       .is("institution_id", null)
       .maybeSingle();
 
+    if (error) {
+      console.warn(
+        `[batch-review] loadLeechThreshold DB error, falling back to DEFAULT_LEECH_THRESHOLD: ${error.message}`,
+      );
+      return DEFAULT_LEECH_THRESHOLD;
+    }
+
     // Clamp to [1, 50] to prevent nonsensical values: 0 would mark
     // every card as a leech, >50 would effectively disable detection.
     const raw = data?.leech_threshold ?? DEFAULT_LEECH_THRESHOLD;
     return Math.max(1, Math.min(50, raw));
-  } catch {
+  } catch (e) {
+    console.warn(
+      `[batch-review] loadLeechThreshold threw, falling back to DEFAULT_LEECH_THRESHOLD:`,
+      e,
+    );
     return DEFAULT_LEECH_THRESHOLD;
   }
 }
@@ -201,12 +211,15 @@ async function persistBatch(
     });
 
     if (error) {
+      console.error(
+        `[batch-review] process_review_batch RPC failed: ${error.message}`,
+      );
       return {
         ok: false,
         reviewsCreated: 0,
         fsrsUpdated: 0,
         bktUpdated: 0,
-        error: `Atomic batch persistence failed: ${error.message}`,
+        error: "Atomic batch persistence failed",
       };
     }
 
@@ -219,12 +232,13 @@ async function persistBatch(
       bktUpdated: stats?.bkt_updated ?? dedupedBktRows.length,
     };
   } catch (e) {
+    console.error(`[batch-review] process_review_batch threw:`, e);
     return {
       ok: false,
       reviewsCreated: 0,
       fsrsUpdated: 0,
       bktUpdated: 0,
-      error: `Atomic batch persistence threw: ${(e as Error).message}`,
+      error: "Atomic batch persistence threw",
     };
   }
 }

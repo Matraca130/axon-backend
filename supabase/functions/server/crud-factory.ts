@@ -565,9 +565,16 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       let query = db.from(cfg.table).delete().eq("id", id);
       if (cfg.scopeToUser) query = query.eq(cfg.scopeToUser, user.id);
 
-      const { error } = await query;
+      // .select() so we can distinguish a successful delete from a 0-row
+      // match (row didn't exist or was already deleted). Previously this
+      // returned 200 {deleted: id} even when nothing was actually
+      // removed (#254).
+      const { data, error } = await query.select();
       if (error)
         return safeErr(c, `Delete ${cfg.table}`, error);
+      if (!data || data.length === 0) {
+        return err(c, `${cfg.table} row not found`, 404);
+      }
       return ok(c, { deleted: id });
     }
   });
