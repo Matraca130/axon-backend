@@ -208,7 +208,9 @@ async function lookupLinkedUser(
   for (const link of legacyLinks) {
     const computedHash = await hashPhone(phoneNumber, link.phone_salt);
     if (computedHash === link.phone_hash) {
-      // Backfill the lookup hash for this link
+      // Backfill the lookup hash for this link (fire-and-forget — caught so
+      // a thrown rejection (network / pool) doesn't surface as an unhandled
+      // rejection).
       admin
         .from("whatsapp_links")
         .update({ phone_lookup_hash: lookupHash })
@@ -216,6 +218,9 @@ async function lookupLinkedUser(
         .then(({ error }) => {
           if (error) console.warn(`[WA-Webhook] Backfill lookup hash failed: ${error.message}`);
           else console.warn(`[WA-Webhook] Backfilled phone_lookup_hash for user ${link.user_id}`);
+        })
+        .catch((err) => {
+          console.warn(`[WA-Webhook] Backfill lookup hash threw:`, err);
         });
 
       return { userId: link.user_id, phoneHash: link.phone_hash };

@@ -544,19 +544,38 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
       if (error)
         return safeErr(c, `Soft-delete ${cfg.table}`, error);
 
-      // Task 9.1: Cascade soft-delete to child tables (fire-and-forget)
+      // Task 9.1: Cascade soft-delete to child tables.
+      // Awaited via Promise.allSettled so rejections (network / pool / unknown
+      // throw) surface in logs instead of being silently swallowed as unhandled
+      // rejections, and so children are not left orphaned if the parent row is
+      // already deleted when the 200 response returns.
       if (cfg.cascadeChildren && cfg.cascadeChildren.length > 0) {
         const now = new Date().toISOString();
-        for (const child of cfg.cascadeChildren) {
-          db.from(child.table)
-            .update({ deleted_at: now, is_active: false, updated_at: now })
-            .eq(child.fk, id)
-            .is("deleted_at", null)
-            .then(({ error: cascadeErr }: { error: { message: string } | null }) => {
-              if (cascadeErr) {
-                console.warn(`[CRUD Cascade] ${cfg.table} → ${child.table}: ${cascadeErr.message}`);
-              }
-            });
+        const cascadeResults = await Promise.allSettled(
+          cfg.cascadeChildren.map((child) =>
+            db
+              .from(child.table)
+              .update({ deleted_at: now, is_active: false, updated_at: now })
+              .eq(child.fk, id)
+              .is("deleted_at", null),
+          ),
+        );
+        for (let i = 0; i < cascadeResults.length; i++) {
+          const child = cfg.cascadeChildren[i];
+          const r = cascadeResults[i];
+          if (r.status === "rejected") {
+            console.warn(
+              `[CRUD Cascade] ${cfg.table} → ${child.table} threw:`,
+              r.reason,
+            );
+          } else {
+            const cascadeErr = (r.value as { error: { message: string } | null }).error;
+            if (cascadeErr) {
+              console.warn(
+                `[CRUD Cascade] ${cfg.table} → ${child.table}: ${cascadeErr.message}`,
+              );
+            }
+          }
         }
       }
 
