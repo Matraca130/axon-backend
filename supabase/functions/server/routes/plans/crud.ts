@@ -5,10 +5,36 @@
  * plan_access_rules, institution_subscriptions.
  */
 
+import type { Context } from "npm:hono";
 import { Hono } from "npm:hono";
+import { err, PREFIX } from "../../db.ts";
 import { registerCrud } from "../../crud-factory.ts";
 
 export const planCrudRoutes = new Hono();
+
+// platform_plans writes are restricted at the DB layer (migration
+// 20260326_01_rls_platform_plans_restrict_writes dropped the
+// authenticated-user INSERT/UPDATE/DELETE policies, leaving only
+// service_role writes). Without an explicit super-admin role in the
+// auth model, we also refuse writes at the application layer so
+// callers receive a clear 403 instead of an opaque 500 from the RLS
+// denial, and so an accidental restoration of permissive RLS policies
+// does NOT re-expose the endpoint. (#252)
+//
+// These handlers are registered BEFORE the registerCrud() call below,
+// so they take priority for POST/PUT/DELETE on /platform-plans.
+// GET requests fall through to the factory handlers — SELECT remains
+// open to authenticated users (students browse plans).
+const platformPlansWritesDisabled = (c: Context) =>
+  err(
+    c,
+    "platform_plans writes are administratively restricted. Contact operations for platform-level plan changes.",
+    403,
+  );
+
+planCrudRoutes.post(`${PREFIX}/platform-plans`, platformPlansWritesDisabled);
+planCrudRoutes.put(`${PREFIX}/platform-plans/:id`, platformPlansWritesDisabled);
+planCrudRoutes.delete(`${PREFIX}/platform-plans/:id`, platformPlansWritesDisabled);
 
 registerCrud(planCrudRoutes, {
   table: "platform_plans", slug: "platform-plans",
