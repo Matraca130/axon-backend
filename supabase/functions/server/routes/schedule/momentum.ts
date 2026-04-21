@@ -17,6 +17,7 @@
 import { Hono } from "npm:hono";
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 
 export const momentumRoutes = new Hono();
 
@@ -45,6 +46,7 @@ momentumRoutes.get(`${PREFIX}/schedule/momentum`, async (c: Context) => {
     const { count: completedToday, error: todayErr } = await todayQuery;
     if (todayErr) {
       console.error(`[momentum] today reviews error: ${todayErr.message}`);
+      return safeErr(c, "Momentum today reviews", todayErr);
     }
 
     // 2. Weekly reviews (last 7 days)
@@ -58,6 +60,7 @@ momentumRoutes.get(`${PREFIX}/schedule/momentum`, async (c: Context) => {
     const { count: weeklyReviews, error: weekErr } = await weekQuery;
     if (weekErr) {
       console.error(`[momentum] weekly reviews error: ${weekErr.message}`);
+      return safeErr(c, "Momentum weekly reviews", weekErr);
     }
 
     // 3. Streak calculation — count consecutive days with at least 1 review
@@ -71,6 +74,7 @@ momentumRoutes.get(`${PREFIX}/schedule/momentum`, async (c: Context) => {
 
     if (streakErr) {
       console.error(`[momentum] streak query error: ${streakErr.message}`);
+      return safeErr(c, "Momentum streak query", streakErr);
     }
 
     let streak = 0;
@@ -115,6 +119,7 @@ momentumRoutes.get(`${PREFIX}/schedule/momentum`, async (c: Context) => {
     const { count: dueToday, error: dueErr } = await dueQuery;
     if (dueErr) {
       console.error(`[momentum] due cards error: ${dueErr.message}`);
+      return safeErr(c, "Momentum due cards", dueErr);
     }
 
     // 5. Weekly goal progress — estimate based on daily target of 20 reviews

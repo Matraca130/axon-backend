@@ -144,13 +144,20 @@ aiIngestPdfRoutes.post(`${PREFIX}/ai/ingest-pdf`, async (c: Context) => {
   const originalFilename = file.name || "upload.pdf";
   const title = titleInput?.trim() || titleFromFilename(originalFilename);
 
-  const { data: maxOrderRow } = await adminDb
+  // maybeSingle: 0 rows is valid (first summary in the topic). Using .single()
+  // here forces a PostgREST error on the empty case and silently swallows it,
+  // hiding any real DB failure too.
+  const { data: maxOrderRow, error: maxOrderErr } = await adminDb
     .from("summaries")
     .select("order_index")
     .eq("topic_id", topicId)
     .order("order_index", { ascending: false })
     .limit(1)
-    .single();
+    .maybeSingle();
+
+  if (maxOrderErr) {
+    return safeErr(c, "Max order lookup", maxOrderErr);
+  }
 
   const nextOrder = ((maxOrderRow?.order_index as number) ?? -1) + 1;
   const wordCount = extractedText.split(/\s+/).filter(Boolean).length;
