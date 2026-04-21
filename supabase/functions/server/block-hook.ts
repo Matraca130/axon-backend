@@ -39,6 +39,7 @@ import { autoChunkAndEmbed } from "./auto-ingest.ts";
  */
 export function onBlockWrite({
   row,
+  waitUntil,
 }: AfterWriteParams): void {
   const summaryId = row.summary_id as string | undefined;
 
@@ -51,12 +52,18 @@ export function onBlockWrite({
   }
 
   // Fire-and-forget: revert published→review AND trigger re-chunk.
-  handleBlockWrite(summaryId).catch((e) => {
+  //
+  // Registered with waitUntil (when available) so Deno Deploy / Workers
+  // keep the isolate alive past HTTP response emission. Without it the
+  // promise was cancelled before autoChunkAndEmbed got to do anything —
+  // see AfterWriteParams.waitUntil in crud-factory.ts for the full story.
+  const processPromise = handleBlockWrite(summaryId).catch((e) => {
     console.error(
       `[Block Hook] Failed to process summary ${summaryId}:`,
       (e as Error).message,
     );
   });
+  waitUntil?.(processPromise);
 }
 
 /**

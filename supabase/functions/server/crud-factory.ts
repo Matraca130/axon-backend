@@ -87,6 +87,21 @@ export interface AfterWriteParams {
   updatedFields?: string[];
   /** The authenticated user's ID */
   userId: string;
+  /**
+   * Bridge to the runtime's `waitUntil` (Deno Deploy / Cloudflare Workers).
+   *
+   * Hooks that start async side-effects (auto-ingest, embeddings, etc.) MUST
+   * pass the top-level promise through this callback so the isolate stays
+   * alive past the HTTP response. Without it, the runtime cancels pending
+   * promises the moment `ok()` emits — the exact reason auto-ingest never
+   * produced chunks for organically-created summaries before this existed
+   * (`last_chunked_at = NULL` on every row in prod as of 2026-04-21).
+   *
+   * Undefined in environments that don't expose an execution context
+   * (unit tests, some local dev setups). Hooks treat it as optional:
+   * `waitUntil?.(promise)`.
+   */
+  waitUntil?: (promise: Promise<unknown>) => void;
 }
 
 export interface CrudConfig {
@@ -121,6 +136,33 @@ export interface CrudConfig {
    * NOT called on DELETE or RESTORE operations.
    */
   afterWrite?: (params: AfterWriteParams) => void;
+}
+
+// ─── waitUntil Bridge ──────────────────────────────────────────
+//
+// Safely pull the runtime's waitUntil out of Hono's Context so afterWrite
+// hooks can preserve fire-and-forget promises past HTTP response emission.
+//
+// Hono's `c.executionCtx` is a getter that THROWS when the runtime does
+// not expose one (tests, some local dev). Wrapping the access in try/catch
+// keeps the CRUD path robust in every deploy target.
+//
+// Returns undefined when no waitUntil is available — hooks that receive
+// undefined degrade to the old fire-and-forget behavior (same as pre-fix),
+// so this is a pure capability upgrade, never a regression.
+
+function extractWaitUntil(
+  c: Context,
+): ((promise: Promise<unknown>) => void) | undefined {
+  try {
+    const ctx = c.executionCtx;
+    if (ctx && typeof ctx.waitUntil === "function") {
+      return (promise: Promise<unknown>) => ctx.waitUntil(promise);
+    }
+  } catch {
+    // No executionCtx on this runtime — fall through to undefined.
+  }
+  return undefined;
 }
 
 // ─── Pagination Helper ─────────────────────────────────────────
@@ -389,7 +431,12 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     // The HTTP response is NEVER delayed or affected by hook failures.
     if (cfg.afterWrite) {
       try {
-        cfg.afterWrite({ action: "create", row: data, userId: user.id });
+        cfg.afterWrite({
+          action: "create",
+          row: data,
+          userId: user.id,
+          waitUntil: extractWaitUntil(c),
+        });
       } catch (hookErr) {
         console.warn(
           `[CRUD Hook] afterWrite threw on ${cfg.table} create:`,
@@ -446,7 +493,13 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
     // updatedFields reflects ONLY what the client sent (not updated_at).
     if (cfg.afterWrite) {
       try {
-        cfg.afterWrite({ action: "update", row: data, updatedFields, userId: user.id });
+        cfg.afterWrite({
+          action: "update",
+          row: data,
+          updatedFields,
+          userId: user.id,
+          waitUntil: extractWaitUntil(c),
+        });
       } catch (hookErr) {
         console.warn(
           `[CRUD Hook] afterWrite threw on ${cfg.table} update:`,
