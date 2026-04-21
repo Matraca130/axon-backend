@@ -38,8 +38,19 @@ import { generateEmbedding, generateEmbeddings } from "./openai-embeddings.ts";
 import { getAdminClient } from "./db.ts";
 import { flattenBlocksToMarkdown } from "./block-flatten.ts";
 import { advisoryLockKey, withAdvisoryLock } from "./lib/advisory-lock.ts";
+import {
+  contextualizeChunks,
+  type ContextualizeResult,
+} from "./contextualizer.ts";
 import { crypto } from "https://deno.land/std/crypto/mod.ts";
 import { encodeHex } from "https://deno.land/std/encoding/hex.ts";
+
+// Contextual Retrieval feature flag (opt-in).
+// OFF by default = zero production impact. Toggle via:
+//   supabase secrets set ENABLE_CONTEXTUAL_RETRIEVAL=true
+const CONTEXTUAL_RETRIEVAL_ENABLED =
+  Deno.env.get("ENABLE_CONTEXTUAL_RETRIEVAL") === "true";
+const CONTEXTUAL_CONCURRENCY = 3;
 
 // ─── Public Types ───────────────────────────────────────────────────
 
@@ -53,6 +64,10 @@ export interface AutoIngestResult {
   summary_embedded: boolean;
   skipped_unchanged: boolean;
   elapsed_ms: number;
+  /** True when contextual retrieval ran on this ingest. */
+  contextual_enabled: boolean;
+  /** Chunks that fell back to raw content due to LLM failure. 0 when disabled. */
+  contextual_fallback_count: number;
 }
 
 // ─── Text Utilities ─────────────────────────────────────────────────
@@ -177,6 +192,8 @@ export async function autoChunkAndEmbed(
       summary_embedded: false,
       skipped_unchanged: false,
       elapsed_ms: Date.now() - t0,
+      contextual_enabled: false,
+      contextual_fallback_count: 0,
     };
   }
 
@@ -261,6 +278,8 @@ async function _autoChunkAndEmbedCore(
       summary_embedded: false,
       skipped_unchanged: false,
       elapsed_ms: Date.now() - t0,
+      contextual_enabled: false,
+      contextual_fallback_count: 0,
     };
   }
 
@@ -292,6 +311,8 @@ async function _autoChunkAndEmbedCore(
       summary_embedded: false,
       skipped_unchanged: true,
       elapsed_ms: Date.now() - t0,
+      contextual_enabled: false,
+      contextual_fallback_count: 0,
     };
   }
 
@@ -327,7 +348,47 @@ async function _autoChunkAndEmbedCore(
       summary_embedded: false,
       skipped_unchanged: false,
       elapsed_ms: Date.now() - t0,
+      contextual_enabled: false,
+      contextual_fallback_count: 0,
     };
+  }
+
+  // Step 3c: Contextual Retrieval (opt-in). When enabled, each chunk gets a
+  // 1-2 sentence prefix from Haiku 4.5 situating it within the full document.
+  // Anthropic prompt-caches the document block so we pay it once per summary
+  // rather than once per chunk. Failures per-chunk fall back silently to
+  // raw content + model="fallback-plain" — never throws.
+  let contextualResults: ContextualizeResult[] | null = null;
+  let contextualFallbackCount = 0;
+
+  if (CONTEXTUAL_RETRIEVAL_ENABLED) {
+    try {
+      contextualResults = await contextualizeChunks(
+        fullText,
+        title,
+        chunks.map((c) => c.content),
+        CONTEXTUAL_CONCURRENCY,
+      );
+      contextualFallbackCount = contextualResults.filter((r) => r.fellBack).length;
+      if (contextualFallbackCount > 0) {
+        console.warn(
+          `[Auto-Ingest] Contextual fallback on ${contextualFallbackCount}/${chunks.length} ` +
+            `chunks for ${summaryId} — embeddings will use raw content for those.`,
+        );
+      } else {
+        console.info(
+          `[Auto-Ingest] Contextualized ${chunks.length} chunks for ${summaryId}`,
+        );
+      }
+    } catch (e) {
+      // contextualizeChunks is supposed to never throw, but guard anyway
+      // so an unexpected bug in the contextualizer can't break ingest.
+      console.warn(
+        `[Auto-Ingest] Contextualization threw unexpectedly, skipping for ${summaryId}: ` +
+          (e as Error).message,
+      );
+      contextualResults = null;
+    }
   }
 
   // Step 4: Delete existing chunks
@@ -342,14 +403,24 @@ async function _autoChunkAndEmbedCore(
     );
   }
 
-  // Step 5: Insert new chunks (with content_hash for change detection)
-  const insertData = chunks.map((chunk) => ({
-    summary_id: summaryId,
-    content: chunk.content,
-    order_index: chunk.order_index,
-    chunk_strategy: chunk.strategy,
-    content_hash: newContentHash,
-  }));
+  // Step 5: Insert new chunks (with content_hash for change detection).
+  // When contextual retrieval ran, we also persist contextual_content +
+  // contextual_model here. contextual_embedding is UPDATEd later alongside
+  // the raw embedding so both columns land in a single round trip per chunk.
+  const insertData = chunks.map((chunk, i) => {
+    const base: Record<string, unknown> = {
+      summary_id: summaryId,
+      content: chunk.content,
+      order_index: chunk.order_index,
+      chunk_strategy: chunk.strategy,
+      content_hash: newContentHash,
+    };
+    if (contextualResults) {
+      base.contextual_content = contextualResults[i].contextualContent;
+      base.contextual_model = contextualResults[i].model;
+    }
+    return base;
+  });
 
   const { data: inserted, error: insertErr } = await adminDb
     .from("chunks")
@@ -379,6 +450,25 @@ async function _autoChunkAndEmbedCore(
   // Step 7: Generate chunk embeddings (batch, with sequential fallback)
   let generated = 0;
   let failed = 0;
+
+  // 7a: Generate contextual embeddings up front (when contextual retrieval ran).
+  // These are independent of the raw-embedding flow. If this batch call fails,
+  // we log and carry on with NULL contextual_embedding — raw embeddings still
+  // get written, chunks remain searchable via the existing embedding column.
+  let contextualEmbeddings: number[][] | null = null;
+  if (contextualResults) {
+    try {
+      contextualEmbeddings = await generateEmbeddings(
+        contextualResults.map((r) => r.contextualContent),
+      );
+    } catch (e) {
+      console.warn(
+        `[Auto-Ingest] Contextual embedding batch failed for ${summaryId}, ` +
+          `leaving contextual_embedding NULL: ${(e as Error).message}`,
+      );
+      contextualEmbeddings = null;
+    }
+  }
 
   try {
     // Task 4.8: Reuse semantic chunker embeddings where chunk matches a paragraph
@@ -427,9 +517,15 @@ async function _autoChunkAndEmbedCore(
     }
 
     for (let i = 0; i < inserted.length; i++) {
+      const updatePayload: Record<string, unknown> = {
+        embedding: JSON.stringify(allEmbeddings[i]),
+      };
+      if (contextualEmbeddings) {
+        updatePayload.contextual_embedding = JSON.stringify(contextualEmbeddings[i]);
+      }
       const { error: embedErr } = await adminDb
         .from("chunks")
-        .update({ embedding: JSON.stringify(allEmbeddings[i]) })
+        .update(updatePayload)
         .eq("id", inserted[i].id);
 
       if (embedErr) {
@@ -454,9 +550,15 @@ async function _autoChunkAndEmbedCore(
         // openai-embeddings.ts already handles 429/503.
         const embedding = await generateEmbedding(chunks[i].content);
 
+        const updatePayload: Record<string, unknown> = {
+          embedding: JSON.stringify(embedding),
+        };
+        if (contextualEmbeddings) {
+          updatePayload.contextual_embedding = JSON.stringify(contextualEmbeddings[i]);
+        }
         const { error: embedErr } = await adminDb
           .from("chunks")
-          .update({ embedding: JSON.stringify(embedding) })
+          .update(updatePayload)
           .eq("id", inserted[i].id);
 
         if (embedErr) {
@@ -504,7 +606,9 @@ async function _autoChunkAndEmbedCore(
   console.info(
     `[Auto-Ingest] Done: ${summaryId} — ${chunks.length} chunks (${selectedStrategy}, source=${sourceKind}), ` +
       `${generated} embedded, ${failed} failed, ` +
-      `summary_embed=${summaryEmbedded}, ${elapsed}ms`,
+      `summary_embed=${summaryEmbedded}, ` +
+      `contextual=${contextualResults ? `on(fallbacks=${contextualFallbackCount})` : "off"}, ` +
+      `${elapsed}ms`,
   );
 
   return {
@@ -517,5 +621,7 @@ async function _autoChunkAndEmbedCore(
     summary_embedded: summaryEmbedded,
     skipped_unchanged: false,
     elapsed_ms: elapsed,
+    contextual_enabled: contextualResults !== null,
+    contextual_fallback_count: contextualFallbackCount,
   };
 }

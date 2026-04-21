@@ -58,6 +58,7 @@ import { aiReportDashboardRoutes } from "./report-dashboard.ts";
 import { aiPreGenerateRoutes } from "./pre-generate.ts";
 import { aiIngestRoutes } from "./ingest.ts";
 import { aiReChunkRoutes } from "./re-chunk.ts";
+import { aiIngestContextualRoutes } from "./ingest-contextual.ts";
 import { aiChatRoutes } from "./chat.ts";
 import { aiFeedbackRoutes } from "./feedback.ts";
 import { aiAnalyticsRoutes } from "./analytics.ts";
@@ -135,6 +136,7 @@ aiRoutes.route("/", aiReportDashboardRoutes);     // Fase 8C
 aiRoutes.route("/", aiPreGenerateRoutes);         // Fase 8D
 aiRoutes.route("/", aiIngestRoutes);
 aiRoutes.route("/", aiReChunkRoutes);             // Fase 5
+aiRoutes.route("/", aiIngestContextualRoutes);    // Contextual Retrieval (Anthropic pattern)
 aiRoutes.route("/", aiChatRoutes);
 aiRoutes.route("/", aiFeedbackRoutes);            // T-03
 aiRoutes.route("/", aiAnalyticsRoutes);            // T-03
