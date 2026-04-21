@@ -173,13 +173,20 @@ export async function updateMessagingSettings(c: Context): Promise<Response> {
 
   const db = getAdminClient();
 
-  // Merge with existing settings (don't overwrite unset fields)
-  const { data: existing } = await db
+  // Merge with existing settings (don't overwrite unset fields).
+  // A DB error here would make us merge into `{}` and silently lose the
+  // unsent credential fields, so surface anything that isn't PGRST116
+  // (maybe-single "no rows") as 500.
+  const { data: existing, error: existingErr } = await db
     .from("messaging_admin_settings")
     .select("settings")
     .eq("institution_id", institutionId)
     .eq("channel", channel)
-    .single();
+    .maybeSingle();
+
+  if (existingErr) {
+    return safeErr(c, "Messaging settings fetch", existingErr);
+  }
 
   const mergedSettings = {
     ...(existing?.settings as Record<string, unknown> ?? {}),

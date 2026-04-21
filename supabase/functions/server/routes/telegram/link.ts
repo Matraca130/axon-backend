@@ -12,6 +12,7 @@
 
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, getAdminClient } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { sendTextPlain } from "./tg-client.ts";
 import { createLinkingAttemptsTracker } from "../_messaging/linking-attempts.ts";
 import { generateLinkingCode, isLinkingCode as sharedIsLinkingCode } from "../_messaging/linking-code.ts";
@@ -32,12 +33,19 @@ export async function generateLinkCode(c: Context): Promise<Response> {
   const { user } = auth;
   const db = getAdminClient();
 
-  const { data: existingLink } = await db
+  const { data: existingLink, error: existingErr } = await db
     .from("telegram_links")
     .select("id, is_active")
     .eq("user_id", user.id)
     .eq("is_active", true)
-    .single();
+    .maybeSingle();
+
+  // PGRST116 ("no rows") is the expected path; anything else is a real
+  // failure we must not swallow, because we'd then proceed to issue a
+  // second linking code for a user who may already be linked.
+  if (existingErr) {
+    return safeErr(c, "Existing Telegram link lookup", existingErr);
+  }
 
   if (existingLink) {
     return err(c, "Ya tienes Telegram vinculado. Desvincula primero para vincular otro.", 409);
