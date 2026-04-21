@@ -59,27 +59,39 @@ function str(val: unknown): string {
 
 // ─── Per-Type Flatten Functions ─────────────────────────────────
 
+// Canonical schema (per skills/crearresumen/references/block-content-schema.md)
+// uses `content` for the main body text. Legacy generations wrote `body` or
+// `text`. Read all three in priority order so both shapes round-trip correctly —
+// without this fallback chain, the prose body in ~255/258 prose blocks + most
+// callout + key_point blocks in prod silently dropped from the RAG index.
+function proseBody(c: Record<string, unknown>): string {
+  return stripKeywordMarkers(str(c.content ?? c.body ?? c.text));
+}
+
 function flattenProse(c: Record<string, unknown>): string {
   const title = str(c.title);
-  const body = stripKeywordMarkers(str(c.body));
-  return `## ${title}\n\n${body}`;
+  return `## ${title}\n\n${proseBody(c)}`;
 }
 
 function flattenKeyPoint(c: Record<string, unknown>): string {
   const title = str(c.title);
-  const body = stripKeywordMarkers(str(c.body));
   const importance = str(c.importance);
-  return `CONCEPTO CLAVE (${importance}): ${title}\n\n${body}`;
+  return `CONCEPTO CLAVE (${importance}): ${title}\n\n${proseBody(c)}`;
 }
 
 function flattenStages(c: Record<string, unknown>): string {
   const title = str(c.title);
-  const items = (c.items as Array<Record<string, unknown>>) || [];
+  // `items` is canonical; some blocks use `stages` alias.
+  const rawItems = c.items ?? c.stages;
+  const items = Array.isArray(rawItems)
+    ? (rawItems as Array<Record<string, unknown>>)
+    : [];
   const lines = items
     .filter((item) => item != null)
     .map((item) => {
-      const label = str(item.label);
-      const desc = stripKeywordMarkers(str(item.description));
+      // Canonical: item.title + item.content. Legacy: item.label + item.description.
+      const label = str(item.title ?? item.label);
+      const desc = stripKeywordMarkers(str(item.content ?? item.description));
       return `- ${label}: ${desc}`;
     });
   return `## ${title}\n\n${lines.join("\n")}`;
@@ -102,14 +114,22 @@ function flattenComparison(c: Record<string, unknown>): string {
 }
 
 function flattenListDetail(c: Record<string, unknown>): string {
+  // Canonical schema also has `title`. Keep it in flatten output so RAG can
+  // retrieve by section header, not just intro prose.
+  const title = str(c.title);
   const intro = str(c.intro);
   const items = (c.items as Array<Record<string, unknown>>) || [];
   const lines = items.map((item) => {
-    const term = str(item.term);
-    const detail = str(item.detail);
+    // Canonical schema uses {label, detail}. Legacy variant used {term, detail}.
+    const term = str(item.label ?? item.term);
+    const detail = stripKeywordMarkers(str(item.detail));
     return `- **${term}**: ${detail}`;
   });
-  return `${intro}\n\n${lines.join("\n")}`;
+  const headerParts: string[] = [];
+  if (title) headerParts.push(`## ${title}`);
+  if (intro) headerParts.push(intro);
+  const header = headerParts.join("\n\n");
+  return header ? `${header}\n\n${lines.join("\n")}` : lines.join("\n");
 }
 
 function flattenGrid(c: Record<string, unknown>): string {
@@ -124,21 +144,58 @@ function flattenGrid(c: Record<string, unknown>): string {
 }
 
 function flattenTwoColumn(c: Record<string, unknown>): string {
-  const left = (c.left as Record<string, unknown>) || {};
-  const right = (c.right as Record<string, unknown>) || {};
+  const title = str(c.title);
 
-  const leftTitle = str(left.title);
-  const leftBody = str(left.body);
-  const rightTitle = str(right.title);
-  const rightBody = str(right.body);
+  // Canonical: c.columns is an array. Each column has {title, content_type,
+  // items[] OR content}. Fall back to legacy {left, right} objects.
+  const columns = Array.isArray(c.columns)
+    ? (c.columns as Array<Record<string, unknown>>)
+    : null;
 
-  return `### ${leftTitle}\n\n${leftBody}\n\n### ${rightTitle}\n\n${rightBody}`;
+  const parts: string[] = [];
+  if (title) parts.push(`## ${title}`);
+
+  if (columns) {
+    for (const col of columns) {
+      if (!col) continue;
+      const colTitle = str(col.title);
+      const colHeader = colTitle ? `### ${colTitle}` : "";
+
+      if (Array.isArray(col.items)) {
+        // content_type = "list_detail" style: iterate items
+        const lines = (col.items as Array<Record<string, unknown>>)
+          .filter((item) => item != null)
+          .map((item) => {
+            const label = str(item.label ?? item.term);
+            const detail = stripKeywordMarkers(str(item.detail));
+            return `- **${label}**: ${detail}`;
+          });
+        parts.push(colHeader ? `${colHeader}\n\n${lines.join("\n")}` : lines.join("\n"));
+      } else {
+        // content_type = "prose" style: body in col.content (canonical) or col.body (legacy)
+        const colBody = stripKeywordMarkers(str(col.content ?? col.body));
+        parts.push(colHeader ? `${colHeader}\n\n${colBody}` : colBody);
+      }
+    }
+  } else {
+    // Legacy shape: c.left + c.right objects with {title, body/content}
+    const left = (c.left as Record<string, unknown>) || {};
+    const right = (c.right as Record<string, unknown>) || {};
+    const leftTitle = str(left.title);
+    const leftBody = stripKeywordMarkers(str(left.content ?? left.body));
+    const rightTitle = str(right.title);
+    const rightBody = stripKeywordMarkers(str(right.content ?? right.body));
+    parts.push(`### ${leftTitle}\n\n${leftBody}`);
+    parts.push(`### ${rightTitle}\n\n${rightBody}`);
+  }
+
+  return parts.join("\n\n");
 }
 
 function flattenCallout(c: Record<string, unknown>): string {
   const variant = str(c.variant).toUpperCase();
   const title = str(c.title);
-  const body = str(c.body);
+  const body = proseBody(c);
 
   if (title) {
     return `[${variant}] ${title}: ${body}`;

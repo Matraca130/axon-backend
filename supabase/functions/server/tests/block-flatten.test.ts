@@ -309,3 +309,95 @@ Deno.test("T22 · realistic full summary (9 blocks, >200 chars, no {{ }})", () =
   assertStringIncludes(result, "Neurona Motora");
   assertStringIncludes(result, "esclerosis múltiple");
 });
+
+// ═══════════════════════════════════════════════════════════════
+// Canonical schema — guards against block-flatten.ts drifting
+// from the shape defined in
+// skills/crearresumen/references/block-content-schema.md
+//
+// Before these tests landed, flattenProse/KeyPoint/Callout all read
+// `c.body` but the real prod schema (255/258 prose blocks) uses
+// `c.content`. The body text silently disappeared from every chunk
+// that powers RAG retrieval.
+// ═══════════════════════════════════════════════════════════════
+
+Deno.test("C01 · prose canonical: body text appears in output", () => {
+  const result = flattenBlocksToMarkdown(makeBlockList("prose_canonical"));
+  assertStringIncludes(result, "## Anatomía del SNC");
+  assertStringIncludes(result, "médula espinal");
+  assertStringIncludes(result, "señales eléctricas");
+  assert(!result.includes("{{"), "keyword markers should be stripped");
+});
+
+Deno.test("C02 · key_point canonical: body text appears in output", () => {
+  const result = flattenBlocksToMarkdown(makeBlockList("key_point_canonical"));
+  assertStringIncludes(result, "CONCEPTO CLAVE (critical)");
+  assertStringIncludes(result, "Sinapsis Neuronal");
+  assertStringIncludes(result, "punto de comunicación entre dos neuronas");
+});
+
+Deno.test("C03 · callout canonical: body text appears in output", () => {
+  const result = flattenBlocksToMarkdown(makeBlockList("callout_canonical"));
+  assertStringIncludes(result, "[CLINICAL]");
+  assertStringIncludes(result, "Dato Clínico");
+  assertStringIncludes(result, "desmielinización del SNC");
+  assert(!result.includes("{{"), "keyword markers should be stripped from callout");
+});
+
+Deno.test("C04 · stages canonical: item titles + content appear", () => {
+  const result = flattenBlocksToMarkdown(makeBlockList("stages_canonical"));
+  assertStringIncludes(result, "## Proceso de Mielinización");
+  // item.title + item.content (canonical), not item.label + item.description (legacy)
+  assertStringIncludes(result, "Proliferación");
+  assertStringIncludes(result, "oligodendrocitos");
+  assertStringIncludes(result, "Envolvimiento");
+  assertStringIncludes(result, "vaina de mielina");
+  assertStringIncludes(result, "Compactación");
+  assert(!result.includes("{{"), "keyword markers should be stripped from stages");
+});
+
+Deno.test("C05 · two_column canonical (prose): iterates c.columns[]", () => {
+  const result = flattenBlocksToMarkdown(makeBlockList("two_column_canonical_prose"));
+  assertStringIncludes(result, "Vías de conducción");
+  assertStringIncludes(result, "### Neurona Motora");
+  assertStringIncludes(result, "músculos y glándulas");
+  assertStringIncludes(result, "### Neurona Sensorial");
+  assertStringIncludes(result, "receptores sensoriales");
+});
+
+Deno.test("C06 · two_column canonical (list_detail): iterates column.items[]", () => {
+  const result = flattenBlocksToMarkdown(makeBlockList("two_column_canonical_list"));
+  assertStringIncludes(result, "## Sistema Autónomo");
+  assertStringIncludes(result, "### Sistema Simpático");
+  assertStringIncludes(result, "Midriasis");
+  assertStringIncludes(result, "### Sistema Parasimpático");
+  assertStringIncludes(result, "Miosis");
+});
+
+Deno.test("C07 · list_detail canonical: title + intro + items with keyword stripping", () => {
+  const result = flattenBlocksToMarkdown(makeBlockList("list_detail_canonical"));
+  assertStringIncludes(result, "## Neurotransmisores");
+  assertStringIncludes(result, "principales neurotransmisores incluyen");
+  assertStringIncludes(result, "**Dopamina**");
+  assertStringIncludes(result, "placer");
+  assert(!result.includes("{{"), "keyword markers should be stripped from list_detail");
+});
+
+Deno.test("C08 · canonical mixed bag: full summary content survives flattening", () => {
+  const result = flattenBlocksToMarkdown(
+    makeBlockList(
+      "prose_canonical",
+      "key_point_canonical",
+      "stages_canonical",
+      "two_column_canonical_prose",
+      "callout_canonical",
+    ),
+  );
+  assert(result.length > 500, `Expected >500 chars for 5 canonical blocks, got ${result.length}`);
+  // Body text from every block must be reachable by RAG
+  assertStringIncludes(result, "señales eléctricas");
+  assertStringIncludes(result, "punto de comunicación");
+  assertStringIncludes(result, "vaina de mielina");
+  assertStringIncludes(result, "músculos y glándulas");
+  assertStringIncludes(result, "desmielinización del SNC");
+});
