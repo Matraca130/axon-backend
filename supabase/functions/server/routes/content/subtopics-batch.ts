@@ -96,6 +96,20 @@ subtopicsBatchRoutes.get(
     );
     if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
+    // Cross-institution leak fix (#281): every keyword_id must resolve to
+    // the same institution as ids[0]. Otherwise a member of institution A
+    // could slip in IDs from institution B and receive their subtopics.
+    if (ids.length > 1) {
+      const otherInsts = await Promise.all(
+        ids.slice(1).map((id) => resolveInstitutionViaRpc(db, "keywords", id)),
+      );
+      for (const inst of otherInsts) {
+        if (inst !== institutionId) {
+          return err(c, "All keyword_ids must belong to the same institution", 403);
+        }
+      }
+    }
+
     // ── Query subtopics for all keyword_ids at once ──
     // Uses .in() → single SQL WHERE keyword_id IN (...) clause.
     // PostgreSQL optimizes this into an index scan on keyword_id.
