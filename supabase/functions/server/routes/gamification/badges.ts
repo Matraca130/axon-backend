@@ -73,6 +73,10 @@ badgeRoutes.get(`${PREFIX}/gamification/badges`, async (c: Context) => {
     return safeErr(c, "Badges fetch", defsResult.error);
   }
 
+  if (earnedResult.error) {
+    return safeErr(c, "Earned badges fetch", earnedResult.error);
+  }
+
   const earnedMap = new Map<string, string>();
   if (earnedResult.data) {
     for (const badge of earnedResult.data) {
