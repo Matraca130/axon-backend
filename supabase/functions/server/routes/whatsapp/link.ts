@@ -136,7 +136,7 @@ export async function verifyLinkCode(
     return { success: false };
   }
 
-  await db
+  const { error: upsertErr } = await db
     .from("whatsapp_sessions")
     .upsert(
       {
@@ -150,10 +150,21 @@ export async function verifyLinkCode(
       { onConflict: "phone_hash" },
     );
 
-  await db
+  if (upsertErr) {
+    console.error(`[WA-Link] Session upsert failed: ${upsertErr.message}`);
+    return { success: false };
+  }
+
+  const { error: deleteErr } = await db
     .from("whatsapp_sessions")
     .delete()
     .eq("phone_hash", matchingSession.phone_hash);
+
+  if (deleteErr) {
+    // Linking IS complete; the temporary linking session leak is cleanup
+    // debt, not a user-facing failure.
+    console.error(`[WA-Link] Temp linking session cleanup failed: ${deleteErr.message}`);
+  }
 
   attempts.reset(attemptKey);
   console.warn(`[WA-Link] Phone linked for user ${userId}. Hash: ${phoneHash.slice(0, 8)}...`);
