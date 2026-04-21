@@ -260,6 +260,121 @@ export const BLOCKS: Record<string, TestBlock> = {
     },
     order_index: 24,
   },
+
+  // ── Canonical schema fixtures ─────────────────────────────────
+  // Match the shape documented in
+  // ~/.claude/skills/crearresumen/references/block-content-schema.md
+  // — what every block created by the /crearresumen skill and the
+  // generate pipeline actually looks like in Supabase (255/258 prose
+  // blocks, 163/177 callouts, 82/89 key_points use this shape).
+  //
+  // The legacy fixtures above use {body, label, description, left/right}
+  // which predate the current spec. These new fixtures guard against a
+  // regression where flattener drift drops real prod content from the
+  // RAG index.
+
+  prose_canonical: {
+    type: "prose",
+    content: {
+      title: "Anatomía del SNC",
+      content:
+        "El {{sistema nervioso central}} está compuesto por el {{encéfalo}} y la médula espinal. Las neuronas transmiten señales eléctricas.",
+    },
+    order_index: 25,
+  },
+
+  key_point_canonical: {
+    type: "key_point",
+    content: {
+      title: "Sinapsis Neuronal",
+      content:
+        "La sinapsis es el punto de comunicación entre dos neuronas. La transmisión puede ser eléctrica o química.",
+      importance: "critical",
+    },
+    order_index: 26,
+  },
+
+  stages_canonical: {
+    type: "stages",
+    content: {
+      title: "Proceso de Mielinización",
+      items: [
+        { stage: 1, title: "Proliferación", content: "Proliferación de {{oligodendrocitos}}", severity: "critical" },
+        { stage: 2, title: "Envolvimiento", content: "Envolvimiento del axón por la vaina de mielina", severity: "moderate" },
+        { stage: 3, title: "Compactación", content: "Compactación y maduración de la vaina", severity: "mild" },
+      ],
+    },
+    order_index: 27,
+  },
+
+  two_column_canonical_prose: {
+    type: "two_column",
+    content: {
+      title: "Vías de conducción",
+      columns: [
+        {
+          title: "Neurona Motora",
+          content_type: "prose",
+          content: "Transmite impulsos desde el SNC hacia los músculos y glándulas.",
+        },
+        {
+          title: "Neurona Sensorial",
+          content_type: "prose",
+          content: "Transmite impulsos desde los receptores sensoriales hacia el SNC.",
+        },
+      ],
+    },
+    order_index: 28,
+  },
+
+  two_column_canonical_list: {
+    type: "two_column",
+    content: {
+      title: "Sistema Autónomo",
+      columns: [
+        {
+          title: "Sistema Simpático",
+          content_type: "list_detail",
+          items: [
+            { label: "Corazón", detail: "Aumenta frecuencia", icon: "heart" },
+            { label: "Pupilas", detail: "Midriasis", icon: "eye" },
+          ],
+        },
+        {
+          title: "Sistema Parasimpático",
+          content_type: "list_detail",
+          items: [
+            { label: "Corazón", detail: "Disminuye frecuencia", icon: "heart" },
+            { label: "Pupilas", detail: "Miosis", icon: "eye" },
+          ],
+        },
+      ],
+    },
+    order_index: 29,
+  },
+
+  callout_canonical: {
+    type: "callout",
+    content: {
+      variant: "clinical",
+      title: "Dato Clínico",
+      content: "La {{esclerosis múltiple}} es causada por la desmielinización del SNC.",
+    },
+    order_index: 30,
+  },
+
+  list_detail_canonical: {
+    type: "list_detail",
+    content: {
+      title: "Neurotransmisores",
+      intro: "Los principales neurotransmisores incluyen:",
+      items: [
+        { label: "Dopamina", detail: "Regula el {{placer}} y la motivación", icon: "smile", severity: "high" },
+        { label: "Serotonina", detail: "Modula el estado de ánimo y el sueño", icon: "moon", severity: "medium" },
+      ],
+    },
+    order_index: 31,
+  },
 };
 
 // ─── Helper ─────────────────────────────────────────────────────
