@@ -46,23 +46,63 @@ async function setup() {
   userToken = auth.access_token;
   userId = auth.user.id;
 
-  // Resolve two summary IDs the student can read. We try /topics-overview
-  // for any topic the student has, then pick the first two summaries.
-  // If we can't find two, the cross-summary tests will be skipped gracefully.
+  // Resolve two summary IDs the student can read.
+  //
+  // The previous setup tried `GET /topics-overview` without `topic_ids`,
+  // but that route requires the `topic_ids` query param (#246) and returns
+  // 400 — leaving summaryIdA/B as "" and silently skipping 6/14 tests.
+  //
+  // New path: institutions → content-tree → topic_ids → topics-overview.
   try {
+    const instResp = await api.get<Array<{ id: string }>>("/institutions", userToken);
+    if (!instResp.ok) return;
+    const institutions = assertOk<Array<{ id: string }>>(instResp);
+    if (!institutions?.length) return;
+
+    // Walk the tree of the first institution to collect topic IDs.
+    const instId = institutions[0].id;
+    const treeResp = await api.get<
+      Array<{
+        semesters?: Array<{
+          sections?: Array<{
+            topics?: Array<{ id: string }>;
+          }>;
+        }>;
+      }>
+    >(`/content-tree?institution_id=${encodeURIComponent(instId)}`, userToken);
+    if (!treeResp.ok) return;
+    const tree = assertOk<Array<Record<string, unknown>>>(treeResp);
+
+    const topicIds: string[] = [];
+    for (const course of tree ?? []) {
+      for (const sem of (course.semesters as Array<Record<string, unknown>>) ?? []) {
+        for (const sec of (sem.sections as Array<Record<string, unknown>>) ?? []) {
+          for (const topic of (sec.topics as Array<{ id: string }>) ?? []) {
+            if (topic?.id) topicIds.push(topic.id);
+            if (topicIds.length >= 10) break;
+          }
+          if (topicIds.length >= 10) break;
+        }
+        if (topicIds.length >= 10) break;
+      }
+      if (topicIds.length >= 10) break;
+    }
+    if (topicIds.length === 0) return;
+
     const topicsResp = await api.get<{
       summaries_by_topic?: Record<string, Array<{ id: string }>>;
-      summaries?: Array<{ id: string }>;
-    }>("/topics-overview", userToken);
-    if (topicsResp.ok) {
-      const data = assertOk(topicsResp) as any;
-      const buckets = data.summaries_by_topic
-        ? Object.values(data.summaries_by_topic)
-        : [];
-      const flat: Array<{ id: string }> = (buckets as Array<Array<{ id: string }>>).flat();
-      if (flat.length > 0) summaryIdA = flat[0].id;
-      if (flat.length > 1) summaryIdB = flat[1].id;
-    }
+    }>(
+      `/topics-overview?topic_ids=${topicIds.slice(0, 10).join(",")}`,
+      userToken,
+    );
+    if (!topicsResp.ok) return;
+    const data = assertOk(topicsResp) as Record<string, unknown>;
+    const buckets = data.summaries_by_topic
+      ? (Object.values(data.summaries_by_topic as Record<string, Array<{ id: string }>>))
+      : [];
+    const flat: Array<{ id: string }> = buckets.flat();
+    if (flat.length > 0) summaryIdA = flat[0].id;
+    if (flat.length > 1) summaryIdB = flat[1].id;
   } catch {
     /* ignore — tests that need a real summary will be skipped */
   }
@@ -265,6 +305,74 @@ Deno.test("DELETE /sticky-notes is idempotent (no-op when no row)", async () => 
   const body = assertOk<{ deleted: boolean }>(r);
   assertEquals(body.deleted, true);
 });
+
+// ═══ RLS — cross-student isolation (#247) ════════════════════════
+
+Deno.test(
+  "sticky_notes RLS: student B cannot read or delete student A's note",
+  async () => {
+    await setup();
+    if (!summaryIdA) {
+      console.warn("[SKIP] no resolvable summaryIdA");
+      return;
+    }
+
+    // Clean slate.
+    await cleanupNote(summaryIdA, userToken);
+
+    // 1. Student A (userToken) posts a note.
+    const testContent = "RLS isolation probe — should only be visible to A";
+    const postResp = await api.post(
+      "/sticky-notes",
+      { summary_id: summaryIdA, content: testContent },
+      userToken,
+    );
+    assertStatus(postResp, 200);
+
+    // 2. Login as Student B (admin account from helpers — a DIFFERENT user).
+    const adminAuth = await login(ENV.ADMIN_EMAIL, ENV.ADMIN_PASSWORD);
+    const bToken = adminAuth.access_token;
+    const bUserId = adminAuth.user.id;
+    assert(
+      bUserId !== userId,
+      "RLS test precondition: admin user must be different from student user",
+    );
+
+    // 3. Student B queries A's summary → must NOT see A's content.
+    const bGet = await api.get(
+      `/sticky-notes?summary_id=${summaryIdA}`,
+      bToken,
+    );
+    assertStatus(bGet, 200);
+    const bRow = assertOk<unknown>(bGet);
+    if (bRow && typeof bRow === "object" && "content" in (bRow as Record<string, unknown>)) {
+      const content = (bRow as Record<string, unknown>).content;
+      assert(
+        content !== testContent,
+        `RLS LEAK: student B read student A's note content: ${JSON.stringify(bRow)}`,
+      );
+    }
+
+    // 4. Student B attempts to delete A's note. Endpoint is idempotent and
+    //    scoped to the caller's rows, so DELETE as B must not remove A's row.
+    await api.delete(`/sticky-notes?summary_id=${summaryIdA}`, bToken);
+
+    // 5. Re-check as A: the original note is still present with original content.
+    const aGet = await api.get(
+      `/sticky-notes?summary_id=${summaryIdA}`,
+      userToken,
+    );
+    assertStatus(aGet, 200);
+    const aRow = assertOk<Record<string, unknown> | null>(aGet);
+    assert(
+      aRow !== null && typeof aRow === "object" && aRow.content === testContent,
+      `RLS BREAK: student A's note was modified or deleted after student B DELETE: ${JSON.stringify(aRow)}`,
+    );
+
+    // Cleanup.
+    await cleanupNote(summaryIdA, userToken);
+  },
+);
 
 // ═══ AUTH — anon must be rejected ══════════════════════════════
 
