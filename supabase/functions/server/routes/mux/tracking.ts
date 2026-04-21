@@ -85,28 +85,13 @@ muxTrackingRoutes.post(`${PREFIX}/mux/track-view`, async (c: Context) => {
     return ok(c, { ...view, first_completion: isFirstCompletion });
   }
 
-  // ── Fallback: old read+write pattern ──
-  console.warn(`[mux/track-view] upsert_video_view RPC failed, using fallback: ${rpcError?.message}`);
-
-  const { data: existing } = await db
-    .from("video_views").select("id, completed, view_count")
-    .eq("video_id", video_id).eq("user_id", user.id).single();
-
-  const isFirstCompletion = completed && !existing?.completed;
-  const newViewCount = (existing?.view_count ?? 0) + 1;
-
-  const { data: view, error: upsertErr } = await db.from("video_views").upsert({
-    video_id, user_id: user.id, institution_id,
-    watch_time_seconds, total_watch_time_seconds, completion_percentage,
-    completed, last_position_seconds, view_count: newViewCount,
-    updated_at: new Date().toISOString(),
-  }, { onConflict: "video_id,user_id" }).select().single();
-
-  if (upsertErr) return safeErr(c, "Track view", upsertErr);
-  if (isFirstCompletion) {
-    await fireFirstCompletionSignal(db, user.id, video_id);
-    // PR #99: Award video completion XP (20 XP, fire-and-forget)
-    xpHookForVideoComplete(user.id, video_id, institution_id);
-  }
-  return ok(c, { ...view, first_completion: isFirstCompletion });
+  // RPC failed — do NOT fall back to the read-modify-write pattern. The
+  // previous fallback race-lost concurrent view increments (autosave can
+  // fire 2+ times per second per video), silently undercounting views.
+  // Returning 500 lets the client retry against the atomic RPC instead
+  // of producing inconsistent counters. (#258)
+  console.error(
+    `[mux/track-view] upsert_video_view RPC failed: ${rpcError?.message}`,
+  );
+  return safeErr(c, "Track view", rpcError ?? null);
 });

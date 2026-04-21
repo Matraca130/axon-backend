@@ -29,12 +29,15 @@ export async function tryAwardBadge(
   institutionId: string,
   badge: Record<string, unknown>,
 ): Promise<boolean> {
-  // Fresh check: re-query to prevent stale-read double-awards
+  // Fresh check: re-query to prevent stale-read double-awards.
+  // Scope to institution_id so the same badge can be earned once per
+  // institution the student belongs to (#289).
   const { count: alreadyEarned } = await db
     .from("student_badges")
     .select("badge_id", { count: "exact", head: true })
     .eq("student_id", studentId)
-    .eq("badge_id", badge.id as string);
+    .eq("badge_id", badge.id as string)
+    .eq("institution_id", institutionId);
 
   if ((alreadyEarned ?? 0) > 0) return false;
 
