@@ -130,11 +130,7 @@ flashcardMappingRoutes.get(
       });
     } catch (e) {
       console.error("[flashcard-mappings] Unexpected error:", e);
-      return err(
-        c,
-        `flashcard-mappings failed: ${(e as Error).message}`,
-        500,
-      );
+      return err(c, "Internal error fetching flashcard mappings", 500);
     }
   },
 );

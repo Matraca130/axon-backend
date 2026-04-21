@@ -150,11 +150,7 @@ flashcardsByTopicRoutes.get(
       });
     } catch (e) {
       console.error("[flashcards-by-topic] Unexpected error:", e);
-      return err(
-        c,
-        `flashcards-by-topic failed: ${(e as Error).message}`,
-        500,
-      );
+      return err(c, "Internal error fetching flashcards", 500);
     }
   },
 );

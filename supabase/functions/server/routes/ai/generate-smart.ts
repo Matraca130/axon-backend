@@ -546,7 +546,7 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
       bulkErrors.push({
         keyword_id: target.keyword_id,
         keyword_name: target.keyword_name,
-        error: (e as Error).message,
+        error: "generation failed",
       });
     }
   }

@@ -201,7 +201,8 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
 
       if (updateErr) {
         failed++;
-        errors.push(`${chunk.id}: ${updateErr.message}`);
+        console.error(`[Ingest] Update failed for chunk ${chunk.id}: ${updateErr.message}`);
+        errors.push(`${chunk.id}: update failed`);
       } else {
         processed++;
       }
@@ -233,7 +234,8 @@ aiIngestRoutes.post(`${PREFIX}/ai/ingest-embeddings`, async (c: Context) => {
         }
       } catch (e) {
         failed++;
-        errors.push(`${chunk.id}: ${(e as Error).message}`);
+        console.error(`[Ingest] Sequential embedding failed for chunk ${chunk.id}:`, e);
+        errors.push(`${chunk.id}: embedding failed`);
       }
     }
   }
