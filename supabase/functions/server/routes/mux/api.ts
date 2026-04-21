@@ -57,10 +57,22 @@ muxApiRoutes.post(`${PREFIX}/mux/create-upload`, async (c: Context) => {
   );
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
 
+  // FRONTEND_ORIGIN is required — the previous fallback of "*" told
+  // Mux to accept uploads from any web origin, which (if a valid
+  // upload URL leaked) allowed any third-party site to complete the
+  // upload. Fail explicitly rather than degrade to wildcard. (#270)
+  const frontendOrigin = Deno.env.get("FRONTEND_ORIGIN");
+  if (!frontendOrigin) {
+    console.error(
+      "[mux/create-upload] FRONTEND_ORIGIN env var not configured — refusing to fall back to cors_origin=*",
+    );
+    return err(c, "Upload origin misconfigured — contact operations", 500);
+  }
+
   const muxRes = await muxFetch("/video/v1/uploads", {
     method: "POST",
     body: JSON.stringify({
-      cors_origin: Deno.env.get("FRONTEND_ORIGIN") ?? "*",
+      cors_origin: frontendOrigin,
       new_asset_settings: { playback_policy: ["signed"], mp4_support: 'capped-1080p' },
     }),
   });

@@ -94,25 +94,22 @@ export async function verifyLinkCode(
 
   const db = getAdminClient();
 
-  const { data: sessions, error: searchError } = await db
+  // DB-side JSONB filter instead of loading 200 rows and scanning in JS.
+  // The old path silently dropped valid codes when more than 200 sessions
+  // were in `linking` mode concurrently. (#283, mirror of #264)
+  const nowIso = new Date().toISOString();
+  const { data: matchingSession, error: searchError } = await db
     .from("whatsapp_sessions")
     .select("phone_hash, current_context, expires_at")
     .eq("mode", "linking")
-    .limit(200);
+    .eq("current_context->>linking_code", code)
+    .gt("current_context->>linking_expires_at", nowIso)
+    .maybeSingle();
 
-  if (searchError || !sessions) {
-    console.error(`[WA-Link] Code search failed: ${searchError?.message}`);
+  if (searchError) {
+    console.error(`[WA-Link] Code search failed: ${searchError.message}`);
     return { success: false };
   }
-
-  const now = new Date();
-  const matchingSession = sessions.find((s) => {
-    const ctx = s.current_context as Record<string, unknown>;
-    return (
-      ctx.linking_code === code &&
-      new Date(ctx.linking_expires_at as string) > now
-    );
-  });
 
   if (!matchingSession) {
     attempts.recordFailure(attemptKey);
