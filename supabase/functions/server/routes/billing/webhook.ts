@@ -70,23 +70,32 @@ webhookRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
   }
   const admin = getAdminClient();
 
-  // O-7 FIX: Idempotency check
+  // Idempotency via INSERT-first to avoid TOCTOU race (#267). Two
+  // concurrent Stripe delivery attempts could both pass a SELECT-then-
+  // INSERT existence check and double-process the event. The unique
+  // index idx_pwe_event_id_source on (event_id, source) serialises us.
+  // If the insert hits 23505 unique_violation, it's a duplicate delivery;
+  // short-circuit before any business logic.
   const eventId: string | undefined = event.id;
   if (eventId) {
-    try {
-      const { data: existing } = await admin
-        .from("processed_webhook_events")
-        .select("id")
-        .eq("event_id", eventId)
-        .eq("source", "stripe")
-        .maybeSingle();
+    const { error: dedupeErr } = await admin
+      .from("processed_webhook_events")
+      .insert({
+        event_id: eventId,
+        event_type: event.type,
+        source: "stripe",
+      });
 
-      if (existing) {
+    if (dedupeErr) {
+      if ((dedupeErr as { code?: string }).code === "23505") {
         console.warn(`[Stripe Webhook] Duplicate event ${eventId}, skipping`);
         return ok(c, { received: true, deduplicated: true });
       }
-    } catch {
-      console.warn("[Stripe Webhook] processed_webhook_events table not found, skipping idempotency");
+      // Table missing or other error: log and proceed (best-effort).
+      // Strict atomicity relies on the DB-level unique constraint.
+      console.warn(
+        `[Stripe Webhook] processed_webhook_events insert failed (non-fatal): ${dedupeErr.message}`,
+      );
     }
   }
 
@@ -195,18 +204,8 @@ webhookRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
         console.warn(`[Stripe Webhook] Unhandled event type: ${event.type}`);
     }
 
-    // O-7: Mark event as processed (best-effort)
-    if (eventId) {
-      try {
-        await admin.from("processed_webhook_events").insert({
-          event_id: eventId,
-          event_type: event.type,
-          source: "stripe",
-        });
-      } catch {
-        // Table might not exist yet
-      }
-    }
+    // Event is already marked as processed by the INSERT-first idempotency
+    // check above — no trailing INSERT needed.
 
     return ok(c, { received: true });
   } catch (e: unknown) {

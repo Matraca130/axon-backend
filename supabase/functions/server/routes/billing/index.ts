@@ -19,6 +19,11 @@ import type { Context } from "npm:hono";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid, isNonEmpty } from "../../validate.ts";
+import {
+  requireInstitutionRole,
+  isDenied,
+  MANAGEMENT_ROLES,
+} from "../../auth-helpers.ts";
 import { getStripe } from "./stripe-client.ts";
 import { webhookRoutes } from "./webhook.ts";
 
@@ -68,8 +73,27 @@ billingRoutes.post(`${PREFIX}/billing/checkout-session`, async (c: Context) => {
   if (!isAllowedRedirect(success_url)) return err(c, "success_url domain not allowed", 400);
   if (!isAllowedRedirect(cancel_url)) return err(c, "cancel_url domain not allowed", 400);
 
+  // RBAC (#304): the caller must be a management-role member of the
+  // target institution. Without this, any authenticated user could
+  // initiate a Stripe checkout for an institution they don't belong to,
+  // and the webhook would then `upsert` a subscription row on their
+  // behalf.
+  const roleCheck = await requireInstitutionRole(
+    db,
+    user.id,
+    institution_id,
+    MANAGEMENT_ROLES,
+  );
+  if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status);
+
+  // Scope the plan lookup to the institution so a plan from institution A
+  // cannot be purchased against institution B's checkout session.
   const { data: plan, error: planErr } = await db
-    .from("institution_plans").select("*").eq("id", plan_id).single();
+    .from("institution_plans")
+    .select("*")
+    .eq("id", plan_id)
+    .eq("institution_id", institution_id)
+    .single();
 
   if (planErr || !plan) return safeErr(c, "Plan lookup", planErr, 404);
   if (!plan.stripe_price_id) return err(c, "Plan does not have a Stripe price configured", 400);

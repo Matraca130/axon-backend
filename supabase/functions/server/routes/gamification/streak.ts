@@ -291,23 +291,11 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
 
   const adminDb = getAdminClient();
 
-  const status = await computeStreakStatus(adminDb, user.id, institutionId);
-
-  if (!status.repair_eligible) {
-    return err(
-      c,
-      "Tu racha no es elegible para reparacion. Solo puedes reparar dentro de 48 horas de la ruptura.",
-      400,
-    );
-  }
-
-  const streakToRestore = status.longest_streak;
-  const repairCost = REPAIR_BASE_COST_XP + Math.floor(streakToRestore * 10);
-
-  // CONCURRENCY FIX (C-002): Advisory lock prevents concurrent streak-repair
-  // double-spend. The lock key is derived from the student UUID hash so each
-  // student gets their own lock, but concurrent repairs by the SAME student
-  // are serialized.
+  // CONCURRENCY FIX (C-002 / #284): Acquire the advisory lock BEFORE the
+  // eligibility check, then re-check inside the lock using fresh DB state.
+  // Two concurrent requests used to both pass the check before either
+  // could acquire the lock, then the second request proceeded with a
+  // stale `status` / `streakToRestore` and double-spent XP.
   const lockKey = advisoryLockKey(`${user.id}:streak_repair`);
   let lockAcquired: boolean;
   try {
@@ -321,6 +309,21 @@ streakRoutes.post(`${PREFIX}/gamification/streak-repair`, async (c: Context) => 
   }
 
   try {
+    // Re-fetch eligibility *inside* the lock so a concurrent request that
+    // already repaired this break sees repair_eligible = false.
+    const status = await computeStreakStatus(adminDb, user.id, institutionId);
+
+    if (!status.repair_eligible) {
+      return err(
+        c,
+        "Tu racha no es elegible para reparacion. Solo puedes reparar dentro de 48 horas de la ruptura.",
+        400,
+      );
+    }
+
+    const streakToRestore = status.longest_streak;
+    const repairCost = REPAIR_BASE_COST_XP + Math.floor(streakToRestore * 10);
+
     const { data: xpData, error: xpErr } = await adminDb
       .from("student_xp")
       .select("total_xp")
