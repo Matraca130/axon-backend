@@ -1,0 +1,94 @@
+name: Claude Fix (issue → PR)
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  fix:
+    if: >-
+      github.event.label.name == 'claude-fix' &&
+      github.event.sender.login == 'Matraca130'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "claude-fix[bot]"
+          git config user.email "ariverol@teiainstitute.org"
+
+      - name: Run Claude Fix
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You have been assigned issue #${{ github.event.issue.number }}: "${{ github.event.issue.title }}".
+
+            Full issue body is available in the env var `$ISSUE_BODY`. Read it first with `echo "$ISSUE_BODY"` in a Bash step.
+
+            ## Goal
+            Either open a small PR that fixes the issue, or post a plan comment if it's not trivial. Never force a fix when the issue is ambiguous.
+
+            ## Workflow
+
+            1. **Understand the issue.** Print `$ISSUE_TITLE` and `$ISSUE_BODY`. Extract:
+               - What is the actual bug or request?
+               - Which file(s) or area does it touch?
+               - Is there enough info to produce a correct fix?
+
+            2. **Explore the codebase.** Use Grep/Glob/Read to locate the relevant code and confirm the issue reproduces in the current tree.
+
+            3. **Classify scope:**
+               - **TRIVIAL** — bug or change touches ≤3 files, ≤100 line delta, no architectural decisions → proceed to **fix path**.
+               - **COMPLEX** — more files, requires design choices, or ambiguous → **plan path**.
+               - **INSUFFICIENT INFO** — cannot reproduce, missing repro steps → **info path**.
+
+            4. **Fix path (TRIVIAL):**
+               - Create branch: `git checkout -b fix/issue-$ISSUE_NUMBER`
+               - Edit files to implement the fix.
+               - Run quick sanity (read back the edited file).
+               - Commit: `git add -A && git commit -m "fix: <short desc> (#$ISSUE_NUMBER)"`
+               - Push: `git push origin fix/issue-$ISSUE_NUMBER`
+               - Open PR:
+                 `gh pr create --base <default-branch> --head fix/issue-$ISSUE_NUMBER --title "fix: <short desc> (#$ISSUE_NUMBER)" --body "Closes #$ISSUE_NUMBER\n\n<what changed and why>\n\nAutomated fix from claude-fix workflow."`
+               - Comment on issue linking the PR: `gh issue comment $ISSUE_NUMBER --body "Opened PR: <url>"`
+               - Swap labels: `gh issue edit $ISSUE_NUMBER --remove-label claude-fix --add-label claude-done`
+
+            5. **Plan path (COMPLEX):**
+               - Post comment on issue with:
+                 - Short diagnosis of the root cause
+                 - Proposed approach (files to change, key decisions, trade-offs)
+                 - Why auto-fixing is not appropriate (ambiguity, architectural impact, risk)
+               - Swap labels: `gh issue edit $ISSUE_NUMBER --remove-label claude-fix --add-label claude-needs-review`
+
+            6. **Info path (INSUFFICIENT INFO):**
+               - Post comment on issue with specific, numbered questions that, if answered, would unblock you.
+               - Swap labels: `gh issue edit $ISSUE_NUMBER --remove-label claude-fix --add-label claude-needs-info`
+
+            ## Guardrails
+
+            - Do NOT modify files under `.github/workflows/` or any file containing a secret.
+            - Do NOT run tests that could cost money (deploy/publish/release commands).
+            - If the fix would break backwards compatibility → fall back to plan path.
+            - Always swap the `claude-fix` label at the end so this workflow does not re-trigger.
+            - If anything fails (push rejected, conflict, permission denied), fall back to plan path and explain in the comment.
+
+          claude_args: "--model claude-opus-4-7 --allowedTools Bash(git:*),Bash(gh:*),Bash(echo:*),Bash(cat:*),Bash(wc:*),Bash(pwd:*),Bash(ls:*),Read,Edit,Write,Grep,Glob"
