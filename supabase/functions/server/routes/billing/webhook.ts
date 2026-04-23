@@ -20,12 +20,13 @@ import { getAdminClient, ok, err, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import { timingSafeEqual } from "../../timing-safe.ts";
+import { decideIdempotencyResult } from "./webhook-idempotency.ts";
 
 // Minimal shape we rely on; downstream handlers still validate metadata fields.
 // deno-lint-ignore no-explicit-any
-type StripeEventPayload = { id?: string; type: string; data: { object: any } };
+export type StripeEventPayload = { id?: string; type: string; data: { object: any } };
 
-function isStripeEventPayload(x: unknown): x is StripeEventPayload {
+export function isStripeEventPayload(x: unknown): x is StripeEventPayload {
   if (!x || typeof x !== "object") return false;
   const o = x as Record<string, unknown>;
   if (typeof o.type !== "string") return false;
@@ -70,25 +71,52 @@ webhookRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
   }
   const admin = getAdminClient();
 
-  // O-7 FIX: Idempotency check
+  // Idempotency via INSERT-first to avoid TOCTOU race (#267). Two
+  // concurrent Stripe delivery attempts could both pass a SELECT-then-
+  // INSERT existence check and double-process the event. The unique
+  // index idx_pwe_event_id_source on (event_id, source) serialises us.
+  // If the insert hits 23505 unique_violation, it's a duplicate delivery;
+  // short-circuit before any business logic.
+  //
+  // Failure semantics:
+  //   - 23505 (duplicate)     → 200 deduplicated, safe to skip.
+  //   - any other DB error    → 500 so Stripe retries; we won't run business
+  //                             logic without an idempotency guarantee.
+  //   - business-logic throws → compensate by DELETE'ing the dedup row so the
+  //                             next Stripe retry gets a fresh attempt rather
+  //                             than being silently acked as already-processed
+  //                             (which would drop a paid checkout on the floor).
   const eventId: string | undefined = event.id;
-  if (eventId) {
-    try {
-      const { data: existing } = await admin
-        .from("processed_webhook_events")
-        .select("id")
-        .eq("event_id", eventId)
-        .eq("source", "stripe")
-        .maybeSingle();
-
-      if (existing) {
-        console.warn(`[Stripe Webhook] Duplicate event ${eventId}, skipping`);
-        return ok(c, { received: true, deduplicated: true });
-      }
-    } catch {
-      console.warn("[Stripe Webhook] processed_webhook_events table not found, skipping idempotency");
-    }
+  if (!eventId) {
+    // Stripe always populates event.id on a valid signed delivery; a missing
+    // id on an already-verified signature indicates a malformed payload. Refuse
+    // to proceed without idempotency rather than silently bypassing it.
+    console.error(
+      `[Stripe Webhook] Missing event.id on verified-signature payload (type=${event.type}) — rejecting`,
+    );
+    return err(c, "Missing event.id on verified payload", 400);
   }
+
+  const { error: dedupeErr } = await admin
+    .from("processed_webhook_events")
+    .insert({
+      event_id: eventId,
+      event_type: event.type,
+      source: "stripe",
+    });
+
+  const decision = decideIdempotencyResult(dedupeErr);
+  if (decision.action === "dedup") {
+    console.warn(`[Stripe Webhook] Duplicate event ${eventId}, skipping`);
+    return ok(c, { received: true, deduplicated: true });
+  }
+  if (decision.action === "retry") {
+    console.error(
+      `[Stripe Webhook] processed_webhook_events insert failed (code=${(dedupeErr as { code?: string }).code ?? "unknown"}): ${decision.message} — returning ${decision.status} for Stripe retry`,
+    );
+    return err(c, "Idempotency check unavailable", decision.status);
+  }
+  // decision.action === "proceed" — INSERT succeeded, run business logic.
 
   try {
     switch (event.type) {
@@ -195,23 +223,31 @@ webhookRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
         console.warn(`[Stripe Webhook] Unhandled event type: ${event.type}`);
     }
 
-    // O-7: Mark event as processed (best-effort)
-    if (eventId) {
-      try {
-        await admin.from("processed_webhook_events").insert({
-          event_id: eventId,
-          event_type: event.type,
-          source: "stripe",
-        });
-      } catch {
-        // Table might not exist yet
-      }
-    }
+    // Event is already marked as processed by the INSERT-first idempotency
+    // check above — no trailing INSERT needed.
 
     return ok(c, { received: true });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";
     console.error(`[Stripe Webhook] Error processing ${event.type}: ${msg}`);
+
+    // Compensate the dedup row so Stripe's retry gets a fresh attempt.
+    // Without this, the row from the INSERT-first guard above would make the
+    // next delivery hit 23505 → 200 deduplicated, and the event would be
+    // silently lost (subscription never created, past_due never flagged).
+    // If this compensating delete itself fails, flag loudly — the retry will
+    // be dedup-acked and the event will need manual operator recovery.
+    const { error: compensateErr } = await admin
+      .from("processed_webhook_events")
+      .delete()
+      .eq("event_id", eventId)
+      .eq("source", "stripe");
+    if (compensateErr) {
+      console.error(
+        `[Stripe Webhook] CRITICAL: compensating delete failed for event ${eventId} (type=${event.type}): ${compensateErr.message} — Stripe retry will be deduplicated and the event will be lost until manually cleared`,
+      );
+    }
+
     return safeErr(c, "Webhook processing", e instanceof Error ? e : null);
   }
 });
