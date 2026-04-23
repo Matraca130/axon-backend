@@ -16,9 +16,9 @@
 import { Hono } from "npm:hono";
 import { cors } from "npm:hono/cors";
 import { compress } from "npm:hono/compress";
-import { logger } from "npm:hono/logger";
 import { PREFIX } from "./db.ts";
 import { rateLimitMiddleware } from "./rate-limit.ts";
+import type { Context, Next } from "npm:hono";
 
 import { authRoutes } from "./routes-auth.ts";
 import { memberRoutes } from "./routes/members/index.ts";
@@ -82,7 +82,28 @@ app.options("*", (c) => {
   return new Response(null, { status: 204, headers });
 });
 
-app.use("*", logger(console.warn));
+// FINDING-27 FIX: Custom access logger. The built-in Hono `logger()` does
+// not serialize request headers, but as defense-in-depth we implement our
+// own formatter that explicitly records only method/path/status/duration
+// and never touches Authorization or X-Access-Token headers.
+const SENSITIVE_HEADERS = new Set(["authorization", "x-access-token", "cookie"]);
+
+app.use("*", async (c: Context, next: Next) => {
+  const start = Date.now();
+  const method = c.req.method;
+  const path = c.req.path;
+  console.warn(`<-- ${method} ${path}`);
+  try {
+    await next();
+  } finally {
+    const duration = Date.now() - start;
+    const status = c.res?.status ?? 0;
+    console.warn(`--> ${method} ${path} ${status} ${duration}ms`);
+  }
+});
+
+// Export for potential reuse / tests — also keeps the set referenced.
+export { SENSITIVE_HEADERS };
 
 // BUG-004 FIX: CORS restricted to allowed origins + Vercel previews.
 app.use(

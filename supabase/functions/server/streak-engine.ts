@@ -17,6 +17,10 @@ import { getAdminClient } from "./db.ts";
 const REPAIR_WINDOW_HOURS = 48;
 
 // ─── Types ─────────────────────────────────────────────
+//
+// MIRROR of frontend src/app/types/gamification.ts StreakStatus — keep in sync.
+// FE↔BE don't share imports; field names and types MUST match byte-for-byte.
+// Phase 2 will extract a shared package and remove the duplication.
 
 export interface StreakStatus {
   current_streak: number;

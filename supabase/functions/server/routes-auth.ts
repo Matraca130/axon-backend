@@ -35,18 +35,72 @@ import type { Context } from "npm:hono";
 
 const authRoutes = new Hono();
 
+// ─── Log Redaction Helpers ──────────────────────────────────────
+// FINDING-27 FIX: Avoid leaking raw user.id / email into logs.
+
+function truncId(id: string | undefined | null): string {
+  if (!id || typeof id !== "string") return "unknown";
+  return id.slice(0, 8);
+}
+
+function redactEmail(email: string | undefined | null): string {
+  if (!email || typeof email !== "string") return "unknown";
+  const at = email.indexOf("@");
+  if (at <= 0 || at === email.length - 1) return "***";
+  const local = email.slice(0, at);
+  const domain = email.slice(at + 1);
+  const dot = domain.lastIndexOf(".");
+  const domainHead = dot > 0 ? domain.slice(0, dot) : domain;
+  const tld = dot > 0 ? domain.slice(dot) : "";
+  const mask = (s: string): string =>
+    s.length <= 2 ? `${s.slice(0, 1)}***` : `${s.slice(0, 2)}***`;
+  return `${mask(local)}@${mask(domainHead)}${tld}`;
+}
+
 // ─── Signup Rate Limiter ────────────────────────────────────────
 // ROUTE-005 FIX: Strict rate limit for signups (5 per IP per hour).
 // Separate from the global rate limiter — signup is expensive (creates
 // auth.users + profiles rows) and must be protected against abuse.
+//
+// FINDING-9 FIX: x-forwarded-for is attacker-controlled when the Edge
+// Function is called directly. Prefer x-real-ip (set by the Supabase
+// proxy). For x-forwarded-for fallback, use the RIGHTMOST value — the
+// nearest proxy appends its observed client IP at the tail. The leftmost
+// value is client-claimed and spoofable.
+// Composite key (ip + hashed email) defends against IP rotation attacks
+// by also binding the bucket to the normalized email.
 
 const signupAttempts = new Map<string, { count: number; resetAt: number }>();
 
-function checkSignupLimit(ip: string): boolean {
+function getClientIp(c: Context): string {
+  const realIp = c.req.header("x-real-ip")?.trim();
+  if (realIp) return realIp;
+  const xff = c.req.header("x-forwarded-for");
+  if (xff) {
+    const rightmost = xff.split(",").pop()?.trim();
+    if (rightmost) return rightmost;
+  }
+  return "unknown";
+}
+
+async function hashEmailKey(email: string): Promise<string> {
+  const normalized = email.trim().toLowerCase();
+  const salt = Deno.env.get("AXON_RATE_LIMIT_SALT") ?? "axon-default-salt";
+  const data = new TextEncoder().encode(`${salt}:${normalized}`);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  const bytes = new Uint8Array(digest);
+  let hex = "";
+  for (let i = 0; i < 8; i++) {
+    hex += bytes[i].toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
+function checkSignupLimit(key: string): boolean {
   const now = Date.now();
-  const entry = signupAttempts.get(ip);
+  const entry = signupAttempts.get(key);
   if (!entry || now > entry.resetAt) {
-    signupAttempts.set(ip, { count: 1, resetAt: now + 3_600_000 }); // 1 hour
+    signupAttempts.set(key, { count: 1, resetAt: now + 3_600_000 }); // 1 hour
     return true; // allowed
   }
   if (entry.count >= 5) return false; // blocked
@@ -57,14 +111,6 @@ function checkSignupLimit(ip: string): boolean {
 // ─── POST /signup ───────────────────────────────────────────────
 
 authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
-  // ROUTE-005 FIX: Strict rate limit for signups (5 per IP per hour)
-  const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim()
-    || c.req.header("x-real-ip")
-    || "unknown";
-  if (!checkSignupLimit(ip)) {
-    return c.json({ error: "Too many signup attempts. Try again later." }, 429);
-  }
-
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
 
@@ -74,6 +120,16 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
 
   if (!isEmail(email)) {
     return err(c, "email must be a valid email address", 400);
+  }
+
+  // ROUTE-005 / FINDING-9 FIX: Strict rate limit (5 signups per hour)
+  // keyed on (trusted-ip, hashed-email). Binding the email defeats IP
+  // rotation attacks against a single target address.
+  const ip = getClientIp(c);
+  const emailKey = await hashEmailKey(email);
+  const rateKey = `${ip}:${emailKey}`;
+  if (!checkSignupLimit(rateKey)) {
+    return c.json({ error: "Too many signup attempts. Try again later." }, 429);
   }
   if (typeof password !== "string" || password.length < 8) {
     return err(c, "Password must be at least 8 characters", 400);
@@ -120,8 +176,9 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
 
   if (profileError) {
     // Rollback: delete auth user to avoid orphan
+    // FINDING-27 FIX: truncate user id in logs.
     console.error(
-      `[Axon] Profile creation failed for ${userId}, rolling back auth user: ${profileError.message}`,
+      `[Axon] Profile creation failed for ${truncId(userId)}, rolling back auth user: ${profileError.message}`,
     );
     await admin.auth.admin.deleteUser(userId);
     return safeErr(c, "Profile creation (auth rolled back)", profileError);
@@ -156,11 +213,12 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
           is_active: true,
         });
         if (memberError) {
+          // FINDING-27 FIX: truncate user id in logs.
           console.warn(
-            `[Axon] Default-institution join failed for ${userId} → ${inst.id}: ${memberError.message}`,
+            `[Axon] Default-institution join failed for ${truncId(userId)} → ${inst.id}: ${memberError.message}`,
           );
         } else {
-          console.log(`[Axon] Joined ${userId} → default institution ${inst.id} as student`);
+          console.log(`[Axon] Joined ${truncId(userId)} → default institution ${inst.id} as student`);
         }
       } else {
         console.warn(
@@ -191,7 +249,8 @@ authRoutes.get(`${PREFIX}/me`, async (c: Context) => {
   if (error) {
     // Profile row missing — auto-create from auth user metadata
     if (error.code === "PGRST116") {
-      console.warn(`[Axon] Auto-creating missing profile for user ${user.id}`);
+      // FINDING-27 FIX: truncate user id in logs.
+      console.warn(`[Axon] Auto-creating missing profile for user ${truncId(user.id)}`);
       const admin = getAdminClient();
 
       // N-6 FIX: Fetch full user record from Supabase Auth
