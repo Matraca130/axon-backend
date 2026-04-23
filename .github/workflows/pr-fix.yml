@@ -64,7 +64,9 @@ jobs:
         with:
           ref: ${{ steps.pr.outputs.head_ref }}
           fetch-depth: 0
-          token: ${{ github.token }}
+          # PAT instead of GITHUB_TOKEN so bot commits trigger downstream workflows
+          # (GITHUB_TOKEN pushes don't trigger workflow runs by design).
+          token: ${{ secrets.GH_PAT || github.token }}
 
       - name: Configure git identity
         run: |
@@ -255,18 +257,39 @@ jobs:
             REASONS+=("bot LOC ${LOC} > 100")
           fi
 
+          # Gate 4+5: wait for required workflows to COMPLETE on bot's commit.
+          # BE workflows on pull_request: Test Gate, Code Quality Audit.
           HEAD_SHA=$(git rev-parse HEAD)
-          TEST_CONC=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$HEAD_SHA&per_page=10" \
-            --jq '.workflow_runs[] | select(.name == "Test Gate") | .conclusion' | head -1)
-          if [ "$TEST_CONC" != "success" ]; then
-            REASONS+=("test-gate != success ($TEST_CONC)")
-          fi
+          REQUIRED_WORKFLOWS=("Test Gate" "Code Quality Audit")
+          MAX_WAIT=900
+          ELAPSED=0
+          POLL=30
+          while [ "$ELAPSED" -lt "$MAX_WAIT" ]; do
+            ALL_DONE=1
+            gh api "/repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$HEAD_SHA&per_page=30" > /tmp/runs.json
+            for WF in "${REQUIRED_WORKFLOWS[@]}"; do
+              STATUS=$(jq -r --arg wf "$WF" '.workflow_runs[] | select(.name == $wf) | .status' /tmp/runs.json | head -1)
+              STATUS="${STATUS:-missing}"
+              if [ "$STATUS" != "completed" ]; then
+                ALL_DONE=0
+                echo "  waiting: $WF = $STATUS (elapsed ${ELAPSED}s)"
+              fi
+            done
+            if [ "$ALL_DONE" -eq 1 ]; then
+              echo "All required workflows completed after ${ELAPSED}s"
+              break
+            fi
+            sleep "$POLL"
+            ELAPSED=$((ELAPSED + POLL))
+          done
 
-          AUDIT_CONC=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$HEAD_SHA&per_page=10" \
-            --jq '.workflow_runs[] | select(.name == "Code Quality Audit") | .conclusion' | head -1)
-          if [ "$AUDIT_CONC" != "success" ]; then
-            REASONS+=("code-quality-audit != success ($AUDIT_CONC)")
-          fi
+          gh api "/repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$HEAD_SHA&per_page=30" > /tmp/runs.json
+          for WF in "${REQUIRED_WORKFLOWS[@]}"; do
+            CONC=$(jq -r --arg wf "$WF" '.workflow_runs[] | select(.name == $wf) | .conclusion' /tmp/runs.json | head -1)
+            if [ "$CONC" != "success" ]; then
+              REASONS+=("$WF != success (${CONC:-missing-or-timeout})")
+            fi
+          done
 
           MERGEABLE=$(gh pr view "$PR_NUMBER" --json mergeable --jq '.mergeable')
           if [ "$MERGEABLE" != "MERGEABLE" ]; then
