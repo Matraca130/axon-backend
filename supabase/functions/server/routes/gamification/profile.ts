@@ -52,6 +52,12 @@ profileRoutes.get(`${PREFIX}/gamification/profile`, async (c: Context) => {
   if (xpResult.error) {
     return safeErr(c, "XP profile fetch", xpResult.error);
   }
+  if (statsResult.error) {
+    return safeErr(c, "Student stats fetch", statsResult.error);
+  }
+  if (badgeCountResult.error) {
+    return safeErr(c, "Badge count fetch", badgeCountResult.error);
+  }
 
   const xp = xpResult.data;
   const stats = statsResult.data;

@@ -166,12 +166,16 @@ goalRoutes.post(`${PREFIX}/gamification/onboarding`, async (c: Context) => {
 
   const adminDb = getAdminClient();
 
-  const { data: existing } = await adminDb
+  const { data: existing, error: existingErr } = await adminDb
     .from("student_xp")
     .select("student_id")
     .eq("student_id", user.id)
     .eq("institution_id", institutionId)
     .maybeSingle();
+
+  if (existingErr) {
+    return safeErr(c, "Onboarding existence check", existingErr);
+  }
 
   if (existing) {
     return ok(c, { message: "Already onboarded", already_exists: true });
