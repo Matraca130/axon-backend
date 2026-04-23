@@ -41,6 +41,7 @@
 
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import {
   requireInstitutionRole,
@@ -102,8 +103,6 @@ kwConnectionsBatchRoutes.get(
     }
 
     // ── Verify institution membership via first keyword ───────
-    // All keywords in a summary belong to the same institution.
-    // Checking the first one is sufficient for authorization.
     const institutionId = await resolveInstitutionViaRpc(db, "keywords", ids[0]);
     if (!institutionId) {
       return err(c, "Keyword not found or not accessible", 404);
@@ -116,6 +115,20 @@ kwConnectionsBatchRoutes.get(
     );
     if (isDenied(roleCheck)) {
       return err(c, roleCheck.message, roleCheck.status);
+    }
+
+    // Cross-institution leak fix (#282): every keyword_id must resolve to
+    // the same institution as ids[0]. Otherwise a member of institution A
+    // could append IDs from institution B and receive their connections.
+    if (ids.length > 1) {
+      const otherInsts = await Promise.all(
+        ids.slice(1).map((id) => resolveInstitutionViaRpc(db, "keywords", id)),
+      );
+      for (const inst of otherInsts) {
+        if (inst !== institutionId) {
+          return err(c, "All keyword_ids must belong to the same institution", 403);
+        }
+      }
     }
 
     // ── Query connections for all keyword_ids at once ─────────
@@ -132,11 +145,7 @@ kwConnectionsBatchRoutes.get(
       .limit(500);
 
     if (error) {
-      return err(
-        c,
-        `Batch keyword-connections failed: ${error.message}`,
-        500,
-      );
+      return safeErr(c, "Batch keyword-connections", error);
     }
 
     // ── F3: Student filter — only published summaries on both sides
