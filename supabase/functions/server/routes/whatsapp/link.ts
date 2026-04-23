@@ -94,30 +94,28 @@ export async function verifyLinkCode(
 
   const db = getAdminClient();
 
-  // DB-side JSONB filter instead of loading 200 rows and scanning in JS.
-  // The old path silently dropped valid codes when more than 200 sessions
-  // were in `linking` mode concurrently. (#283, mirror of #264)
-  const nowIso = new Date().toISOString();
-  const { data: matchingSession, error: searchError } = await db
-    .from("whatsapp_sessions")
-    .select("phone_hash, current_context, expires_at")
-    .eq("mode", "linking")
-    .eq("current_context->>linking_code", code)
-    .gt("current_context->>linking_expires_at", nowIso)
-    .maybeSingle();
+  // Verify via the SECURITY DEFINER RPC (migration 20260423000001). The
+  // RPC does the JSONB filter + expiry comparison with a proper
+  // `::timestamptz` cast, which closes the lexical-ISO-8601 assumption of
+  // the old supabase-js `.gt(...linking_expires_at, nowIso)` path.
+  // Still fully DB-side — no 200-row scan. (#283, mirror of #264)
+  const { data: rows, error: searchError } = await db.rpc(
+    "verify_whatsapp_linking_session",
+    { p_code: code },
+  );
 
   if (searchError) {
     console.error(`[WA-Link] Code search failed: ${searchError.message}`);
     return { success: false };
   }
 
+  const matchingSession = Array.isArray(rows) ? rows[0] : rows;
   if (!matchingSession) {
     attempts.recordFailure(attemptKey);
     return { success: false };
   }
 
-  const ctx = matchingSession.current_context as Record<string, unknown>;
-  const userId = ctx.linking_user_id as string;
+  const userId = matchingSession.linking_user_id as string;
 
   const salt = generateSalt();
   const phoneHash = await hashPhone(phoneNumber, salt);

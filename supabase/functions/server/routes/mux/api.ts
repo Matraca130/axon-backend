@@ -28,6 +28,7 @@ import {
   CONTENT_WRITE_ROLES,
 } from "../../auth-helpers.ts";
 import { muxFetch, buildPlaybackJwt } from "./helpers.ts";
+import { validateCorsOrigin } from "./cors-origin.ts";
 import { resolveInstitutionViaRpc } from "../../lib/institution-resolver.ts";
 
 export const muxApiRoutes = new Hono();
@@ -62,34 +63,14 @@ muxApiRoutes.post(`${PREFIX}/mux/create-upload`, async (c: Context) => {
   // upload URL leaked) allowed any third-party site to complete the
   // upload. Fail explicitly rather than degrade to wildcard. (#270)
   //
-  // Additionally validate that the configured value is a well-formed
-  // absolute origin (https?://host[:port]). A typo like "*" or a
-  // scheme-less host would otherwise reach Mux and silently re-introduce
-  // the wildcard-leak class of bug this fix is meant to close.
-  const frontendOrigin = Deno.env.get("FRONTEND_ORIGIN");
-  if (!frontendOrigin) {
+  // validateCorsOrigin() also rejects typos like "*", scheme-less
+  // hosts, trailing slashes, and paths — anything that would either
+  // re-introduce the wildcard-leak class of bug or make Mux reject
+  // the upload URL with an opaque error.
+  const originCheck = validateCorsOrigin(Deno.env.get("FRONTEND_ORIGIN"));
+  if (!originCheck.ok) {
     console.error(
-      "[mux/create-upload] FRONTEND_ORIGIN env var not configured — refusing to fall back to cors_origin=*",
-    );
-    return err(c, "Upload origin misconfigured — contact operations", 500);
-  }
-
-  let parsedOrigin: URL;
-  try {
-    parsedOrigin = new URL(frontendOrigin);
-  } catch {
-    console.error(
-      `[mux/create-upload] FRONTEND_ORIGIN is not a valid URL: "${frontendOrigin}"`,
-    );
-    return err(c, "Upload origin misconfigured — contact operations", 500);
-  }
-  if (
-    (parsedOrigin.protocol !== "https:" && parsedOrigin.protocol !== "http:") ||
-    parsedOrigin.origin !== frontendOrigin.replace(/\/$/, "") ||
-    frontendOrigin.includes("*")
-  ) {
-    console.error(
-      `[mux/create-upload] FRONTEND_ORIGIN rejected (must be a bare absolute origin like https://app.example.com, no trailing slash, no wildcards): "${frontendOrigin}"`,
+      `[mux/create-upload] FRONTEND_ORIGIN ${originCheck.reason} (value="${originCheck.value}") — refusing to fall back to cors_origin=*`,
     );
     return err(c, "Upload origin misconfigured — contact operations", 500);
   }
@@ -97,7 +78,7 @@ muxApiRoutes.post(`${PREFIX}/mux/create-upload`, async (c: Context) => {
   const muxRes = await muxFetch("/video/v1/uploads", {
     method: "POST",
     body: JSON.stringify({
-      cors_origin: frontendOrigin,
+      cors_origin: originCheck.origin,
       new_asset_settings: { playback_policy: ["signed"], mp4_support: 'capped-1080p' },
     }),
   });
