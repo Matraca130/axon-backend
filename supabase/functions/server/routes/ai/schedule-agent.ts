@@ -457,13 +457,20 @@ aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => 
     ? body.institutionId
     : (studentProfile.institutionId as string | undefined);
 
-  if (institutionId) {
-    const roleCheck = await requireInstitutionRole(
-      db, user.id, institutionId, ALL_ROLES,
-    );
-    if (isDenied(roleCheck)) {
-      return err(c, roleCheck.message, roleCheck.status);
-    }
+  // Require institution membership — do NOT let callers bypass the RBAC
+  // check by simply omitting institutionId from the request. Previously,
+  // `if (institutionId)` skipped the check entirely when absent,
+  // allowing any authenticated user (including those with no institution
+  // membership) to invoke Claude. (#266)
+  if (!institutionId) {
+    return err(c, "institution_id is required", 400);
+  }
+
+  const roleCheck = await requireInstitutionRole(
+    db, user.id, institutionId, ALL_ROLES,
+  );
+  if (isDenied(roleCheck)) {
+    return err(c, roleCheck.message, roleCheck.status);
   }
 
   // -- Resolve model: explicit body.model > institution setting > default 'sonnet'
