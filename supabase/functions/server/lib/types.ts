@@ -14,7 +14,19 @@
 
 export type FsrsCardState = "new" | "learning" | "review" | "relearning";
 
+/**
+ * @deprecated Legacy alias for FE parity. A numeric `FsrsState = 0|1|2|3`
+ * existed in the FE types/platform.ts and had no runtime consumers.
+ * Canonical FE type is now the same string union (FsrsState = FsrsCardState).
+ * Kept here for eventual shared-package export.
+ */
+export type FsrsState = FsrsCardState;
+
 // ─── FSRS Grade ──────────────────────────────────────────────
+//
+// MIRROR of frontend lib/grade-mapper.ts (FsrsGrade, FSRS_GRADE_TO_FLOAT)
+// — keep in sync. FE↔BE don't share imports; numeric values MUST match
+// byte-for-byte. Phase 2 will extract a shared package.
 // Grade discreto 1-4 (formato FSRS standard para transporte)
 // Mapping interno a continuo: 1->0.0(Again), 2->0.35(Hard), 3->0.65(Good), 4->1.0(Easy)
 

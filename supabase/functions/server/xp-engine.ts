@@ -39,6 +39,10 @@ export interface AwardResult {
 
 // --- XP Table ---
 // No XP for notes/annotations — overjustification effect (§7.14)
+//
+// MIRROR of frontend src/app/types/gamification.ts XP_TABLE — keep in sync.
+// Per-action XP values MUST match byte-for-byte with FE definition.
+// Phase 2 will extract a shared package.
 
 export const XP_TABLE: Record<string, number> = {
   review_flashcard: 5,
@@ -60,6 +64,10 @@ const DAILY_CAP = 500;
 const POST_CAP_RATE = 0.1;
 
 // --- Level Thresholds ---
+//
+// MIRROR of frontend src/app/types/gamification.ts LEVEL_THRESHOLDS — keep in sync.
+// Shape differs (BE: [xp, level] tuples in descending order; FE: objects with
+// `title` in ascending order). xp/level values MUST match byte-for-byte.
 export const LEVEL_THRESHOLDS: [number, number][] = [
   [10000, 12],
   [7500, 11],

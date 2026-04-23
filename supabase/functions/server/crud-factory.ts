@@ -109,6 +109,21 @@ export interface CrudConfig {
   slug: string;
   parentKey?: string;
   optionalFilters?: string[];
+  /**
+   * SEC-AUDIT FIX (31): Per-filter allow-list for non-UUID optionalFilters.
+   *
+   * Keys are filter names (must also appear in `optionalFilters`); values are
+   * the set of accepted literals for that filter. When a filter has an entry
+   * here, any incoming value NOT in the set is rejected with 400.
+   *
+   * UUID filters (name ends in `_id`) are still validated by `isUuid`; they
+   * don't need a whitelist. This is for bounded-domain string filters
+   * (e.g. `question_type`, `difficulty`), which would otherwise allow
+   * attacker-controlled .eq() values and enable fine-grained enumeration.
+   *
+   * Filters without a whitelist entry pass through unchanged (no regression).
+   */
+  filterValueWhitelist?: Record<string, Set<string>>;
   scopeToUser?: string;
   hasCreatedBy?: boolean;
   hasUpdatedAt?: boolean;
@@ -315,6 +330,15 @@ export function registerCrud(app: Hono, cfg: CrudConfig) {
         if (v) {
           if (f.endsWith("_id") && !isUuid(v)) {
             return err(c, `${f} must be a valid UUID`, 400);
+          }
+          // SEC-AUDIT FIX (31): when a whitelist is configured for this filter,
+          // reject any value outside the allowed domain. Prevents the factory
+          // from turning bounded enums (question_type, difficulty, ...) into
+          // attacker-controlled .eq() probes usable for fine-grained enumeration.
+          // Error message intentionally omits the allowed set to avoid reversal.
+          const allowed = cfg.filterValueWhitelist?.[f];
+          if (allowed && !allowed.has(v)) {
+            return err(c, `Invalid value for filter: ${f}`, 400);
           }
           query = query.eq(f, v);
         }
