@@ -79,3 +79,23 @@ bash scripts/check-migration-safety.sh supabase/migrations/20260407000001_sticky
 git diff --name-only --diff-filter=A main -- 'supabase/migrations/*.sql' \
   | xargs -r bash scripts/check-migration-safety.sh
 ```
+
+## `check-workflow-health.sh`
+
+Lightweight local sanity checker for GitHub Actions workflows.
+
+### What it checks
+
+1. Every file in `.github/workflows/*.yml` parses as valid YAML.
+2. Every `bash ... .sh` / `sh ... .sh` script path referenced in workflow `run:` blocks exists in the repo.
+
+### Usage
+
+```bash
+bash scripts/check-workflow-health.sh
+```
+
+### Notes
+
+- This script does **not** execute GitHub Actions jobs locally.
+- It catches common configuration breakages quickly before pushing.
