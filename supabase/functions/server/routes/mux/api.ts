@@ -196,6 +196,7 @@ muxApiRoutes.delete(`${PREFIX}/mux/asset/:video_id`, async (c: Context) => {
   const { user, db } = auth;
 
   const videoId = c.req.param("video_id");
+  if (!isUuid(videoId)) return err(c, "video_id must be a valid UUID", 400);
   const { data: video, error: fetchErr } = await db
     .from("videos").select("id, summary_id, mux_asset_id, is_mux, deleted_at")
     .eq("id", videoId).single();

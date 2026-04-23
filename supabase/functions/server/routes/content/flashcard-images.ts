@@ -12,6 +12,7 @@
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX, getAdminClient } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
+import { isUuid } from "../../validate.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -31,7 +32,7 @@ flashcardImageRoutes.post(
     const { user, db } = auth;
 
     const flashcardId = c.req.param("id");
-    if (!flashcardId) return err(c, "Missing flashcard ID", 400);
+    if (!isUuid(flashcardId)) return err(c, "flashcard id must be a valid UUID", 400);
 
     // ── 2. Parse body ───────────────────────────────────────
     let body: { imagePrompt?: string; stylePackId?: string };

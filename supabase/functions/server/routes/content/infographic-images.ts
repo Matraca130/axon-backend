@@ -16,6 +16,7 @@
 import { Hono } from "npm:hono";
 import { authenticate, ok, err, PREFIX, getAdminClient } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
+import { isUuid } from "../../validate.ts";
 import {
   requireInstitutionRole,
   isDenied,
@@ -102,7 +103,7 @@ infographicImageRoutes.post(
     const { user, db } = auth;
 
     const summaryId = c.req.param("id");
-    if (!summaryId) return err(c, "Missing summary ID", 400);
+    if (!isUuid(summaryId)) return err(c, "summary id must be a valid UUID", 400);
 
     // Parse optional body
     let body: { maxImages?: number };
@@ -195,7 +196,7 @@ infographicImageRoutes.post(
     const { user, db } = auth;
 
     const summaryId = c.req.param("id");
-    if (!summaryId) return err(c, "Missing summary ID", 400);
+    if (!isUuid(summaryId)) return err(c, "summary id must be a valid UUID", 400);
 
     let body: {
       conceptTitle?: string;
