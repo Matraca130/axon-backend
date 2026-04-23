@@ -107,7 +107,18 @@ accessRoutes.get(`${PREFIX}/content-access`, async (c: Context) => {
   if (!sub) return ok(c, { access: "none", rules: [], plan_name: null, features: null });
 
   if (sub.current_period_end && new Date(sub.current_period_end) < new Date()) {
-    await db.from("institution_subscriptions").update({ status: "expired" }).eq("id", sub.id);
+    const { error: expireErr } = await db
+      .from("institution_subscriptions")
+      .update({ status: "expired" })
+      .eq("id", sub.id);
+    if (expireErr) {
+      // Log but do not fail the request — the client still correctly sees
+      // access:none. A persistent retry loop will surface in logs.
+      console.error(
+        `[plans/access] Failed to mark subscription ${sub.id} expired:`,
+        expireErr,
+      );
+    }
     return ok(c, { access: "none", rules: [], plan_name: null, features: null });
   }
 
