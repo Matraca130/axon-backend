@@ -77,8 +77,17 @@ muxWebhookRoutes.post(`${PREFIX}/webhooks/mux`, async (c: Context) => {
     const resTier    = event.data.resolution_tier ?? null;
     const thumbnail  = playbackId ? `https://image.mux.com/${playbackId}/thumbnail.jpg` : null;
 
-    const { data: video } = await admin
+    const { data: video, error: videoErr } = await admin
       .from("videos").select("id").eq("mux_upload_id", uploadId ?? "").single();
+
+    // PGRST116 = row not found (expected when the upload row hasn't been
+    // created yet). Any other error is a real DB failure — surface it as
+    // non-2xx so Mux retries the webhook instead of marking the video stuck
+    // in "uploading" forever.
+    if (videoErr && videoErr.code !== "PGRST116") {
+      console.error(`[Mux Webhook] video.asset.ready lookup failed:`, videoErr);
+      return err(c, "DB lookup failed", 500);
+    }
 
     if (video) {
       await admin.from("videos").update({
