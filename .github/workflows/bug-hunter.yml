@@ -22,6 +22,6 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          claude -p "Scan this backend repo (Hono + Supabase Edge Functions, Deno, 176 routes, 39 tables) for bugs: missing auth checks on routes, RLS policy gaps, SQL injection risks, unhandled errors, race conditions, missing input validation, leaked secrets, wrong HTTP codes, N+1 queries. For each confirmed bug open a GitHub issue: title 'bug: <short desc>', label 'bug-hunter', body with file:line and fix suggestion. Check existing open issues with label bug-hunter first and skip duplicates. Max 5 new issues per run. Be strict - only real bugs." \
+          claude -p "Scan this backend repo (Hono + Supabase Edge Functions, Deno, 176 routes, 39 tables) for bugs: missing auth checks on routes, RLS policy gaps, SQL injection risks, unhandled errors, race conditions, missing input validation, leaked secrets, wrong HTTP codes, N+1 queries. For each confirmed bug open a GitHub issue: title 'bug: <short desc>', label 'bug-hunter', body with file:line and fix suggestion. IMMEDIATELY after creating the issue, run `gh issue edit <new-number> --add-label claude-fix` so the claude-fix workflow auto-picks it up. Check existing open issues with label bug-hunter first and skip duplicates. Max 5 new issues per run. Be strict - only real bugs." \
             --dangerously-skip-permissions \
-            --allowedTools "Read,Glob,Grep,Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue view:*)"
+            --allowedTools "Read,Glob,Grep,Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue view:*),Bash(gh issue edit:*)"
