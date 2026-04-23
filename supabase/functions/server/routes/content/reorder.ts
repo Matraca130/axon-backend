@@ -200,9 +200,13 @@ reorderRoutes.put(`${PREFIX}/reorder`, async (c: Context) => {
     .map((r: { error: { message: string } }) => r.error.message);
 
   if (errors.length > 0) {
+    console.error(
+      `[Reorder] Partial failure (${errors.length}/${typedItems.length}):`,
+      errors,
+    );
     return err(
       c,
-      `Reorder partial failure (${errors.length}/${typedItems.length}): ${errors.join("; ")}`,
+      `Reorder partial failure (${errors.length}/${typedItems.length})`,
       500,
     );
   }
