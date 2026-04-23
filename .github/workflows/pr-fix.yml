@@ -1,0 +1,288 @@
+name: PR Fix (review comments → auto-fix → optional auto-merge)
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  checks: read
+  id-token: write
+
+concurrency:
+  group: pr-fix-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    if: >-
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        contains(github.event.comment.body, '@claude-fix') &&
+        github.event.comment.user.login == 'Matraca130'
+      ) ||
+      (
+        github.event_name == 'pull_request_review' &&
+        github.event.review.state == 'changes_requested' &&
+        github.event.sender.login != 'claude-fix[bot]'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_NUM="${{ github.event.issue.number || github.event.pull_request.number }}"
+          echo "number=$PR_NUM" >> "$GITHUB_OUTPUT"
+          PR_JSON=$(gh pr view "$PR_NUM" --repo "$GITHUB_REPOSITORY" --json headRefName,headRefOid,labels,state,isDraft)
+          HEAD_REF=$(echo "$PR_JSON" | jq -r .headRefName)
+          HEAD_SHA=$(echo "$PR_JSON" | jq -r .headRefOid)
+          echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          LABELS=$(echo "$PR_JSON" | jq -r '.labels[].name' | tr '\n' ',' || echo "")
+          echo "labels=$LABELS" >> "$GITHUB_OUTPUT"
+
+      - name: Guard — PR not draft, not blocked
+        env:
+          LABELS: ${{ steps.pr.outputs.labels }}
+        run: |
+          if echo "$LABELS" | grep -qE "(^|,)(blocked|do-not-merge)($|,)"; then
+            echo "::error::PR has blocking label — aborting."
+            exit 1
+          fi
+
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.head_ref }}
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "claude-fix[bot]"
+          git config user.email "claude-fix[bot]@users.noreply.github.com"
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Cache Deno dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/deno
+            ~/.deno
+          key: deno-${{ runner.os }}-${{ hashFiles('**/deno.lock', '**/deno.json') }}
+          restore-keys: deno-${{ runner.os }}-
+
+      - name: Capture baseline metrics
+        id: baseline
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          git fetch origin main --depth=1
+          # Count deno check errors on PR head — we'll compare delta after fix
+          deno check supabase/functions/server/index.ts 2>&1 | grep -cE "error:" > /tmp/deno-check-before.txt || echo "0" > /tmp/deno-check-before.txt
+          echo "check_before=$(cat /tmp/deno-check-before.txt)" >> "$GITHUB_OUTPUT"
+          echo "sha_before=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Collect review comments
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          gh api "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments?per_page=100" \
+            --jq '.[] | {user: .user.login, path, line, body}' > /tmp/review-comments.jsonl || echo "" > /tmp/review-comments.jsonl
+          gh api "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100" \
+            --jq '.[] | {user: .user.login, body}' > /tmp/issue-comments.jsonl || echo "" > /tmp/issue-comments.jsonl
+          echo "Review comments: $(wc -l < /tmp/review-comments.jsonl)"
+          echo "Issue comments: $(wc -l < /tmp/issue-comments.jsonl)"
+
+      - name: Run Claude fix (guarded by code-reviewer agent)
+        id: fix
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          CHECK_BEFORE: ${{ steps.baseline.outputs.check_before }}
+          SHA_BEFORE: ${{ steps.baseline.outputs.sha_before }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: "claude"
+          prompt: |
+            You are fixing review comments on PR #${{ steps.pr.outputs.number }} in repo ${{ github.repository }} (Deno + Supabase Edge Functions).
+
+            ## Context files
+            - `/tmp/review-comments.jsonl` — inline review comments (one JSON per line: user, path, line, body)
+            - `/tmp/issue-comments.jsonl` — general PR comments (user, body)
+
+            ## Workflow — STRICT. Follow exactly.
+
+            ### Step 1: Read comments
+            `cat /tmp/review-comments.jsonl /tmp/issue-comments.jsonl`
+
+            ### Step 2: Classify each finding
+            For each reviewer comment (from `claude[bot]`, `gemini-code-assist[bot]`, or the repo owner), classify:
+            - **TRIVIAL**: ≤3 files, ≤100 LOC delta, no arch decisions, no API-breaking, no changes to types used across >5 files, no DB migrations, no RLS policy changes.
+            - **COMPLEX**: anything else. Skip entirely.
+
+            Build a plan listing TRIVIAL findings. Do NOT fix COMPLEX ones.
+
+            ### Step 3: Apply TRIVIAL fixes
+            For each TRIVIAL finding, edit the file with the precise fix. Keep the existing code style.
+
+            **Hard guardrails:**
+            - Do NOT run `git reset`, `git stash`, `git checkout <branch>`, `git restore`, `git clean`. ONLY `git add`, `git commit`, `git push`, `git status`, `git diff`, `git log`, `git checkout -- <file>` (revert single file only).
+            - Do NOT modify `.github/workflows/**`, `.env*`, `*secret*`, `*credential*`, `supabase/migrations/**` (migrations need review).
+            - Do NOT change public API signatures or route contracts. If a fix would, skip it.
+            - Do NOT run deploy / publish / release commands.
+
+            ### Step 4: Regression validation (MUST DO)
+            Before committing, run:
+            ```bash
+            # Type check — BE uses Deno
+            CHANGED=$(git diff --name-only | grep -E '\.ts$' | grep -v "\.test\.ts$" || true)
+            if [ -n "$CHANGED" ]; then
+              deno check supabase/functions/server/index.ts 2>&1 | tee /tmp/deno-check-after.txt
+              # If any CHANGED file appears in errors post-fix, fail
+              ERRORS_IN_CHANGED=0
+              for f in $CHANGED; do
+                if grep -q "$f" /tmp/deno-check-after.txt; then
+                  ERRORS_IN_CHANGED=$((ERRORS_IN_CHANGED+1))
+                fi
+              done
+              if [ "$ERRORS_IN_CHANGED" -gt 0 ]; then
+                echo "::error::deno check reports errors in touched files post-fix. Reverting."
+                for f in $CHANGED; do git checkout -- "$f"; done
+                exit 1
+              fi
+            fi
+
+            # Server tests (matches test-gate.yml JOB 2)
+            deno test supabase/functions/server/tests/ --no-check --allow-env --allow-net 2>&1 | tail -40 || {
+              echo "::error::Server tests failed post-fix. Reverting."
+              for f in $(git diff --name-only); do git checkout -- "$f"; done
+              exit 1
+            }
+
+            # Unit tests (matches JOB 1)
+            deno test tests/unit/ --no-check --allow-env 2>&1 | tail -40 || {
+              echo "::error::Unit tests failed post-fix. Reverting."
+              for f in $(git diff --name-only); do git checkout -- "$f"; done
+              exit 1
+            }
+            ```
+
+            ### Step 5: Validate with code-reviewer agent
+            Spawn the code-reviewer subagent if available:
+            ```
+            Task(subagent_type="code-reviewer", description="Validate fix", prompt="Review this diff for regressions, breaking changes, new CRITICAL/HIGH issues. Return PASS or FAIL.")
+            ```
+            If not available, manually verify the diff is minimal and addresses the cited comments.
+
+            If FAIL → `for f in $(git diff --name-only); do git checkout -- "$f"; done` and post a PR comment. DO NOT commit.
+
+            ### Step 6: LOC guardrail
+            ```bash
+            LOC_I=$(git diff --shortstat | grep -oE "[0-9]+ insertion" | head -1 | grep -oE "[0-9]+" || echo 0)
+            LOC_D=$(git diff --shortstat | grep -oE "[0-9]+ deletion" | head -1 | grep -oE "[0-9]+" || echo 0)
+            TOTAL=$((LOC_I + LOC_D))
+            if [ "$TOTAL" -gt 100 ]; then
+              echo "::error::Bot diff $TOTAL > 100 LOC. Reverting."
+              for f in $(git diff --name-only); do git checkout -- "$f"; done
+              exit 1
+            fi
+            ```
+
+            ### Step 7: Commit + push
+            ```bash
+            git add -A
+            git commit -m "fix(auto): apply review feedback from PR #${{ steps.pr.outputs.number }}
+
+            Applied TRIVIAL fixes from claude[bot] / gemini-code-assist[bot] review.
+            Tests and deno check passed post-fix. Bot-authored via pr-fix workflow.
+
+            Co-Authored-By: claude-fix[bot] <claude-fix[bot]@users.noreply.github.com>"
+            git push origin HEAD:$HEAD_REF
+            ```
+
+            ### Step 8: Summary comment
+            Post via `gh pr comment $PR_NUMBER`:
+            ```
+            ## 🤖 Auto-fix applied
+
+            **Fixed (TRIVIAL, ≤100 LOC):** <count>
+            **Skipped (COMPLEX):** <count>
+            **Gates:** deno check ✅ | server tests ✅ | unit tests ✅ | code-reviewer ✅ | LOC ≤100 ✅
+
+            Commit: <sha>
+            ```
+          claude_args: "--model claude-opus-4-7 --allowedTools Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git checkout -- *),Bash(git fetch:*),Bash(deno:*),Bash(cat:*),Bash(grep:*),Bash(wc:*),Bash(head:*),Bash(tail:*),Bash(gh:*),Bash(jq:*),Read,Edit,Write,Grep,Glob"
+
+      - name: Auto-merge gate (6 conditions)
+        id: automerge
+        if: steps.fix.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          LABELS: ${{ steps.pr.outputs.labels }}
+          SHA_BEFORE: ${{ steps.baseline.outputs.sha_before }}
+        run: |
+          REASONS=()
+
+          if ! echo "$LABELS" | grep -qE "(^|,)auto-merge-ok(,|$)"; then
+            REASONS+=("label 'auto-merge-ok' missing")
+          fi
+
+          if echo "$LABELS" | grep -qE "(^|,)(blocked|do-not-merge)(,|$)"; then
+            REASONS+=("blocking label present")
+          fi
+
+          LOC=$(git log "$SHA_BEFORE..HEAD" --author="claude-fix\[bot\]" --numstat \
+                --pretty=format:"" | awk '{a+=$1; d+=$2} END {print a+d+0}')
+          if [ "${LOC:-0}" -gt 100 ]; then
+            REASONS+=("bot LOC ${LOC} > 100")
+          fi
+
+          HEAD_SHA=$(git rev-parse HEAD)
+          TEST_CONC=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$HEAD_SHA&per_page=10" \
+            --jq '.workflow_runs[] | select(.name == "Test Gate") | .conclusion' | head -1)
+          if [ "$TEST_CONC" != "success" ]; then
+            REASONS+=("test-gate != success ($TEST_CONC)")
+          fi
+
+          AUDIT_CONC=$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$HEAD_SHA&per_page=10" \
+            --jq '.workflow_runs[] | select(.name == "Code Quality Audit") | .conclusion' | head -1)
+          if [ "$AUDIT_CONC" != "success" ]; then
+            REASONS+=("code-quality-audit != success ($AUDIT_CONC)")
+          fi
+
+          MERGEABLE=$(gh pr view "$PR_NUMBER" --json mergeable --jq '.mergeable')
+          if [ "$MERGEABLE" != "MERGEABLE" ]; then
+            REASONS+=("PR not mergeable ($MERGEABLE)")
+          fi
+
+          if [ ${#REASONS[@]} -eq 0 ]; then
+            echo "All gates passed — auto-merging."
+            gh pr merge "$PR_NUMBER" --squash --delete-branch
+            gh pr comment "$PR_NUMBER" --body "✅ Auto-merged after 6-gate validation. Commit by \`claude-fix[bot]\`."
+          else
+            REASONS_STR=$(printf '%s\n' "${REASONS[@]}" | sed 's/^/- /')
+            echo "Auto-merge skipped. Gates unmet:"
+            echo "$REASONS_STR"
+            gh pr comment "$PR_NUMBER" --body "🔸 Auto-merge skipped. Gates unmet:
+          $REASONS_STR
+
+          Fix was applied, merge when ready."
+          fi
