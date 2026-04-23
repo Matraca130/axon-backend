@@ -61,22 +61,29 @@ export async function resolveSummaryIdsForStudent(
     .eq("is_active", true);
   if (!memberships || memberships.length === 0) return null;
 
-  // Step 2: Try RPC per institution — single query replaces 6-query waterfall
+  // Step 2: Run the RPC for every institution in parallel. A student in
+  // N institutions used to wait for N sequential round-trips (~100-200ms
+  // each) before the queue responded; Promise.all collapses that to one
+  // RTT regardless of membership count. (#259)
   const allIds = new Set<string>();
   let rpcFailed = false;
+  let rpcFailureReason: string | undefined;
 
-  for (const m of memberships) {
-    const { data: rpcData, error: rpcError } = await db.rpc(
-      "resolve_student_summary_ids",
-      { p_student_id: userId, p_institution_id: m.institution_id },
-    );
+  const rpcResults = await Promise.all(
+    memberships.map((m: { institution_id: string }) =>
+      db.rpc("resolve_student_summary_ids", {
+        p_student_id: userId,
+        p_institution_id: m.institution_id,
+      }),
+    ),
+  );
 
+  for (const { data: rpcData, error: rpcError } of rpcResults) {
     if (rpcError) {
-      console.warn(`[study-queue] resolve_student_summary_ids RPC failed, using fallback: ${rpcError.message}`);
       rpcFailed = true;
+      rpcFailureReason = rpcError.message;
       break;
     }
-
     if (rpcData) {
       for (const r of rpcData as { summary_id: string }[]) {
         allIds.add(r.summary_id);
@@ -84,7 +91,11 @@ export async function resolveSummaryIdsForStudent(
     }
   }
 
-  if (!rpcFailed) {
+  if (rpcFailed) {
+    console.warn(
+      `[study-queue] resolve_student_summary_ids RPC failed, using fallback: ${rpcFailureReason}`,
+    );
+  } else {
     return allIds.size > 0 ? allIds : null;
   }
 
