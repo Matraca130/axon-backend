@@ -14,7 +14,13 @@ jobs:
   fix:
     if: >-
       github.event.label.name == 'claude-fix' &&
-      github.event.sender.login == 'Matraca130'
+      (
+        github.event.sender.login == 'Matraca130' ||
+        (
+          github.event.sender.login == 'github-actions[bot]' &&
+          contains(github.event.issue.labels.*.name, 'bug-hunter')
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
