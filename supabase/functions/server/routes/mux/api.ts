@@ -61,10 +61,35 @@ muxApiRoutes.post(`${PREFIX}/mux/create-upload`, async (c: Context) => {
   // Mux to accept uploads from any web origin, which (if a valid
   // upload URL leaked) allowed any third-party site to complete the
   // upload. Fail explicitly rather than degrade to wildcard. (#270)
+  //
+  // Additionally validate that the configured value is a well-formed
+  // absolute origin (https?://host[:port]). A typo like "*" or a
+  // scheme-less host would otherwise reach Mux and silently re-introduce
+  // the wildcard-leak class of bug this fix is meant to close.
   const frontendOrigin = Deno.env.get("FRONTEND_ORIGIN");
   if (!frontendOrigin) {
     console.error(
       "[mux/create-upload] FRONTEND_ORIGIN env var not configured — refusing to fall back to cors_origin=*",
+    );
+    return err(c, "Upload origin misconfigured — contact operations", 500);
+  }
+
+  let parsedOrigin: URL;
+  try {
+    parsedOrigin = new URL(frontendOrigin);
+  } catch {
+    console.error(
+      `[mux/create-upload] FRONTEND_ORIGIN is not a valid URL: "${frontendOrigin}"`,
+    );
+    return err(c, "Upload origin misconfigured — contact operations", 500);
+  }
+  if (
+    (parsedOrigin.protocol !== "https:" && parsedOrigin.protocol !== "http:") ||
+    parsedOrigin.origin !== frontendOrigin.replace(/\/$/, "") ||
+    frontendOrigin.includes("*")
+  ) {
+    console.error(
+      `[mux/create-upload] FRONTEND_ORIGIN rejected (must be a bare absolute origin like https://app.example.com, no trailing slash, no wildcards): "${frontendOrigin}"`,
     );
     return err(c, "Upload origin misconfigured — contact operations", 500);
   }
