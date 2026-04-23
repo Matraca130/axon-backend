@@ -67,12 +67,34 @@ examPrepRoutes.get(`${PREFIX}/schedule/exam-prep/:examId`, async (c: Context) =>
 
   const scheduledCards = schedules ?? [];
 
-  // 4. Fetch course topic mastery for this student
+  // 4. Fetch course topic mastery for this student.
+  //
+  // FSRS state lives in fsrs_states keyed on (flashcard_id, student_id).
+  // The old query selected stability/difficulty/state/topic_id/student_id/
+  // course_id from `flashcards` — none of those columns exist there, so
+  // PostgREST returned an error and `mastery` stayed null, making the
+  // topic-mastery section permanently empty (#305).
+  //
+  // Correct path: fsrs_states → flashcards → summaries → topics →
+  // sections → semesters.course_id. Filter-on-embedded-resource keeps
+  // this to a single query.
   const { data: mastery, error: masteryErr } = await db
-    .from("flashcards")
-    .select("topic_id, stability, difficulty, state")
+    .from("fsrs_states")
+    .select(`
+      stability, difficulty, state,
+      flashcards!inner(
+        summaries!inner(
+          topic_id,
+          topics!inner(
+            sections!inner(
+              semesters!inner(course_id)
+            )
+          )
+        )
+      )
+    `)
     .eq("student_id", user.id)
-    .eq("course_id", exam.course_id);
+    .eq("flashcards.summaries.topics.sections.semesters.course_id", exam.course_id);
 
   if (masteryErr) {
     console.error(`[exam-prep] mastery error: ${masteryErr.message}`);
@@ -81,17 +103,22 @@ examPrepRoutes.get(`${PREFIX}/schedule/exam-prep/:examId`, async (c: Context) =>
   // Aggregate mastery by topic
   const topicMap = new Map<string, { total: number; mastered: number; learning: number; new: number }>();
   if (mastery) {
-    for (const card of mastery) {
-      const tid = card.topic_id ?? "unknown";
+    for (const row of mastery as Array<{
+      stability: number | null;
+      difficulty: number | null;
+      state: number | null;
+      flashcards: { summaries: { topic_id: string } };
+    }>) {
+      const tid = row.flashcards?.summaries?.topic_id ?? "unknown";
       if (!topicMap.has(tid)) {
         topicMap.set(tid, { total: 0, mastered: 0, learning: 0, new: 0 });
       }
       const t = topicMap.get(tid)!;
       t.total++;
       // FSRS states: 0=New, 1=Learning, 2=Review, 3=Relearning
-      if (card.state === 2 && (card.stability ?? 0) > 10) {
+      if (row.state === 2 && (row.stability ?? 0) > 10) {
         t.mastered++;
-      } else if (card.state === 0) {
+      } else if (row.state === 0) {
         t.new++;
       } else {
         t.learning++;
