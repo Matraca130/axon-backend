@@ -54,9 +54,11 @@ const ALLOWED_ORIGINS = [
   "https://numero1-sseki-2325-55.vercel.app",
 ];
 
-// Vercel preview deploy patterns — only exact project prefixes allowed
-// Matches: https://<project>-<deployId>-<team>.vercel.app
-const VERCEL_PREVIEW_RE = /^https:\/\/(numero1-sseki-2325-55|axon-frontend)-[a-z0-9-]+\.vercel\.app$/;
+// Vercel preview deploy patterns — only the team-specific project prefix
+// is allowed. `axon-frontend` was removed (#256) because any Vercel user
+// can create a project with that name and obtain a URL that matches; the
+// team-slug prefix `numero1-sseki-2325-55` is unique to our team.
+const VERCEL_PREVIEW_RE = /^https:\/\/numero1-sseki-2325-55-[a-z0-9-]+\.vercel\.app$/;
 
 function getAllowedOrigin(origin: string): string {
   if (!origin) return "";

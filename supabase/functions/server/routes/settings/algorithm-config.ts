@@ -113,13 +113,20 @@ algorithmConfigRoutes.put(
     }
 
     // Verify admin/owner role
-    const { data: membership } = await db
+    const { data: membership, error: membershipErr } = await db
       .from("memberships")
       .select("role")
       .eq("user_id", user.id)
       .eq("institution_id", institutionId)
       .eq("is_active", true)
       .maybeSingle();
+
+    if (membershipErr) {
+      // A real DB failure must NOT be reported as 403 "forbidden" — that
+      // would lead callers to believe their permissions are wrong when in
+      // fact the auth check never ran.
+      return safeErr(c, "Algorithm config membership check", membershipErr);
+    }
 
     if (!membership || !['admin', 'owner'].includes(membership.role)) {
       return err(c, "Only admin or owner can update algorithm config", 403);

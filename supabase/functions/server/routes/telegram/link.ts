@@ -149,7 +149,7 @@ export async function verifyLinkCode(
   }
 
   // Create a real session for this chat
-  await db
+  const { error: upsertErr } = await db
     .from("telegram_sessions")
     .upsert(
       {
@@ -163,12 +163,23 @@ export async function verifyLinkCode(
       { onConflict: "chat_id" },
     );
 
+  if (upsertErr) {
+    console.error(`[TG-Link] Session upsert failed: ${upsertErr.message}`);
+    return { success: false };
+  }
+
   // Clean up the temporary linking session (chat_id returned by the RPC
   // is the key of the linking-mode row we just consumed).
-  await db
+  const { error: deleteErr } = await db
     .from("telegram_sessions")
     .delete()
     .eq("chat_id", matchingSession.chat_id);
+
+  if (deleteErr) {
+    // Linking IS complete (link row + real session exist); the temporary
+    // linking session leak is cleanup debt, not a user-facing failure.
+    console.error(`[TG-Link] Temp linking session cleanup failed: ${deleteErr.message}`);
+  }
 
   attempts.reset(attemptKey);
   console.warn(`[TG-Link] Telegram linked for user ${userId}. Chat: ${chatId}`);
