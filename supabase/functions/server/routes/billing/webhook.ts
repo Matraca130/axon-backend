@@ -20,12 +20,13 @@ import { getAdminClient, ok, err, PREFIX } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import { timingSafeEqual } from "../../timing-safe.ts";
+import { decideIdempotencyResult } from "./webhook-idempotency.ts";
 
 // Minimal shape we rely on; downstream handlers still validate metadata fields.
 // deno-lint-ignore no-explicit-any
-type StripeEventPayload = { id?: string; type: string; data: { object: any } };
+export type StripeEventPayload = { id?: string; type: string; data: { object: any } };
 
-function isStripeEventPayload(x: unknown): x is StripeEventPayload {
+export function isStripeEventPayload(x: unknown): x is StripeEventPayload {
   if (!x || typeof x !== "object") return false;
   const o = x as Record<string, unknown>;
   if (typeof o.type !== "string") return false;
@@ -104,19 +105,18 @@ webhookRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
       source: "stripe",
     });
 
-  if (dedupeErr) {
-    const code = (dedupeErr as { code?: string }).code;
-    if (code === "23505") {
-      console.warn(`[Stripe Webhook] Duplicate event ${eventId}, skipping`);
-      return ok(c, { received: true, deduplicated: true });
-    }
-    // Any other DB error means we have no idempotency guarantee. Fail so
-    // Stripe retries — do NOT proceed to business logic without protection.
-    console.error(
-      `[Stripe Webhook] processed_webhook_events insert failed (code=${code ?? "unknown"}): ${dedupeErr.message} — returning 500 for Stripe retry`,
-    );
-    return err(c, "Idempotency check unavailable", 500);
+  const decision = decideIdempotencyResult(dedupeErr);
+  if (decision.action === "dedup") {
+    console.warn(`[Stripe Webhook] Duplicate event ${eventId}, skipping`);
+    return ok(c, { received: true, deduplicated: true });
   }
+  if (decision.action === "retry") {
+    console.error(
+      `[Stripe Webhook] processed_webhook_events insert failed (code=${(dedupeErr as { code?: string }).code ?? "unknown"}): ${decision.message} — returning ${decision.status} for Stripe retry`,
+    );
+    return err(c, "Idempotency check unavailable", decision.status);
+  }
+  // decision.action === "proceed" — INSERT succeeded, run business logic.
 
   try {
     switch (event.type) {
