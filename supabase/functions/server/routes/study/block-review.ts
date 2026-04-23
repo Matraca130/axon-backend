@@ -135,13 +135,23 @@ blockReviewRoutes.post(`${PREFIX}/block-review`, async (c: Context) => {
   const nowIso = new Date().toISOString();
 
   // ── 7. Upsert final state ─────────────────────────────────
+  //
+  // atomicUpsert does a full-row UPSERT (INSERT ... ON CONFLICT DO UPDATE
+  // SET <all columns>), so a literal 0 for total_attempts / correct_attempts
+  // on the UPDATE branch clobbers the existing cumulative values before the
+  // RPC below can increment them by delta — losing every historical attempt
+  // on every review (#295).
+  //
+  // Preserve the existing counters: on INSERT they land as 0 (existing is
+  // null → 0), on UPDATE they keep the previous value, and the RPC call
+  // below then atomically increments by delta.
   const row = {
     student_id: user.id,
     block_id: blockId,
     p_know: Math.round(currentMastery * 10000) / 10000,
     max_p_know: Math.round(maxReachedMastery * 10000) / 10000,
-    total_attempts: 0,      // seed for INSERT; RPC increments atomically
-    correct_attempts: 0,    // seed for INSERT; RPC increments atomically
+    total_attempts: existing?.total_attempts ?? 0,
+    correct_attempts: existing?.correct_attempts ?? 0,
     last_attempt_at: nowIso,
   };
 
