@@ -480,11 +480,22 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
   }
 
   // ── Plan limit enforcement (bulk path) ──────────────────
-  const firstInstIdForLimit = institutionIdCache.values().next().value;
-  if (firstInstIdForLimit) {
-    const planCheck = await checkPlanLimit(db, user.id, firstInstIdForLimit as string);
+  // Targets may span multiple institutions the student belongs to. Check
+  // the plan limit for EVERY distinct institution — otherwise, if the
+  // first cached institution still has quota, generation for the
+  // exhausted one would sneak through (#297).
+  const distinctInstIds = new Set<string>();
+  for (const instId of institutionIdCache.values()) {
+    distinctInstIds.add(instId as string);
+  }
+  for (const instId of distinctInstIds) {
+    const planCheck = await checkPlanLimit(db, user.id, instId);
     if (!planCheck.allowed) {
-      return err(c, `Daily AI generation limit reached (${planCheck.limit}). Upgrade your plan.`, 429);
+      return err(
+        c,
+        `Daily AI generation limit reached for institution ${instId} (${planCheck.limit}/day). Upgrade your plan.`,
+        429,
+      );
     }
   }
 
