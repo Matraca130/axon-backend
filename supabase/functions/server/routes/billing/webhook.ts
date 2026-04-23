@@ -76,27 +76,46 @@ webhookRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
   // index idx_pwe_event_id_source on (event_id, source) serialises us.
   // If the insert hits 23505 unique_violation, it's a duplicate delivery;
   // short-circuit before any business logic.
+  //
+  // Failure semantics:
+  //   - 23505 (duplicate)     → 200 deduplicated, safe to skip.
+  //   - any other DB error    → 500 so Stripe retries; we won't run business
+  //                             logic without an idempotency guarantee.
+  //   - business-logic throws → compensate by DELETE'ing the dedup row so the
+  //                             next Stripe retry gets a fresh attempt rather
+  //                             than being silently acked as already-processed
+  //                             (which would drop a paid checkout on the floor).
   const eventId: string | undefined = event.id;
-  if (eventId) {
-    const { error: dedupeErr } = await admin
-      .from("processed_webhook_events")
-      .insert({
-        event_id: eventId,
-        event_type: event.type,
-        source: "stripe",
-      });
+  if (!eventId) {
+    // Stripe always populates event.id on a valid signed delivery; a missing
+    // id on an already-verified signature indicates a malformed payload. Refuse
+    // to proceed without idempotency rather than silently bypassing it.
+    console.error(
+      `[Stripe Webhook] Missing event.id on verified-signature payload (type=${event.type}) — rejecting`,
+    );
+    return err(c, "Missing event.id on verified payload", 400);
+  }
 
-    if (dedupeErr) {
-      if ((dedupeErr as { code?: string }).code === "23505") {
-        console.warn(`[Stripe Webhook] Duplicate event ${eventId}, skipping`);
-        return ok(c, { received: true, deduplicated: true });
-      }
-      // Table missing or other error: log and proceed (best-effort).
-      // Strict atomicity relies on the DB-level unique constraint.
-      console.warn(
-        `[Stripe Webhook] processed_webhook_events insert failed (non-fatal): ${dedupeErr.message}`,
-      );
+  const { error: dedupeErr } = await admin
+    .from("processed_webhook_events")
+    .insert({
+      event_id: eventId,
+      event_type: event.type,
+      source: "stripe",
+    });
+
+  if (dedupeErr) {
+    const code = (dedupeErr as { code?: string }).code;
+    if (code === "23505") {
+      console.warn(`[Stripe Webhook] Duplicate event ${eventId}, skipping`);
+      return ok(c, { received: true, deduplicated: true });
     }
+    // Any other DB error means we have no idempotency guarantee. Fail so
+    // Stripe retries — do NOT proceed to business logic without protection.
+    console.error(
+      `[Stripe Webhook] processed_webhook_events insert failed (code=${code ?? "unknown"}): ${dedupeErr.message} — returning 500 for Stripe retry`,
+    );
+    return err(c, "Idempotency check unavailable", 500);
   }
 
   try {
@@ -211,6 +230,24 @@ webhookRoutes.post(`${PREFIX}/webhooks/stripe`, async (c: Context) => {
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";
     console.error(`[Stripe Webhook] Error processing ${event.type}: ${msg}`);
+
+    // Compensate the dedup row so Stripe's retry gets a fresh attempt.
+    // Without this, the row from the INSERT-first guard above would make the
+    // next delivery hit 23505 → 200 deduplicated, and the event would be
+    // silently lost (subscription never created, past_due never flagged).
+    // If this compensating delete itself fails, flag loudly — the retry will
+    // be dedup-acked and the event will need manual operator recovery.
+    const { error: compensateErr } = await admin
+      .from("processed_webhook_events")
+      .delete()
+      .eq("event_id", eventId)
+      .eq("source", "stripe");
+    if (compensateErr) {
+      console.error(
+        `[Stripe Webhook] CRITICAL: compensating delete failed for event ${eventId} (type=${event.type}): ${compensateErr.message} — Stripe retry will be deduplicated and the event will be lost until manually cleared`,
+      );
+    }
+
     return safeErr(c, "Webhook processing", e instanceof Error ? e : null);
   }
 });
