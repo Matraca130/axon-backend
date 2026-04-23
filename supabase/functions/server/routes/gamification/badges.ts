@@ -115,10 +115,17 @@ badgeRoutes.post(`${PREFIX}/gamification/check-badges`, async (c: Context) => {
     return safeErr(c, "Badge definitions fetch", badgeErr);
   }
 
-  const { data: earnedBadges } = await db
+  // Scope to the current institution so a badge earned in institution A
+  // doesn't block it from being earned in institution B (#289).
+  const { data: earnedBadges, error: earnedErr } = await db
     .from("student_badges")
     .select("badge_id")
-    .eq("student_id", user.id);
+    .eq("student_id", user.id)
+    .eq("institution_id", institutionId);
+
+  if (earnedErr) {
+    return safeErr(c, "Earned badges fetch", earnedErr);
+  }
 
   const earnedIds = new Set((earnedBadges ?? []).map((b: Record<string, unknown>) => b.badge_id));
   const unearnedBadges = (allBadges ?? []).filter(
