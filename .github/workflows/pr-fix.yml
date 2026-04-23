@@ -17,7 +17,11 @@ permissions:
 
 concurrency:
   group: pr-fix-${{ github.event.issue.number || github.event.pull_request.number }}
-  cancel-in-progress: true
+  # `false`, not `true`: bot-triggered issue_comment events (Vercel, Cloudflare,
+  # gemini-code-assist) fire on the same PR number and would CANCEL the real
+  # @claude-fix run if set to true. They skip fast via the `if` filter (~5s),
+  # so queuing them behind real runs costs almost nothing.
+  cancel-in-progress: false
 
 jobs:
   fix:
