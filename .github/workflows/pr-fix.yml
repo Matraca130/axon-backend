@@ -43,6 +43,7 @@ jobs:
     timeout-minutes: 25
     env:
       GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+      GH_REPO: ${{ github.repository }}  # lets gh commands work before checkout (no .git yet)
 
     steps:
       - name: Resolve PR metadata
