@@ -1,12 +1,12 @@
 /**
  * tests/integration/study-sessions.test.ts — Study module tests
- * Verified against REAL sessions.ts, reviews.ts, spaced-rep.ts, progress.ts.
+ * Verified against REAL sessions.ts, reviews.ts, spaced-rep.ts, batch-review.ts, progress.ts.
  *
  * FIXES FROM AUDIT #5:
  *   - A5-FP-001: Removed false "rejects session_type=exam" (crud-factory has NO enum check)
  *   - A5-FP-002: Fixed "rejects instrument_type=homework" (isNonEmpty accepts any string)
  *   - A5-FP-003: Removed console.warn fallback pattern (false positive)
- *   - Added: daily-activities, student-stats, PUT lifecycle
+ *   - Added: batch-review, daily-activities, student-stats, PUT lifecycle
  *
  * Run: deno test tests/integration/study-sessions.test.ts --allow-net --allow-env --no-check
  */
@@ -56,11 +56,12 @@ Deno.test("study-queue rejects non-UUID course_id", async () => {
   assertError(r, 400);
 });
 
-// ═══ STUDY SESSIONS (verified: sessions.ts -> registerCrud with scopeToUser="student_id") ═══
+// ═══ STUDY SESSIONS (verified: sessions.ts → registerCrud with scopeToUser="student_id") ═══
 
 Deno.test("create session type=flashcard returns 201", async () => {
   await setup();
   const r = await api.post("/study-sessions", userToken, { session_type: "flashcard" });
+  // AUDIT #5 FIX: No console.warn fallback. Assert strictly.
   assert(r.status === 201, `Expected 201, got ${r.status}: ${r.error}`);
   const d = assertOk(r) as any;
   createdSessionId = d.id;
@@ -88,6 +89,9 @@ Deno.test("PUT study-session updates completed_at", async () => {
 });
 
 // ═══ REVIEWS (verified: reviews.ts — isNonEmpty for instrument_type, inRange(grade,0,5)) ═══
+// AUDIT #5 FIX: reviews.ts uses isNonEmpty() for instrument_type, NOT isOneOf().
+// Any non-empty string is accepted. "homework" would pass validation.
+// The ONLY enum-like validation is grade: inRange(body.grade, 0, 5).
 
 Deno.test("rejects review with grade=6 (inRange(0,5) check)", async () => {
   await setup();
@@ -96,6 +100,7 @@ Deno.test("rejects review with grade=6 (inRange(0,5) check)", async () => {
     item_id: "660e8400-e29b-41d4-a716-446655440000",
     instrument_type: "flashcard", grade: 6,
   });
+  // reviews.ts: if (!inRange(body.grade, 0, 5)) return err(c, "grade must be...", 400)
   assertError(r, 400);
 });
 
@@ -111,6 +116,7 @@ Deno.test("rejects review with negative grade=-1", async () => {
 
 Deno.test("rejects review with empty instrument_type", async () => {
   await setup();
+  // AUDIT #5 FIX: Test the REAL validation — isNonEmpty rejects "" and "   "
   const r = await api.post("/reviews", userToken, {
     session_id: "550e8400-e29b-41d4-a716-446655440000",
     item_id: "660e8400-e29b-41d4-a716-446655440000",
@@ -121,6 +127,7 @@ Deno.test("rejects review with empty instrument_type", async () => {
 
 Deno.test("reviews LIST without session_id returns 400", async () => {
   await setup();
+  // reviews.ts: if (!isUuid(sessionId)) return err(c, "session_id must be a valid UUID", 400)
   assertError(await api.get("/reviews", userToken), 400);
 });
 
@@ -171,4 +178,5 @@ Deno.test("student-stats GET returns data or null", async () => {
   await setup();
   const r = await api.get("/student-stats", userToken);
   assertStatus(r, 200);
+  // student-stats.ts uses maybeSingle() — returns null if no row exists
 });
