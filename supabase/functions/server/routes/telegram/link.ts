@@ -100,33 +100,30 @@ export async function verifyLinkCode(
 
   const db = getAdminClient();
 
-  const { data: sessions, error: searchError } = await db
-    .from("telegram_sessions")
-    .select("chat_id, current_context, expires_at")
-    .eq("mode", "linking")
-    .limit(200);
+  // Verify via the SECURITY DEFINER RPC (migration 20260423000001). The
+  // RPC does the JSONB filter + expiry comparison with a proper
+  // `::timestamptz` cast, which the previous `.gt("…linking_expires_at", nowIso)`
+  // supabase-js path could not do — that path relied on lexical ISO-8601
+  // ordering, which is correct only as long as every writer uses the exact
+  // same `YYYY-MM-DDTHH:MM:SS.sssZ` format. Casting DB-side removes that
+  // hidden dependency. Also still DB-side (no 200-row scan). (#264)
+  const { data: rows, error: searchError } = await db.rpc(
+    "verify_telegram_linking_session",
+    { p_code: code },
+  );
 
-  if (searchError || !sessions) {
-    console.error(`[TG-Link] Code search failed: ${searchError?.message}`);
+  if (searchError) {
+    console.error(`[TG-Link] Code search failed: ${searchError.message}`);
     return { success: false };
   }
 
-  const now = new Date();
-  const matchingSession = sessions.find((s) => {
-    const ctx = s.current_context as Record<string, unknown>;
-    return (
-      ctx.linking_code === code &&
-      new Date(ctx.linking_expires_at as string) > now
-    );
-  });
-
+  const matchingSession = Array.isArray(rows) ? rows[0] : rows;
   if (!matchingSession) {
     attempts.recordFailure(attemptKey);
     return { success: false };
   }
 
-  const ctx = matchingSession.current_context as Record<string, unknown>;
-  const userId = ctx.linking_user_id as string;
+  const userId = matchingSession.linking_user_id as string;
 
   // Create the link
   const { error: linkError } = await db
@@ -158,7 +155,8 @@ export async function verifyLinkCode(
       { onConflict: "chat_id" },
     );
 
-  // Clean up the temporary linking session
+  // Clean up the temporary linking session (chat_id returned by the RPC
+  // is the key of the linking-mode row we just consumed).
   await db
     .from("telegram_sessions")
     .delete()
