@@ -139,27 +139,27 @@ infographicImageRoutes.post(
         body.maxImages,
       );
 
-      // Log generation
-      for (const result of results) {
-        await admin
+      // Log generation — one batched INSERT instead of N individual round-trips
+      if (results.length > 0) {
+        const nowIso = new Date().toISOString();
+        const logRows = results.map((result) => ({
+          summary_id: summaryId,
+          institution_id: ctx.summary.institution_id,
+          user_id: user.id,
+          image_url: result.imageUrl,
+          model: result.model,
+          prompt_used: result.promptUsed,
+          image_type: "infographic",
+          created_at: nowIso,
+        }));
+        const { error: logErr } = await admin
           .from("image_generation_log")
-          .insert({
-            summary_id: summaryId,
-            institution_id: ctx.summary.institution_id,
-            user_id: user.id,
-            image_url: result.imageUrl,
-            model: result.model,
-            prompt_used: result.promptUsed,
-            image_type: "infographic",
-            created_at: new Date().toISOString(),
-          })
-          .then(({ error: logErr }) => {
-            if (logErr) {
-              console.warn(
-                `[Infographic] Log insert failed: ${logErr.message}`,
-              );
-            }
-          });
+          .insert(logRows);
+        if (logErr) {
+          console.warn(
+            `[Infographic] Batch log insert failed: ${logErr.message}`,
+          );
+        }
       }
 
       return ok(c, {
