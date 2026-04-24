@@ -99,8 +99,20 @@ jobs:
           done
           echo "state=$STATE" >> "$GITHUB_OUTPUT"
 
+          # hotfix-3 Bug #1 fix: set should_fix for gate step
+          case "$STATE" in
+            CONFLICTING|DIRTY)
+              gh pr comment "$PR_NUMBER" --body "🔸 pr-fix aborted: mergeStateStatus=$STATE. Human conflict resolution needed."
+              echo "should_fix=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "should_fix=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
       - name: Update branch if BEHIND
-        if: steps.merge_state.outputs.state == 'BEHIND'
+        id: update_branch
+        if: steps.merge_state.outputs.should_fix == 'true' && steps.merge_state.outputs.state == 'BEHIND'
         env:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: |
@@ -109,20 +121,24 @@ jobs:
             sleep 8
           else
             gh pr comment "$PR_NUMBER" --body "🔸 pr-fix: branch BEHIND main and update-branch failed. Human rebase needed."
-            exit 0
+            echo "update_branch_failed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Exit if CONFLICTING/DIRTY
-        if: steps.merge_state.outputs.state == 'CONFLICTING' || steps.merge_state.outputs.state == 'DIRTY'
-        env:
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-          STATE: ${{ steps.merge_state.outputs.state }}
+      # hotfix-3 Bug #1 fix: consolidated gate for all subsequent steps
+      - name: Gate — continue to fix
+        id: gate
         run: |
-          gh pr comment "$PR_NUMBER" --body "🔸 pr-fix aborted: mergeStateStatus=$STATE. Human conflict resolution needed."
-          exit 0
+          if [ "${{ steps.merge_state.outputs.should_fix }}" != "true" ]; then
+            echo "continue=false" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.update_branch.outputs.update_branch_failed }}" = "true" ]; then
+            echo "continue=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "continue=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Resolve final head SHA
         id: final_head
+        if: steps.gate.outputs.continue == 'true'
         env:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: |
@@ -130,6 +146,7 @@ jobs:
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Checkout PR head
+        if: steps.gate.outputs.continue == 'true'
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.final_head.outputs.sha }}
@@ -137,16 +154,19 @@ jobs:
           token: ${{ secrets.GH_PAT || github.token }}
 
       - name: Configure git identity
+        if: steps.gate.outputs.continue == 'true'
         run: |
           git config user.name "claude-fix[bot]"
           git config user.email "claude-fix[bot]@users.noreply.github.com"
 
       - name: Setup Deno
+        if: steps.gate.outputs.continue == 'true'
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
 
       - name: Cache Deno deps
+        if: steps.gate.outputs.continue == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -156,6 +176,7 @@ jobs:
           restore-keys: deno-${{ runner.os }}-
 
       - name: Collect review + issue comments
+        if: steps.gate.outputs.continue == 'true'
         env:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: |
@@ -166,6 +187,7 @@ jobs:
           echo "review=$(wc -l < /tmp/review-comments.jsonl) issue=$(wc -l < /tmp/issue-comments.jsonl)"
 
       - name: Path blocklist pre-check
+        if: steps.gate.outputs.continue == 'true'
         env:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: |
@@ -181,6 +203,7 @@ jobs:
 
       - name: Apply TRIVIAL fixes with Claude
         id: fix
+        if: steps.gate.outputs.continue == 'true'
         uses: anthropics/claude-code-action@v1
         env:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
@@ -324,7 +347,7 @@ jobs:
           claude_args: "--model claude-opus-4-7 --allowedTools Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git checkout -- *),Bash(git fetch:*),Bash(git rev-parse:*),Bash(deno:*),Bash(timeout:*),Bash(cat:*),Bash(grep:*),Bash(wc:*),Bash(head:*),Bash(tail:*),Bash(gh:*),Bash(jq:*),Bash(echo:*),Read,Edit,Write,Grep,Glob"
 
       - name: Auto-merge gate
-        if: always() && steps.fix.outcome == 'success'
+        if: steps.gate.outputs.continue == 'true' && steps.fix.outcome == 'success'
         env:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           FINAL_HEAD_SHA: ${{ steps.final_head.outputs.sha }}
@@ -343,9 +366,12 @@ jobs:
             REASONS+=("not mergeable (state=$M_STATE)")
           fi
 
-          CHANGED=$(gh pr diff "$PR_NUMBER" --name-only 2>/dev/null || echo "")
+          # hotfix-3 Bug #2 fix: compare vs merge-base, not vs main HEAD
+          git fetch origin main --depth=50 2>/dev/null || true
+          MERGE_BASE=$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse HEAD~10)
+          CHANGED=$(git diff --name-only "$MERGE_BASE"..HEAD 2>/dev/null || echo "")
           if echo "$CHANGED" | grep -qE '^(\.github/workflows/|supabase/migrations/)'; then
-            REASONS+=("changes touch forbidden paths — never auto-merge")
+            REASONS+=("PR changes touch forbidden paths — never auto-merge")
           fi
 
           if [ ${#REASONS[@]} -eq 0 ]; then
