@@ -58,7 +58,7 @@ import {
 } from "../../auth-helpers.ts";
 import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.ts";
 import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
-import { sanitizeForPrompt } from "../../prompt-sanitize.ts";
+import { sanitizeForPrompt, sanitizeProfileForPrompt } from "../../prompt-sanitize.ts";
 import { validateQuizQuestion, validateFlashcard } from "../../lib/validate-llm-output.ts";
 import { checkPlanLimit } from "../plans/access.ts";
 
@@ -394,7 +394,7 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
       p_institution_id: resolvedInstId as string,
     });
     if (profile) {
-      profileContext = `\nPerfil del alumno: ${JSON.stringify(profile)}`;
+      profileContext = `\nPerfil del alumno: ${JSON.stringify(sanitizeProfileForPrompt(profile))}`;
     }
 
     const ctx = buildPromptContext(
@@ -507,7 +507,7 @@ aiGenerateSmartRoutes.post(`${PREFIX}/ai/generate-smart`, async (c: Context) => 
       p_institution_id: firstInstId,
     });
     if (profile) {
-      sharedProfileContext = `\nPerfil del alumno: ${JSON.stringify(profile)}`;
+      sharedProfileContext = `\nPerfil del alumno: ${JSON.stringify(sanitizeProfileForPrompt(profile))}`;
     }
   }
 
