@@ -111,3 +111,5 @@ See [`docs/AI_PIPELINE.md`](docs/AI_PIPELINE.md) for full details.
 The `docs/figma-make/` directory contains **copy-paste blocks** designed for Figma Make sessions. Each block is self-contained and includes the full API reference for a specific area.
 
 See [`docs/figma-make/README.md`](docs/figma-make/README.md) for usage instructions.
+
+<!-- automerge-test 2026-04-26 — validates pr-fix v2 chain end-to-end -->
