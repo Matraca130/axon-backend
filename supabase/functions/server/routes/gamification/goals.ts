@@ -3,6 +3,7 @@
  *
  * AUDIT FIXES:
  *   G-003 — POST /goals/complete anti-duplicate protection
+ *   #640  — POST /goals/complete TOCTOU race (uq_xp_tx_goal_dedup + post-await probe)
  *   BUG-2 — PUT /daily-goal uses getAdminClient()
  *   B-001 — daily_goal -> daily_goal_minutes (matches DB column)
  *   B-004 — onboarding daily_goal -> daily_goal_minutes
@@ -135,10 +136,30 @@ goalRoutes.post(`${PREFIX}/gamification/goals/complete`, async (c: Context) => {
       sourceId,
     });
 
+    // #640: awardXP() swallows the 23505 unique-violation from
+    // uq_xp_tx_goal_dedup into a null return. If a concurrent request
+    // won the race and inserted the row first, our INSERT was rejected
+    // by the partial unique index. Re-probe to disambiguate dup-race
+    // (return 409) from a real failure (return 500).
+    if (result === null) {
+      const { count: postCount } = await adminDb
+        .from("xp_transactions")
+        .select("id", { count: "exact", head: true })
+        .eq("student_id", user.id)
+        .eq("institution_id", institutionId)
+        .eq("source_type", "goal")
+        .eq("source_id", sourceId);
+
+      if ((postCount ?? 0) > 0) {
+        return err(c, `Goal '${goalType}' ya fue completado hoy.`, 409);
+      }
+      return safeErr(c, "Goal completion", null);
+    }
+
     return ok(c, {
       goal_type: goalType,
-      xp_awarded: result?.xp_awarded ?? bonusXp,
-      bonus_type: result?.bonus_type ?? null,
+      xp_awarded: result.xp_awarded ?? bonusXp,
+      bonus_type: result.bonus_type ?? null,
     });
   } catch (e) {
     return safeErr(c, "Goal completion", e instanceof Error ? e : null);
