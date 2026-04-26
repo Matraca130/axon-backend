@@ -132,6 +132,7 @@ async function getStudyQueueFromJs(
   if (bktResult.error) throw new Error(`Fetch bkt_states failed: ${bktResult.error.message}`);
   if (fsrsResult.error) throw new Error(`Fetch fsrs_states failed: ${fsrsResult.error.message}`);
   if (flashcardsResult.error) throw new Error(`Fetch flashcards failed: ${flashcardsResult.error.message}`);
+  if (keywordsResult.error) throw new Error(`Fetch keywords failed: ${keywordsResult.error.message}`);
 
   if (allowedSummaryIds === null) {
     return { queue: [], totalDue: 0, totalNew: 0, totalInQueue: 0 };
