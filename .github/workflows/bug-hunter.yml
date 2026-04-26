@@ -18,11 +18,52 @@ jobs:
         with:
           node-version: '20'
       - run: npm install -g @anthropic-ai/claude-code
+
+      - name: Capture pre-run timestamp
+        id: pre
+        run: echo "ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Run Claude bug hunter
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          claude -p "Scan this backend repo (Hono + Supabase Edge Functions, Deno, 176 routes, 39 tables) for bugs: missing auth checks on routes, RLS policy gaps, SQL injection risks, unhandled errors, race conditions, missing input validation, leaked secrets, wrong HTTP codes, N+1 queries. For each confirmed bug open a GitHub issue ATOMICALLY with both labels at once: 'gh issue create --title \"bug: <short desc>\" --label \"bug-hunter,claude-fix\" --body \"...file:line + fix suggestion...\"'. Capture the new issue number from the command output. THEN IMMEDIATELY run 'gh workflow run claude-fix.yml -f issue_number=<new-number>' — this workflow_dispatch call is what actually triggers the auto-fix pipeline, because labels added by GITHUB_TOKEN do NOT trigger downstream workflows but workflow_dispatch events DO. Both steps are mandatory for every bug — do not skip the workflow_dispatch. Check existing open issues with label bug-hunter first and skip duplicates. Max 5 new issues per run. Be strict — only real bugs, no nits." \
+          claude -p "Scan this backend repo (Hono + Supabase Edge Functions, Deno, 176 routes, 39 tables) for bugs: missing auth checks on routes, RLS policy gaps, SQL injection risks, unhandled errors, race conditions, missing input validation, leaked secrets, wrong HTTP codes, N+1 queries. For each confirmed bug, run 'gh issue create --title \"bug: <short desc>\" --label \"bug-hunter\" --body \"...file:line + fix suggestion...\"'. Check existing open issues with label bug-hunter first and skip duplicates. Max 5 new issues per run. Be strict — only real bugs, no nits. Do NOT label with claude-fix and do NOT trigger any workflows — a deterministic post-processing step in this same workflow handles that." \
             --dangerously-skip-permissions \
-            --allowedTools "Read,Glob,Grep,Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh workflow run:*)"
+            --allowedTools "Read,Glob,Grep,Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue view:*)"
+
+      - name: Trigger Claude Fix for new bug-hunter issues
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRE_TS: ${{ steps.pre.outputs.ts }}
+        run: |
+          set -euo pipefail
+          echo "Looking for bug-hunter issues created since $PRE_TS by github-actions[bot]..."
+
+          # Query: open issues, label=bug-hunter, created during this run, by the bot
+          NEW_NUMS=$(gh api "repos/$GITHUB_REPOSITORY/issues?labels=bug-hunter&state=open&since=$PRE_TS&per_page=20" \
+            --jq '.[] | select(.user.login == "github-actions[bot]") | .number')
+
+          if [ -z "$NEW_NUMS" ]; then
+            echo "No new bug-hunter issues found in this run — nothing to dispatch."
+            exit 0
+          fi
+
+          echo "Issues created this run: $(echo "$NEW_NUMS" | tr '\n' ' ')"
+
+          for N in $NEW_NUMS; do
+            # 1) Ensure claude-fix label is present (idempotent)
+            if ! gh issue view "$N" --json labels --jq '[.labels[].name] | join(",")' | grep -q claude-fix; then
+              gh issue edit "$N" --add-label claude-fix
+              echo "  #$N: added claude-fix label"
+            fi
+
+            # 2) Fire workflow_dispatch — labels added by GITHUB_TOKEN don't trigger
+            #    downstream workflows, so this is the actual trigger of record.
+            if gh workflow run claude-fix.yml -f issue_number="$N"; then
+              echo "  #$N: claude-fix.yml dispatched"
+            else
+              echo "::warning::Failed to dispatch claude-fix.yml for issue #$N"
+            fi
+          done
