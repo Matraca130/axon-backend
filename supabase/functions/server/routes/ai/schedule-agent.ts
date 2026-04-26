@@ -4,7 +4,6 @@
  * POST /ai/schedule-agent
  *   action: "distribute" | "recommend-today" | "reschedule" | "weekly-insight"
  *   studentProfile: object (mastery data, weeklyHours, history)
- *   planContext?: object (tasks, deadlines)
  *   completedTaskId?: string (for reschedule action)
  *   model?: ClaudeModel (default: sonnet)
  *
@@ -165,14 +164,13 @@ RESPONDE EXCLUSIVAMENTE en JSON valido sin markdown.`;
 function buildUserMessage(
   action: ScheduleAction,
   dbContext: DbStudentContext,
-  planContext?: Record<string, unknown>,
   completedTaskId?: string,
 ): string {
-  // NOTE: The frontend-supplied `studentProfile` is intentionally NOT injected
-  // into the prompt. It is user-controlled and was a prompt-injection vector
-  // that influenced AI-generated DB operations in the `organize` action (#643).
+  // NOTE: Frontend-supplied `studentProfile` and `planContext` are intentionally
+  // NOT injected into the prompt. They are user-controlled and were prompt-
+  // injection vectors that could influence AI-generated DB operations (#643, #667).
   // The `dbContext` below is fetched server-side from trusted tables and
-  // already carries the same mastery/activity signals.
+  // already carries the same task/mastery/activity signals.
 
   const contextBlock = `
 == DATOS REALES DEL ESTUDIANTE (base de datos) ==
@@ -202,9 +200,6 @@ ${dbContext.blockMastery.length > 0
     case "distribute":
       return `Distribuye estas tareas de estudio de forma optima para este alumno.
 
-Plan y tareas pendientes:
-${JSON.stringify(planContext ?? {})}
-
 ${contextBlock}
 
 Responde con JSON: { "schedule": [ { "day": "lunes", "blocks": [ { "startTime": "08:00", "duration_min": 30, "taskType": "flashcard"|"quiz"|"read"|"review", "topicId": "...", "topicName": "...", "reason": "..." } ] } ], "totalHours": number, "tips": ["..."] }`;
@@ -220,9 +215,6 @@ Responde con JSON: { "recommendations": [ { "priority": 1, "taskType": "flashcar
 
     case "reschedule":
       return `El alumno completo la tarea "${completedTaskId || "desconocida"}". Redistribuye las tareas pendientes considerando este progreso.
-
-Tareas y plan actual:
-${JSON.stringify(planContext ?? {})}
 
 ${contextBlock}
 
@@ -436,7 +428,6 @@ aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => 
     return err(c, "studentProfile is required (object)", 400);
   }
 
-  const planContext = body.planContext as Record<string, unknown> | undefined;
   const completedTaskId = typeof body.completedTaskId === "string"
     ? body.completedTaskId
     : undefined;
@@ -488,13 +479,13 @@ aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => 
   }
 
   // -- Build prompt and call Claude
-  // NOTE: `studentProfile` from the request body is intentionally NOT passed
-  // to the prompt builder — it's user-controlled and was a prompt-injection
-  // vector (#643). Trusted state comes from `dbContext` (server-side fetch).
+  // NOTE: `studentProfile` and `planContext` from the request body are
+  // intentionally NOT passed to the prompt builder — they are user-controlled
+  // and were prompt-injection vectors (#643, #667). Trusted state comes from
+  // `dbContext` (server-side fetch).
   const userMessage = buildUserMessage(
     action as ScheduleAction,
     dbContext,
-    planContext,
     completedTaskId,
   );
 
