@@ -6,15 +6,19 @@
  *
  * Admin-only: requires institution owner/admin role.
  *
- * Endpoints:
- *   GET  /settings/messaging/:channel        — Get settings for a channel
- *   PUT  /settings/messaging/:channel        — Update settings for a channel
- *   POST /settings/messaging/:channel/test   — Test connection to channel API
+ * Endpoints (all require institution_id query parameter):
+ *   GET  /settings/messaging/:channel?institution_id=...        — Get settings for a channel
+ *   PUT  /settings/messaging/:channel?institution_id=...        — Update settings for a channel
+ *   POST /settings/messaging/:channel/test?institution_id=...   — Test connection to channel API
  */
 
 import type { Context } from "npm:hono";
 import { authenticate, ok, err, getAdminClient } from "../../db.ts";
 import { safeErr } from "../../lib/safe-error.ts";
+import { isUuid } from "../../validate.ts";
+import { isDenied, requireInstitutionRole } from "../../auth-helpers.ts";
+
+const ADMIN_ROLES = ["owner", "admin"];
 
 // ─── Types ───────────────────────────────────────────────
 
@@ -35,19 +39,6 @@ interface TelegramSettings {
 type ChannelSettings = WhatsAppSettings | TelegramSettings;
 
 // ─── Helpers ─────────────────────────────────────────────
-
-async function getUserInstitution(userId: string): Promise<string | null> {
-  const db = getAdminClient();
-  const { data } = await db
-    .from("memberships")
-    .select("institution_id, role")
-    .eq("user_id", userId)
-    .eq("is_active", true)
-    .in("role", ["owner", "admin"])
-    .limit(1)
-    .single();
-  return data?.institution_id ?? null;
-}
 
 function maskToken(token: string | undefined): string {
   if (!token || token.length < 8) return "****";
@@ -88,17 +79,20 @@ function maskSettings(settings: ChannelSettings, channel: string): Record<string
 export async function getMessagingSettings(c: Context): Promise<Response> {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { user } = auth;
+  const { user, db: userDb } = auth;
 
   const channel = c.req.param("channel");
   if (!["whatsapp", "telegram"].includes(channel)) {
     return err(c, "Canal inválido. Usa 'whatsapp' o 'telegram'.", 400);
   }
 
-  const institutionId = await getUserInstitution(user.id);
-  if (!institutionId) {
-    return err(c, "No tienes permisos de administrador.", 403);
+  const institutionId = c.req.query("institution_id");
+  if (!institutionId || !isUuid(institutionId)) {
+    return err(c, "institution_id must be a valid UUID", 400);
   }
+
+  const check = await requireInstitutionRole(userDb, user.id, institutionId, ADMIN_ROLES);
+  if (isDenied(check)) return err(c, check.message, check.status);
 
   const db = getAdminClient();
   const { data, error } = await db
@@ -134,17 +128,20 @@ export async function getMessagingSettings(c: Context): Promise<Response> {
 export async function updateMessagingSettings(c: Context): Promise<Response> {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { user } = auth;
+  const { user, db: userDb } = auth;
 
   const channel = c.req.param("channel");
   if (!["whatsapp", "telegram"].includes(channel)) {
     return err(c, "Canal inválido. Usa 'whatsapp' o 'telegram'.", 400);
   }
 
-  const institutionId = await getUserInstitution(user.id);
-  if (!institutionId) {
-    return err(c, "No tienes permisos de administrador.", 403);
+  const institutionId = c.req.query("institution_id");
+  if (!institutionId || !isUuid(institutionId)) {
+    return err(c, "institution_id must be a valid UUID", 400);
   }
+
+  const check = await requireInstitutionRole(userDb, user.id, institutionId, ADMIN_ROLES);
+  if (isDenied(check)) return err(c, check.message, check.status);
 
   let body: Record<string, unknown>;
   try {
@@ -232,17 +229,20 @@ export async function updateMessagingSettings(c: Context): Promise<Response> {
 export async function testMessagingConnection(c: Context): Promise<Response> {
   const auth = await authenticate(c);
   if (auth instanceof Response) return auth;
-  const { user } = auth;
+  const { user, db: userDb } = auth;
 
   const channel = c.req.param("channel");
   if (!["whatsapp", "telegram"].includes(channel)) {
     return err(c, "Canal inválido.", 400);
   }
 
-  const institutionId = await getUserInstitution(user.id);
-  if (!institutionId) {
-    return err(c, "No tienes permisos de administrador.", 403);
+  const institutionId = c.req.query("institution_id");
+  if (!institutionId || !isUuid(institutionId)) {
+    return err(c, "institution_id must be a valid UUID", 400);
   }
+
+  const check = await requireInstitutionRole(userDb, user.id, institutionId, ADMIN_ROLES);
+  if (isDenied(check)) return err(c, check.message, check.status);
 
   const db = getAdminClient();
   const { data } = await db
