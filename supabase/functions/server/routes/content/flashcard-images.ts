@@ -159,12 +159,11 @@ flashcardImageRoutes.post(
         model: result.model,
       });
     } catch (e) {
-      const message = e instanceof Error ? e.message : "Unknown error";
       console.error(
         `[FlashcardImage] Generation failed for ${flashcardId}:`,
-        message,
+        e,
       );
-      return err(c, `Image generation failed: ${message}`, 500);
+      return safeErr(c, "Image generation", e instanceof Error ? e : null);
     }
   },
 );
