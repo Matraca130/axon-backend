@@ -3,6 +3,12 @@ name: Claude Fix (issue → PR)
 on:
   issues:
     types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue number to fix"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,12 +19,15 @@ permissions:
 jobs:
   fix:
     if: >-
-      github.event.label.name == 'claude-fix' &&
+      github.event_name == 'workflow_dispatch' ||
       (
-        github.event.sender.login == 'Matraca130' ||
+        github.event.label.name == 'claude-fix' &&
         (
-          github.event.sender.login == 'github-actions[bot]' &&
-          contains(github.event.issue.labels.*.name, 'bug-hunter')
+          github.event.sender.login == 'Matraca130' ||
+          (
+            github.event.sender.login == 'github-actions[bot]' &&
+            contains(github.event.issue.labels.*.name, 'bug-hunter')
+          )
         )
       )
     runs-on: ubuntu-latest
@@ -35,18 +44,36 @@ jobs:
           git config user.name "claude-fix[bot]"
           git config user.email "ariverol@teiainstitute.org"
 
+      - name: Resolve issue metadata
+        id: issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.inputs.issue_number || github.event.issue.number }}
+        run: |
+          ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" --json number,title,body,url)
+          TITLE=$(echo "$ISSUE_JSON" | jq -r .title)
+          URL=$(echo "$ISSUE_JSON" | jq -r .url)
+          echo "number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          {
+            echo "body<<ISSUE_BODY_EOF"
+            echo "$ISSUE_JSON" | jq -r .body
+            echo "ISSUE_BODY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run Claude Fix
         uses: anthropics/claude-code-action@v1
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
-          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_NUMBER: ${{ steps.issue.outputs.number }}
+          ISSUE_TITLE: ${{ steps.issue.outputs.title }}
+          ISSUE_BODY: ${{ steps.issue.outputs.body }}
+          ISSUE_URL: ${{ steps.issue.outputs.url }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            You have been assigned issue #${{ github.event.issue.number }}: "${{ github.event.issue.title }}".
+            You have been assigned issue #${{ steps.issue.outputs.number }}: "${{ steps.issue.outputs.title }}".
 
             Full issue body is available in the env var `$ISSUE_BODY`. Read it first with `echo "$ISSUE_BODY"` in a Bash step.
 

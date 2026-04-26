@@ -11,6 +11,7 @@ jobs:
     permissions:
       contents: read
       issues: write
+      actions: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,6 +23,6 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          claude -p "Scan this backend repo (Hono + Supabase Edge Functions, Deno, 176 routes, 39 tables) for bugs: missing auth checks on routes, RLS policy gaps, SQL injection risks, unhandled errors, race conditions, missing input validation, leaked secrets, wrong HTTP codes, N+1 queries. For each confirmed bug open a GitHub issue: title 'bug: <short desc>', label 'bug-hunter', body with file:line and fix suggestion. IMMEDIATELY after creating the issue, run `gh issue edit <new-number> --add-label claude-fix` so the claude-fix workflow auto-picks it up. Check existing open issues with label bug-hunter first and skip duplicates. Max 5 new issues per run. Be strict - only real bugs." \
+          claude -p "Scan this backend repo (Hono + Supabase Edge Functions, Deno, 176 routes, 39 tables) for bugs: missing auth checks on routes, RLS policy gaps, SQL injection risks, unhandled errors, race conditions, missing input validation, leaked secrets, wrong HTTP codes, N+1 queries. For each confirmed bug open a GitHub issue ATOMICALLY with both labels at once: 'gh issue create --title \"bug: <short desc>\" --label \"bug-hunter,claude-fix\" --body \"...file:line + fix suggestion...\"'. Capture the new issue number from the command output. THEN IMMEDIATELY run 'gh workflow run claude-fix.yml -f issue_number=<new-number>' — this workflow_dispatch call is what actually triggers the auto-fix pipeline, because labels added by GITHUB_TOKEN do NOT trigger downstream workflows but workflow_dispatch events DO. Both steps are mandatory for every bug — do not skip the workflow_dispatch. Check existing open issues with label bug-hunter first and skip duplicates. Max 5 new issues per run. Be strict — only real bugs, no nits." \
             --dangerously-skip-permissions \
-            --allowedTools "Read,Glob,Grep,Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue view:*),Bash(gh issue edit:*)"
+            --allowedTools "Read,Glob,Grep,Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh workflow run:*)"
