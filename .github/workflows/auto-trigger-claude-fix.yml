@@ -1,0 +1,74 @@
+name: Auto-trigger pr-fix v2 (full-auto merge)
+
+# Disparador automático del flujo @claude-fix sobre PRs nuevos.
+# - PRs de bots en la allowlist (claude-fix[bot], app/claude): se procesan siempre
+# - PRs de humanos: solo si el autor agregó el label 'auto-merge-ok' al abrir
+# Para detener la automatización en un PR específico: agregar label 'blocked' o 'do-not-merge'.
+# Para deshabilitar globalmente: gh workflow disable "Auto-trigger pr-fix v2 (full-auto merge)"
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: auto-trigger-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  auto-trigger:
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !contains(github.event.pull_request.labels.*.name, 'blocked') &&
+      !contains(github.event.pull_request.labels.*.name, 'do-not-merge') &&
+      (
+        contains(fromJSON('["app/claude","claude-fix[bot]","claude[bot]","github-actions[bot]"]'), github.event.pull_request.user.login) ||
+        contains(github.event.pull_request.labels.*.name, 'auto-merge-ok')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Skip dependabot and renovate (not in trusted bot list)
+        if: contains(fromJSON('["dependabot[bot]","renovate[bot]"]'), github.event.pull_request.user.login)
+        run: |
+          echo "::notice::Skipping ${{ github.event.pull_request.user.login }} — not in trusted-bot allowlist"
+          exit 0
+
+      - name: Skip PRs that touch .github/workflows/ (auto-merge gate forbids them anyway)
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          CHANGED=$(gh pr diff "$PR_NUMBER" --name-only -R "$GITHUB_REPOSITORY")
+          if echo "$CHANGED" | grep -qE '^\.github/workflows/'; then
+            echo "::notice::PR touches .github/workflows/ — skipping auto-trigger (manual review required)"
+            exit 0
+          fi
+
+      - name: Ensure auto-merge-ok label
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if ! gh pr view "$PR_NUMBER" --json labels --jq '[.labels[].name] | join(",")' | grep -q auto-merge-ok; then
+            gh pr edit "$PR_NUMBER" --add-label auto-merge-ok
+            echo "  added auto-merge-ok"
+          fi
+
+      - name: Comment @claude-fix to trigger pr-fix v2
+        env:
+          # IMPORTANT: must use GH_PAT so the comment is authored by Matraca130 (not bot).
+          # pr-fix.yml gates on `comment.user.login == 'Matraca130' && type != 'Bot'`.
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::secrets.GH_PAT is required for auto-trigger to work (so @claude-fix comment is authored by a human)."
+            exit 1
+          fi
+          gh pr comment "$PR_NUMBER" --body "@claude-fix"
+          echo "  posted @claude-fix"
