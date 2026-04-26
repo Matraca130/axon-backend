@@ -28,6 +28,7 @@
 import { Hono } from "npm:hono";
 import type { SupabaseClient } from "npm:@supabase/supabase-js";
 import { authenticate, ok, err, safeJson, PREFIX } from "../../db.ts";
+import { safeErr } from "../../lib/safe-error.ts";
 import { isUuid } from "../../validate.ts";
 import type { Context } from "npm:hono";
 
@@ -314,12 +315,11 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
   }
 
   // ── 3. Ownership ─────────────────────────────────────────
-  // Preserve pre-refactor behavior: batch-review returned 404 for both
-  // "not found" and "lookup failed". Leave as-is so the contract is
-  // unchanged; a future PR can differentiate if desired.
   const ownership = await verifySessionOwnership(db, sessionId, user.id);
   if (!ownership.ok) {
-    return err(c, ownership.message, 404);
+    return ownership.reason === "not_found"
+      ? err(c, ownership.message, 404)
+      : safeErr(c, "Session lookup", { message: ownership.message });
   }
 
   // ── 4. Pre-load state + leech threshold ──────────────────
