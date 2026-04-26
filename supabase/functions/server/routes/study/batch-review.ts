@@ -157,7 +157,8 @@ export async function preloadStateMaps(
   for (const [table, res] of checks) {
     const e = res.error as { message?: string } | null | undefined;
     if (e) {
-      return { data: null, error: `Preload ${table} failed: ${e.message ?? "unknown error"}` };
+      console.error(`[batch-review] preload ${table} failed:`, e.message ?? "unknown error");
+      return { data: null, error: `Preload ${table} failed` };
     }
   }
 
