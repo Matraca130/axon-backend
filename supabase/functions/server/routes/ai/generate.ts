@@ -41,7 +41,7 @@ import {
 } from "../../auth-helpers.ts";
 import { generateText, parseClaudeJson, GENERATE_MODEL } from "../../claude-ai.ts";
 import { normalizeDifficulty, normalizeQuestionType } from "../../ai-normalizers.ts";
-import { sanitizeForPrompt, wrapXml } from "../../prompt-sanitize.ts";
+import { sanitizeForPrompt, sanitizeProfileForPrompt, wrapXml } from "../../prompt-sanitize.ts";
 import { truncateForPrompt } from "./generate-smart-helpers.ts";
 import { validateQuizQuestion, validateFlashcard } from "../../lib/validate-llm-output.ts";
 import { checkPlanLimit } from "../plans/access.ts";
@@ -165,7 +165,7 @@ aiGenerateRoutes.post(`${PREFIX}/ai/generate`, async (c: Context) => {
     p_institution_id: instId,
   });
   if (profile) {
-    profileContext = `\nPerfil del alumno: ${JSON.stringify(profile)}`;
+    profileContext = `\nPerfil del alumno: ${JSON.stringify(sanitizeProfileForPrompt(profile))}`;
   }
 
   // ── Fetch BKT state for this subtopic ──────────────────
