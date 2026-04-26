@@ -173,9 +173,11 @@ aiChatRoutes.post(`${PREFIX}/ai/rag-chat`, async (c: Context) => {
   let institutionId: string | null = null;
   if (summaryId) {
     institutionId = await resolveInstitutionViaRpc(db, "summaries", summaryId);
+    if (!institutionId) return err(c, "Summary not found", 404);
   }
   if (!institutionId && topicId) {
     institutionId = await resolveInstitutionViaRpc(db, "topics", topicId);
+    if (!institutionId) return err(c, "Topic not found", 404);
   }
   if (!institutionId) {
     const { data: membership } = await db
