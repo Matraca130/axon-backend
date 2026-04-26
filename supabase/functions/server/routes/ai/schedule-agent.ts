@@ -164,12 +164,15 @@ RESPONDE EXCLUSIVAMENTE en JSON valido sin markdown.`;
 
 function buildUserMessage(
   action: ScheduleAction,
-  studentProfile: Record<string, unknown>,
   dbContext: DbStudentContext,
   planContext?: Record<string, unknown>,
   completedTaskId?: string,
 ): string {
-  const profileStr = JSON.stringify(studentProfile);
+  // NOTE: The frontend-supplied `studentProfile` is intentionally NOT injected
+  // into the prompt. It is user-controlled and was a prompt-injection vector
+  // that influenced AI-generated DB operations in the `organize` action (#643).
+  // The `dbContext` below is fetched server-side from trusted tables and
+  // already carries the same mastery/activity signals.
 
   const contextBlock = `
 == DATOS REALES DEL ESTUDIANTE (base de datos) ==
@@ -204,18 +207,12 @@ ${JSON.stringify(planContext ?? {})}
 
 ${contextBlock}
 
-Perfil del alumno (frontend):
-${profileStr}
-
 Responde con JSON: { "schedule": [ { "day": "lunes", "blocks": [ { "startTime": "08:00", "duration_min": 30, "taskType": "flashcard"|"quiz"|"read"|"review", "topicId": "...", "topicName": "...", "reason": "..." } ] } ], "totalHours": number, "tips": ["..."] }`;
 
     case "recommend-today":
       return `Recomienda que estudiar hoy para este alumno de medicina.
 
 ${contextBlock}
-
-Perfil del alumno (frontend):
-${profileStr}
 
 IMPORTANTE: Toma en cuenta las tareas que YA tiene pendientes para hoy. No dupliques lo que ya esta programado. Si tiene tareas para hoy, prioriza esas. Si ya completo algunas, sugiere las siguientes. Si no tiene plan, recomienda basandote en sus temas debiles y mastery.
 
@@ -229,18 +226,12 @@ ${JSON.stringify(planContext ?? {})}
 
 ${contextBlock}
 
-Perfil del alumno (frontend):
-${profileStr}
-
 Responde con JSON: { "updatedSchedule": [ { "day": "...", "blocks": [ { "startTime": "...", "duration_min": number, "taskType": "...", "topicId": "...", "topicName": "...", "reason": "..." } ] } ], "adjustmentReason": "...", "nextPriority": "..." }`;
 
     case "weekly-insight":
       return `Genera un analisis semanal del progreso de este alumno de medicina.
 
 ${contextBlock}
-
-Perfil del alumno (frontend):
-${profileStr}
 
 Responde con JSON: { "weekSummary": "...", "strengths": ["..."], "weaknesses": ["..."], "masteryTrend": "improving"|"stable"|"declining", "recommendedFocus": [ { "topicName": "...", "reason": "...", "suggestedMethod": "..." } ], "estimatedWeeklyProgress": number }`;
 
@@ -253,9 +244,6 @@ Responde con JSON: { "weekSummary": "...", "strengths": ["..."], "weaknesses": [
 4. UPDATE: Cambiar metodo de estudio o duracion estimada
 
 ${contextBlock}
-
-Perfil del alumno (frontend):
-${profileStr}
 
 INSTRUCCIONES:
 - Analiza TODAS las tareas pendientes
@@ -500,9 +488,11 @@ aiScheduleAgentRoutes.post(`${PREFIX}/ai/schedule-agent`, async (c: Context) => 
   }
 
   // -- Build prompt and call Claude
+  // NOTE: `studentProfile` from the request body is intentionally NOT passed
+  // to the prompt builder — it's user-controlled and was a prompt-injection
+  // vector (#643). Trusted state comes from `dbContext` (server-side fetch).
   const userMessage = buildUserMessage(
     action as ScheduleAction,
-    studentProfile,
     dbContext,
     planContext,
     completedTaskId,
