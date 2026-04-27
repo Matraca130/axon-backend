@@ -50,7 +50,9 @@ aiWeeklyReportRoutes.get(`${PREFIX}/ai/weekly-report`, async (c: Context) => {
   if (isDenied(roleCheck)) return err(c, roleCheck.message, roleCheck.status as 400 | 403);
 
   const history = c.req.query("history") === "true";
-  const limit = Math.min(parseInt(c.req.query("limit") || "4", 10), 12);
+  let limit = parseInt(c.req.query("limit") || "4", 10);
+  if (isNaN(limit) || limit < 1) limit = 4;
+  if (limit > 12) limit = 12;
   const weekStart = formatDate(getCurrentWeekStart());
 
   if (history) {
