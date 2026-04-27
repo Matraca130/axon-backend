@@ -156,8 +156,13 @@ authRoutes.post(`${PREFIX}/signup`, async (c: Context) => {
     // Return user-friendly messages for common signup errors
     // instead of the generic "Signup failed" from safeErr
     const msg = authError.message?.toLowerCase() ?? "";
+    // SEC FIX (#675): Do not signal "already registered" with a distinct
+    // status/message — that lets an attacker enumerate registered emails
+    // with a single unauthenticated request. Collapse this case into the
+    // same generic 400 returned for invalid email format. The UI shows a
+    // generic "check your email" message regardless of outcome.
     if (msg.includes("already been registered") || msg.includes("already registered") || msg.includes("duplicate")) {
-      return c.json({ error: "Este email ya esta registrado. Intenta iniciar sesion." }, 409);
+      return err(c, "email must be a valid email address", 400);
     }
     if (msg.includes("rate limit") || msg.includes("too many")) {
       return c.json({ error: "Demasiados intentos. Intenta de nuevo mas tarde." }, 429);
