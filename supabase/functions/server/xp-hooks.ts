@@ -191,38 +191,38 @@ export function xpHookForReview(params: AfterWriteParams): void {
 }
 
 // --- Hook 2: Quiz Answer XP (G-008 FIX) ---
-export function xpHookForQuizAttempt(params: AfterWriteParams): void {
+// Returns a Promise so the caller can register it with `waitUntil`,
+// keeping the isolate alive until DB writes complete (issue #688).
+export async function xpHookForQuizAttempt(params: AfterWriteParams): Promise<void> {
   const { row, userId } = params;
   if (params.action !== "create") return;
-  (async () => {
-    try {
-      const isCorrect = row.is_correct === true;
-      const xpBase = isCorrect ? XP_TABLE.quiz_correct : XP_TABLE.quiz_answer;
-      const quizQuestionId = row.quiz_question_id as string;
-      if (!quizQuestionId) return;
-      // A-011 FIX: simplified return (no unused summaryId)
-      const institutionId = await resolveInstitutionFromQuizQuestion(quizQuestionId);
-      if (!institutionId) {
-        console.warn("[XP Hook] Could not resolve institution for quiz_question:", quizQuestionId);
-        return;
-      }
-      const bonus = await getBonusContext(userId);
-      const result = await awardXP({
-        db: getAdminClient(),
-        studentId: userId,
-        institutionId,
-        action: isCorrect ? "quiz_correct" : "quiz_answer",
-        xpBase,
-        sourceType: "quiz",
-        sourceId: row.id as string,
-        currentStreak: bonus.currentStreak,
-      });
-      // Post-award badge evaluation (advisory-lock protected)
-      if (result) postAwardEvaluation(userId, institutionId);
-    } catch (e) {
-      console.warn("[XP Hook] quiz error:", (e as Error).message);
+  try {
+    const isCorrect = row.is_correct === true;
+    const xpBase = isCorrect ? XP_TABLE.quiz_correct : XP_TABLE.quiz_answer;
+    const quizQuestionId = row.quiz_question_id as string;
+    if (!quizQuestionId) return;
+    // A-011 FIX: simplified return (no unused summaryId)
+    const institutionId = await resolveInstitutionFromQuizQuestion(quizQuestionId);
+    if (!institutionId) {
+      console.warn("[XP Hook] Could not resolve institution for quiz_question:", quizQuestionId);
+      return;
     }
-  })();
+    const bonus = await getBonusContext(userId);
+    const result = await awardXP({
+      db: getAdminClient(),
+      studentId: userId,
+      institutionId,
+      action: isCorrect ? "quiz_correct" : "quiz_answer",
+      xpBase,
+      sourceType: "quiz",
+      sourceId: row.id as string,
+      currentStreak: bonus.currentStreak,
+    });
+    // Post-award badge evaluation (advisory-lock protected)
+    if (result) postAwardEvaluation(userId, institutionId);
+  } catch (e) {
+    console.warn("[XP Hook] quiz error:", (e as Error).message);
+  }
 }
 
 // --- Hook 3: Study Session Complete XP ---
