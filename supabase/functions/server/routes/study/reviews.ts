@@ -220,8 +220,18 @@ reviewRoutes.post(`${PREFIX}/quiz-attempts`, async (c: Context) => {
 
   // Sprint 1: Fire-and-forget XP hook (contract §4.3)
   // quiz_attempts has summary_id via quiz_question → resolves institution internally.
+  // Issue #688: register with waitUntil so the isolate doesn't tear down
+  // before the XP/badge DB writes complete after the response is flushed.
   try {
-    xpHookForQuizAttempt({ action: "create", row: data, userId: user.id });
+    const hookPromise = xpHookForQuizAttempt({
+      action: "create",
+      row: data,
+      userId: user.id,
+    });
+    const ctx = c.executionCtx;
+    if (ctx && typeof ctx.waitUntil === "function") {
+      ctx.waitUntil(hookPromise);
+    }
   } catch (hookErr) {
     console.error("[XP Hook] quiz-attempt setup error:", (hookErr as Error).message);
   }
