@@ -191,10 +191,15 @@ export async function processNextJob(): Promise<boolean> {
   try {
     await executeJob(job.payload);
 
-    await db
+    // Issue #686: surface DB errors so the job is not orphaned in `processing`.
+    const { error: doneErr } = await db
       .from("whatsapp_jobs")
       .update({ status: "done", processed_at: new Date().toISOString() })
       .eq("id", job.id);
+    if (doneErr) {
+      console.error(`[WA-Queue] Failed to mark job ${job.id} done: ${doneErr.message}`);
+      throw new Error(`Status update failed: ${doneErr.message}`);
+    }
 
     console.warn(`[WA-Queue] Job ${job.id} completed: ${job.payload.type}`);
     return true;
@@ -203,7 +208,7 @@ export async function processNextJob(): Promise<boolean> {
     const newAttempts = job.attempts + 1;
 
     if (newAttempts >= job.max_attempts) {
-      await db
+      const { error: failedErr } = await db
         .from("whatsapp_jobs")
         .update({
           status: "failed",
@@ -211,6 +216,9 @@ export async function processNextJob(): Promise<boolean> {
           processed_at: new Date().toISOString(),
         })
         .eq("id", job.id);
+      if (failedErr) {
+        console.error(`[WA-Queue] Failed to mark job ${job.id} as failed (orphan risk): ${failedErr.message}`);
+      }
 
       // C1 FIX: Decrypt phone for error notification
       try {
@@ -223,13 +231,16 @@ export async function processNextJob(): Promise<boolean> {
 
       console.error(`[WA-Queue] Job ${job.id} failed permanently: ${errorMsg}`);
     } else {
-      await db
+      const { error: retryErr } = await db
         .from("whatsapp_jobs")
         .update({
           status: "pending",
           error_message: `Attempt ${newAttempts}: ${errorMsg.slice(0, 300)}`,
         })
         .eq("id", job.id);
+      if (retryErr) {
+        console.error(`[WA-Queue] Failed to requeue job ${job.id} (orphan risk): ${retryErr.message}`);
+      }
 
       console.warn(`[WA-Queue] Job ${job.id} failed (attempt ${newAttempts}/${job.max_attempts}): ${errorMsg}`);
     }
