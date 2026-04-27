@@ -601,8 +601,11 @@ aiScheduleAgentRoutes.get(`${PREFIX}/ai/schedule-logs`, async (c: Context) => {
     }
   }
 
-  const limit = Math.min(parseInt(c.req.query("limit") || "50", 10), 200);
-  const offset = Math.max(parseInt(c.req.query("offset") || "0", 10), 0);
+  let limit = parseInt(c.req.query("limit") || "50", 10);
+  if (isNaN(limit) || limit < 1) limit = 50;
+  if (limit > 200) limit = 200;
+  let offset = parseInt(c.req.query("offset") || "0", 10);
+  if (isNaN(offset) || offset < 0) offset = 0;
 
   let query = db
     .from("ai_schedule_logs")
