@@ -119,10 +119,16 @@ export async function processNextJob(): Promise<boolean> {
   try {
     await executeJob(job.payload);
 
-    await db
+    const { error: doneErr } = await db
       .from("whatsapp_jobs")
       .update({ status: "done", processed_at: new Date().toISOString() })
       .eq("id", job.id);
+
+    if (doneErr) {
+      // Throw so the outer catch can mark the job for retry instead of
+      // leaving it stuck in processing.
+      throw new Error(`Status update to done failed: ${doneErr.message}`);
+    }
 
     console.warn(`[TG-Queue] Job ${job.id} completed: ${job.payload.type}`);
     return true;
@@ -131,7 +137,7 @@ export async function processNextJob(): Promise<boolean> {
     const newAttempts = job.attempts + 1;
 
     if (newAttempts >= job.max_attempts) {
-      await db
+      const { error: failErr } = await db
         .from("whatsapp_jobs")
         .update({
           status: "failed",
@@ -139,6 +145,14 @@ export async function processNextJob(): Promise<boolean> {
           processed_at: new Date().toISOString(),
         })
         .eq("id", job.id);
+
+      if (failErr) {
+        // Job is now stuck in processing — log loudly for ops visibility.
+        console.error(
+          `[TG-Queue] CRITICAL: Job ${job.id} stuck in processing; ` +
+          `failed to mark as failed: ${failErr.message} (original error: ${errorMsg})`,
+        );
+      }
 
       // Best-effort error notification
       try {
@@ -150,7 +164,7 @@ export async function processNextJob(): Promise<boolean> {
 
       console.error(`[TG-Queue] Job ${job.id} failed permanently: ${errorMsg}`);
     } else {
-      await db
+      const { error: retryErr } = await db
         .from("whatsapp_jobs")
         .update({
           status: "pending",
@@ -158,7 +172,15 @@ export async function processNextJob(): Promise<boolean> {
         })
         .eq("id", job.id);
 
-      console.warn(`[TG-Queue] Job ${job.id} failed (attempt ${newAttempts}/${job.max_attempts}): ${errorMsg}`);
+      if (retryErr) {
+        // Job is now stuck in processing — log loudly for ops visibility.
+        console.error(
+          `[TG-Queue] CRITICAL: Job ${job.id} stuck in processing; ` +
+          `failed to reset to pending: ${retryErr.message} (original error: ${errorMsg})`,
+        );
+      } else {
+        console.warn(`[TG-Queue] Job ${job.id} failed (attempt ${newAttempts}/${job.max_attempts}): ${errorMsg}`);
+      }
     }
 
     return true;
