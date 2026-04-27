@@ -365,14 +365,30 @@ batchReviewRoutes.post(`${PREFIX}/review-batch`, async (c: Context) => {
     }, 500);
   }
 
-  // ── 7. Fire-and-forget XP hook ───────────────────────────
+  // ── 7. XP hook (registered with waitUntil) ───────────────
   // PR #99: xpHookForBatchReviews awards per-review XP after successful
   // batch processing. Only fires if at least 1 review was queued.
+  //
+  // Issue #687: register the hook's promise with the runtime's
+  // `waitUntil` (Deno Deploy / Workers) so the isolate keeps the
+  // async XP/stat work alive past HTTP response emission. If the
+  // runtime doesn't expose executionCtx (some local/test contexts),
+  // we fall back to the prior fire-and-forget behavior.
   if (computed.successfulReviews.length > 0) {
+    const xpPromise = xpHookForBatchReviews(
+      user.id,
+      sessionId,
+      computed.successfulReviews,
+    ).catch((hookErr) => {
+      console.error("[XP Hook] batch review error:", (hookErr as Error).message);
+    });
     try {
-      xpHookForBatchReviews(user.id, sessionId, computed.successfulReviews);
-    } catch (hookErr) {
-      console.error("[XP Hook] batch review setup error:", (hookErr as Error).message);
+      const ctx = c.executionCtx;
+      if (ctx && typeof ctx.waitUntil === "function") {
+        ctx.waitUntil(xpPromise);
+      }
+    } catch {
+      // No executionCtx on this runtime — promise still runs in background.
     }
   }
 

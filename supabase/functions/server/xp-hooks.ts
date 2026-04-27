@@ -291,65 +291,68 @@ export function xpHookForReadingComplete(params: AfterWriteParams): void {
 // --- Hook 5: Batch Review XP ---
 // A-013 NOTE: Uses shared bonus context to avoid N+1.
 // Per-card FSRS/BKT bonus only fetched for flashcard instrument_type.
-export function xpHookForBatchReviews(
+//
+// Returns Promise<void> so callers can register with the runtime's
+// `waitUntil` (Deno Deploy / Workers). If the promise is dropped by a
+// caller, the isolate may tear down before XP awards / stat increments
+// complete — see issue #687.
+export async function xpHookForBatchReviews(
   userId: string,
   sessionId: string,
   reviews: Array<{ item_id: string; grade: number; instrument_type: string }>,
-): void {
-  (async () => {
-    try {
-      const institutionId = await resolveInstitutionFromSession(sessionId);
-      if (!institutionId) {
-        console.warn("[XP Hook] Could not resolve institution for batch session:", sessionId);
-        return;
-      }
-      const db = getAdminClient();
-      // Shared bonus (streak) fetched once for all reviews
-      const sharedBonus = await getBonusContext(userId);
-
-      // Process in chunks of 10 to avoid overwhelming DB
-      const CHUNK_SIZE = 10;
-      for (let i = 0; i < reviews.length; i += CHUNK_SIZE) {
-        const chunk = reviews.slice(i, i + CHUNK_SIZE);
-        const promises = chunk.map(async (review) => {
-          try {
-            const isCorrect = review.grade >= 3;
-            const xpBase = isCorrect ? XP_TABLE.review_correct : XP_TABLE.review_flashcard;
-
-            // Only fetch per-card bonus for flashcards (FSRS/BKT context)
-            let reviewBonus = sharedBonus;
-            if (review.instrument_type === "flashcard") {
-              try {
-                reviewBonus = await getBonusContext(userId, review.item_id);
-              } catch { /* fallback to shared */ }
-            }
-
-            await awardXP({
-              db,
-              studentId: userId,
-              institutionId,
-              action: isCorrect ? "review_correct" : "review_flashcard",
-              xpBase,
-              sourceType: review.instrument_type,
-              sourceId: review.item_id,
-              ...reviewBonus,
-            });
-          } catch (e) {
-            console.warn(`[XP Hook] batch review item ${review.item_id} error:`, (e as Error).message);
-          }
-        });
-        await Promise.all(promises);
-      }
-
-      // D-4: Increment total_reviews for badge criteria evaluation
-      // Single increment for the whole batch (more efficient than per-review)
-      await _incrementStudentStat(userId, "total_reviews", reviews.length);
-      // Post-award badge evaluation once for entire batch (advisory-lock protected)
-      postAwardEvaluation(userId, institutionId);
-    } catch (e) {
-      console.warn("[XP Hook] batch reviews error:", (e as Error).message);
+): Promise<void> {
+  try {
+    const institutionId = await resolveInstitutionFromSession(sessionId);
+    if (!institutionId) {
+      console.warn("[XP Hook] Could not resolve institution for batch session:", sessionId);
+      return;
     }
-  })();
+    const db = getAdminClient();
+    // Shared bonus (streak) fetched once for all reviews
+    const sharedBonus = await getBonusContext(userId);
+
+    // Process in chunks of 10 to avoid overwhelming DB
+    const CHUNK_SIZE = 10;
+    for (let i = 0; i < reviews.length; i += CHUNK_SIZE) {
+      const chunk = reviews.slice(i, i + CHUNK_SIZE);
+      const promises = chunk.map(async (review) => {
+        try {
+          const isCorrect = review.grade >= 3;
+          const xpBase = isCorrect ? XP_TABLE.review_correct : XP_TABLE.review_flashcard;
+
+          // Only fetch per-card bonus for flashcards (FSRS/BKT context)
+          let reviewBonus = sharedBonus;
+          if (review.instrument_type === "flashcard") {
+            try {
+              reviewBonus = await getBonusContext(userId, review.item_id);
+            } catch { /* fallback to shared */ }
+          }
+
+          await awardXP({
+            db,
+            studentId: userId,
+            institutionId,
+            action: isCorrect ? "review_correct" : "review_flashcard",
+            xpBase,
+            sourceType: review.instrument_type,
+            sourceId: review.item_id,
+            ...reviewBonus,
+          });
+        } catch (e) {
+          console.warn(`[XP Hook] batch review item ${review.item_id} error:`, (e as Error).message);
+        }
+      });
+      await Promise.all(promises);
+    }
+
+    // D-4: Increment total_reviews for badge criteria evaluation
+    // Single increment for the whole batch (more efficient than per-review)
+    await _incrementStudentStat(userId, "total_reviews", reviews.length);
+    // Post-award badge evaluation once for entire batch (advisory-lock protected)
+    postAwardEvaluation(userId, institutionId);
+  } catch (e) {
+    console.warn("[XP Hook] batch reviews error:", (e as Error).message);
+  }
 }
 
 // --- Hook 6: Video Complete XP ---
