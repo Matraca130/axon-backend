@@ -295,11 +295,29 @@ authRoutes.put(`${PREFIX}/me`, async (c: Context) => {
   const body = await safeJson(c);
   if (!body) return err(c, "Invalid or missing JSON body", 400);
 
-  const allowedFields = ["full_name", "avatar_url"];
   const patch: Record<string, unknown> = {};
 
-  for (const f of allowedFields) {
-    if (body[f] !== undefined) patch[f] = body[f];
+  if (body.full_name !== undefined) {
+    if (typeof body.full_name !== "string" || body.full_name.length > 255) {
+      return err(c, "full_name must be a string ≤ 255 characters", 400);
+    }
+    patch.full_name = body.full_name;
+  }
+
+  if (body.avatar_url !== undefined) {
+    if (typeof body.avatar_url !== "string" || body.avatar_url.length > 2048) {
+      return err(c, "avatar_url must be a string ≤ 2048 characters", 400);
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(body.avatar_url);
+    } catch {
+      return err(c, "avatar_url must be a valid URL", 400);
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      return err(c, "avatar_url must use http or https", 400);
+    }
+    patch.avatar_url = body.avatar_url;
   }
 
   if (Object.keys(patch).length === 0) {
