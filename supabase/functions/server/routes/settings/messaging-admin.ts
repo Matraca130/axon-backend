@@ -245,13 +245,16 @@ export async function testMessagingConnection(c: Context): Promise<Response> {
   if (isDenied(check)) return err(c, check.message, check.status);
 
   const db = getAdminClient();
-  const { data } = await db
+  const { data, error: settingsErr } = await db
     .from("messaging_admin_settings")
     .select("settings")
     .eq("institution_id", institutionId)
     .eq("channel", channel)
-    .single();
+    .maybeSingle();
 
+  if (settingsErr) {
+    return safeErr(c, "Fetch messaging settings", settingsErr);
+  }
   if (!data?.settings) {
     return err(c, `${channel} no está configurado.`, 400);
   }
