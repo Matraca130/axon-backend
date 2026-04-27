@@ -22,7 +22,9 @@ Deno.test({
     // /health does NOT require auth — uses c.json() directly (no { data } wrapper)
     assertStatus(r, 200);
     assertEquals((r.raw as any).status, "ok");
-    assert(typeof (r.raw as any).version === "string", "health must include version");
+    // #678: unauthenticated /health must not leak version or service config.
+    assertEquals((r.raw as any).version, undefined);
+    assertEquals((r.raw as any).services, undefined);
   },
 });
 

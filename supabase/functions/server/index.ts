@@ -132,22 +132,12 @@ app.use("*", compress());
 app.use("*", rateLimitMiddleware);
 
 // ─── Health Check ────────────────────────────────────────────────
-// PF-10 FIX: Added gemini status (does NOT expose the actual key)
-// D57: Added openai status for embedding migration
+// Unauthenticated; returns only liveness. Do not expose version, build
+// timestamps, or which integrations are configured — that's reconnaissance
+// aid for unauthenticated callers (#678).
 
 app.get(`${PREFIX}/health`, (c) => {
-  return c.json({
-    status: "ok",
-    version: "4.5",
-    timestamp: new Date().toISOString(),
-    services: {
-      gemini: !!Deno.env.get("GEMINI_API_KEY"),
-      openai: !!Deno.env.get("OPENAI_API_KEY"),
-      claude: !!Deno.env.get("ANTHROPIC_API_KEY"),
-      whatsapp: Deno.env.get("WHATSAPP_ENABLED") === "true",
-      telegram: Deno.env.get("TELEGRAM_ENABLED") === "true",
-    },
-  });
+  return c.json({ status: "ok" });
 });
 
 // ─── Mount Route Modules ─────────────────────────────────────────
